@@ -194,6 +194,8 @@ public:
   virtual HRESULT Present(Presenter *presenter, ID3D12Resource *backbuffer, HANDLE hLantecyWaitable, double after) = 0;
   // Matched-build controlled probe only; no public COM ABI or ordinary caller.
   // Caller serializes resource preparation and retains the queue for this call.
+  // S_OK transfers intent, not native success. Resolution/issue follow prior
+  // FIFO work; deferred failures remove the device and retain issued prefixes.
   virtual HRESULT SubmitSparsePlanForTesting(
       std::unique_ptr<D3D12SparseBufferMappingPlan> &plan, WMT::Event gate, UINT terminal_flags, UINT issue_limit,
       HANDLE issued, HANDLE resume

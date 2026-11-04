@@ -68,7 +68,11 @@ and does not justify another unchanged local MS_LOAD or Submit timing matrix.
   [implementation delivery](sparse-handoff-retirement-audit.md#controlled-admission-time-buffer-mapping-resolution--delivery-2026-11-05).
   A subsequent two-queue audit proves future CPU remaps can violate native
   copy order, and later producers can leave logical/native mappings unequal.
-  Both remain OPEN; a deferred-issue Design Card uses the existing bounded FIFO.
+  Those failures are retained as red evidence. Deferred controlled issue now
+  resolves and emits mappings after existing FIFO predecessors; both native
+  order and logical equality pass the two-seed cross-queue matrix. Public
+  activation, mixed legacy ownership, texture plans and production performance
+  remain OPEN. See [deferred delivery](sparse-handoff-retirement-audit.md#deferred-controlled-buffer-mapping-issue--delivery-2026-11-05).
   See [cross-queue audit](sparse-handoff-retirement-audit.md#cross-queue-mapping-publication-and-native-copy--n15-audit-2026-11-05).
 
 - [x] N09 typed-buffer format admission rejects unsupported native SRV/UAV

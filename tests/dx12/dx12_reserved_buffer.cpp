@@ -273,6 +273,190 @@ int CheckSparseMappingPayload(const char *mode, uint32_t seed) {
   MTLCommandBuffer_waitUntilCompleted(init);
   require(MTLCommandBuffer_status(init) == WMTCommandBufferStatusCompleted,
           "init failed");
+  if (!std::strncmp(mode, "plan-cross-", 11)) {
+    const bool forward = !std::strcmp(mode, "plan-cross-forward"),
+               future = !std::strcmp(mode, "plan-cross-future"),
+               completed = !std::strcmp(mode, "plan-cross-completed"),
+               wrong = !std::strcmp(mode, "plan-cross-wrong");
+    ID3D12CommandQueue *pub[2] = {};
+    MTLD3D12CommandQueue *q[2] = {};
+    D3D12_COMMAND_QUEUE_DESC qd = {};
+    for (unsigned i = 0; i < 2; ++i) {
+      require(SUCCEEDED(public_device->CreateCommandQueue(
+                  &qd, IID_PPV_ARGS(&pub[i]))),
+              "cross queue");
+      q[i] = static_cast<MTLD3D12CommandQueue *>(pub[i]);
+    }
+    Owned<ID3D12Fence> ready, copied, producer_done;
+    for (auto f : {&ready, &copied, &producer_done})
+      require(SUCCEEDED(public_device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                                   IID_PPV_ARGS(&f->ptr))),
+              "cross fence");
+    auto gate = metal.newSharedEvent();
+    require(gate != nullptr, "cross gate");
+    struct ReleaseGate {
+      decltype(gate) gate_ref;
+      ~ReleaseGate() { gate_ref.signalValue(1); }
+    } release_gate{gate};
+    auto update = [&](unsigned resource, unsigned heap) {
+      std::unique_ptr<D3D12SparseBufferMappingPlan> p;
+      require(SUCCEEDED(resources[resource]->PrepareBufferTileUpdate(
+                  1, &start, &region, public_heaps[heap], 1, nullptr, &offset,
+                  &count, D3D12_TILE_MAPPING_FLAG_NONE, p)),
+              "cross update prepare");
+      return p;
+    };
+    auto initial = update(0, 0), target = update(1, 2), later = update(0, 2);
+    std::unique_ptr<D3D12SparseBufferMappingPlan> copy;
+    auto copy_size = region;
+    copy_size.NumTiles = 2;
+    require(SUCCEEDED(resources[1]->PrepareBufferTileCopy(
+                resources[0], &start, &start, &copy_size,
+                D3D12_TILE_MAPPING_FLAG_NONE, copy)),
+            "cross copy prepare");
+    SetEnvironmentVariableA("DXMT_TEST_SPARSE_SUBMISSION", "1");
+    LARGE_INTEGER frequency, started, finished;
+    QueryPerformanceFrequency(&frequency);
+    QueryPerformanceCounter(&started);
+    double admission_us = 0;
+    unsigned admissions = 0;
+    auto submit = [&](unsigned which, auto &p) {
+      LARGE_INTEGER begin, end;
+      QueryPerformanceCounter(&begin);
+      require(SUCCEEDED(q[which]->SubmitSparsePlanForTesting(
+                  p, gate, 1, UINT_MAX, nullptr, nullptr)) &&
+                  !p,
+              "cross submit");
+      QueryPerformanceCounter(&end);
+      admission_us +=
+          (end.QuadPart - begin.QuadPart) * 1e6 / frequency.QuadPart;
+      ++admissions;
+    };
+    auto wait_cpu = [&](ID3D12Fence *f) {
+      HANDLE ev = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+      require(ev && SUCCEEDED(f->SetEventOnCompletion(1, ev)) &&
+                  WaitForSingleObject(ev, 10000) == WAIT_OBJECT_0,
+              "cross completion");
+      CloseHandle(ev);
+    };
+    submit(0, initial);
+    submit(1, target);
+    if (!forward)
+      require(SUCCEEDED(q[0]->Signal(ready.ptr, 1)), "producer ready signal");
+    if (completed) {
+      submit(0, later);
+      require(SUCCEEDED(q[0]->Signal(producer_done.ptr, 1)),
+              "completed source signal");
+      gate.signalValue(1);
+      wait_cpu(producer_done.ptr);
+    } else if (future) {
+      require(SUCCEEDED(q[0]->Wait(copied.ptr, 1)), "future remap wait");
+      submit(0, later);
+      require(SUCCEEDED(q[0]->Signal(producer_done.ptr, 1)),
+              "future remap signal");
+    }
+    require(SUCCEEDED(q[1]->Wait(ready.ptr, 1)), "consumer source wait");
+    submit(1, copy);
+    require(SUCCEEDED(q[1]->Signal(copied.ptr, 1)), "consumer copied signal");
+    if (forward) {
+      submit(0, later);
+      require(SUCCEEDED(q[0]->Signal(ready.ptr, 1)) &&
+                  SUCCEEDED(q[0]->Signal(producer_done.ptr, 1)),
+              "forward producer signals");
+    } else if (!future && !completed) {
+      require(SUCCEEDED(q[0]->Wait(copied.ptr, 1)), "control future wait");
+      submit(0, later);
+      require(SUCCEEDED(q[0]->Signal(producer_done.ptr, 1)),
+              "control source signal");
+    }
+    if (!completed)
+      require(ready->GetCompletedValue() == 0 &&
+                  copied->GetCompletedValue() == 0 &&
+                  producer_done->GetCompletedValue() == 0,
+              "cross gate completed early");
+    std::printf("CROSS_QUEUE_PENDING mode=%s logical_heap=%u "
+                "expected_native_heap=%u future_cpu=%u\n",
+                mode, 99u, (completed || forward) ? 2u : 0u, future);
+    gate.signalValue(1);
+    wait_cpu(copied.ptr);
+    wait_cpu(producer_done.ptr);
+    QueryPerformanceCounter(&finished);
+    std::printf("CROSS_QUEUE_COST admissions=%u admission_us=%.3f "
+                "total_us=%.3f validation=1\n",
+                admissions, admission_us,
+                (finished.QuadPart - started.QuadPart) * 1e6 /
+                    frequency.QuadPart);
+    WMT::Buffer logical;
+    UINT64 at = UINT64_MAX;
+    require(SUCCEEDED(resources[1]->GetTileMapping(0, logical, at)) && !at,
+            "cross logical get");
+    const unsigned logical_heap =
+        logical.handle == heaps[0]->GetTileBackingBuffer().handle   ? 0
+        : logical.handle == heaps[2]->GetTileBackingBuffer().handle ? 2
+                                                                    : 99;
+    const bool identity_bad =
+        logical_heap != ((forward || completed) ? 2u : 0u);
+    for (auto p : pub)
+      p->Release();
+    std::fill(out, out + 2 * words + guards, 0xa5a55a5au);
+    auto read = MTLCommandQueue_commandBuffer(classic.handle);
+    auto re = MTLCommandBuffer_blitCommandEncoder(read);
+    require(read && re, "cross read objects");
+    blit(re, source.handle, output.handle, 0);
+    blit(re, dest.handle, output.handle, bytes);
+    MTLCommandEncoder_endEncoding(re);
+    MTLCommandBuffer_commit(read);
+    MTLCommandBuffer_waitUntilCompleted(read);
+    require(MTLCommandBuffer_status(read) == WMTCommandBufferStatusCompleted,
+            "cross read completion");
+    unsigned bad = 0, logical_bad = 0, guard = 0;
+    for (unsigned n = 0; n < 2; ++n)
+      for (uint64_t w = 0; w < words; ++w) {
+        const unsigned h =
+            !n || w >= 2 * page_words || completed || forward ? 1 : 0;
+        auto want = pattern(h, w);
+        if (wrong && n && w == 1)
+          want ^= 1;
+        bad += out[n * words + w] != want;
+        if (n && w < 2 * page_words)
+          logical_bad +=
+              out[words + w] != pattern(logical_heap == 2 ? 1 : 0, w);
+      }
+    for (uint64_t w = 2 * words; w < 2 * words + guards; ++w)
+      guard += out[w] != 0xa5a55a5au;
+    unsigned src_a = 0, src_b = 0, dst_a = 0, dst_b = 0;
+    for (uint64_t w = 0; w < 2 * page_words; ++w) {
+      src_a += out[w] != pattern(0, w);
+      src_b += out[w] != pattern(1, w);
+      dst_a += out[words + w] != pattern(0, w);
+      dst_b += out[words + w] != pattern(1, w);
+    }
+    std::printf("CROSS_QUEUE_DIAGNOSTIC bad=%u guard=%u logical_bad=%u "
+                "src_a=%u src_b=%u dst_a=%u dst_b=%u first_src=%x first_dst=%x "
+                "want_a=%x want_b=%x\n",
+                bad, guard, logical_bad, src_a, src_b, dst_a, dst_b, out[0],
+                out[words], pattern(0, 0), pattern(1, 0));
+    const bool semantic_failure =
+        bad != unsigned(wrong) || logical_bad || identity_bad;
+    require(!guard, "cross readback guard");
+    // Keep strict queue-order mismatch distinct from a passing implementation.
+    // Exact diagnostic counts below identify the observed mapping; none is
+    // accepted silently.
+
+    std::printf("CROSS_QUEUE_READBACK mode=%s words=%llu native_bad=%u "
+                "guard=%u logical_mismatches=%u\n",
+                mode, (unsigned long long)(2 * words), bad, guard, logical_bad);
+    for (auto p : public_resources)
+      p->Release();
+    for (auto h : public_heaps)
+      h->Release();
+    require(deaths() == 5, "cross final owners");
+    public_device->Release();
+    std::printf("CROSS_QUEUE_RESULT seed=%u mode=%s queue_order_failure=%u "
+                "destroyed=5 drained=1 negative=%u\n",
+                seed, mode, semantic_failure, wrong);
+    return semantic_failure ? 2 : wrong ? 1 : 0;
+  }
   if (!std::strncmp(mode, "plan-queue", 10)) {
     const bool generation = !std::strncmp(mode, "plan-queue-generation", 21),
                generation_aba = !std::strcmp(mode, "plan-queue-generation-aba"),
@@ -284,7 +468,8 @@ int CheckSparseMappingPayload(const char *mode, uint32_t seed) {
                    !std::strcmp(mode, "plan-queue-generation-failure") ||
                    !std::strcmp(mode, "plan-queue-generation-failure-late");
     const bool partial = !std::strcmp(mode, "plan-queue-partial"),
-               rejected = !std::strcmp(mode, "plan-queue-rejected"),
+               rejected = !std::strcmp(mode, "plan-queue-rejected") ||
+                          !std::strcmp(mode, "plan-queue-barrier-failure"),
                capacity_removal =
                    !std::strcmp(mode, "plan-queue-capacity-removal"),
                removal = !std::strcmp(mode, "plan-queue-removal"),
@@ -352,13 +537,51 @@ int CheckSparseMappingPayload(const char *mode, uint32_t seed) {
                       initial, gate, terminal, UINT_MAX, nullptr, nullptr)),
               "initial destination native mapping");
     }
+    if (!std::strcmp(mode, "plan-queue-cancel")) {
+      require(SUCCEEDED(queue->Wait(unblock.ptr, 1)),
+              "unissued predecessor wait");
+      for (auto &plan : plans)
+        require(SUCCEEDED(queue->SubmitSparsePlanForTesting(
+                    plan, gate, terminal, UINT_MAX, nullptr, nullptr)) &&
+                    !plan,
+                "unissued intent admission");
+      require(fence->GetCompletedValue() == 0 && !deaths(),
+              "unissued pending owners");
+      device->MarkDeviceRemoved(DXGI_ERROR_DEVICE_REMOVED);
+      public_queue->Release();
+      WMT::Buffer unchanged;
+      UINT64 unchanged_offset = UINT64_MAX;
+      require(SUCCEEDED(resources[1]->GetTileMapping(0, unchanged,
+                                                     unchanged_offset)) &&
+                  !unchanged_offset &&
+                  unchanged.handle == heaps[1]->GetTileBackingBuffer().handle &&
+                  fence->GetCompletedValue() == UINT64_MAX,
+              "cancelled intent changed state");
+      for (auto r : public_resources)
+        r->Release();
+      for (auto h : public_heaps)
+        h->Release();
+      require(deaths() == 5, "cancelled intent owners");
+      std::printf("QUEUE_PLAN_CANCEL admitted=3 issued=0 unchanged=1 removed=1 "
+                  "destroyed=5 drained=1\n");
+      public_device->Release();
+      return 0;
+    }
     if (prepare_fail) {
-      require(queue->SubmitSparsePlanForTesting(plans[0], gate, terminal,
-                                                UINT_MAX, nullptr,
-                                                nullptr) == E_OUTOFMEMORY &&
-                  plans[0] &&
-                  SUCCEEDED(public_device->GetDeviceRemovedReason()),
-              "queue prepare failure");
+      require(SUCCEEDED(queue->SubmitSparsePlanForTesting(
+                  plans[0], gate, terminal, UINT_MAX, nullptr, nullptr)) &&
+                  !plans[0],
+              "deferred prepare admission");
+      HANDLE removed = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+      require(removed &&
+                  SUCCEEDED(fence->SetEventOnCompletion(UINT64_MAX, removed)),
+              "prepare removal event");
+      gate.signalValue(1);
+      require(WaitForSingleObject(removed, 10000) == WAIT_OBJECT_0 &&
+                  FAILED(public_device->GetDeviceRemovedReason()) &&
+                  fence->GetCompletedValue() == UINT64_MAX,
+              "deferred prepare failure");
+      CloseHandle(removed);
       plans = {};
       public_queue->Release();
       for (auto r : public_resources)
@@ -366,7 +589,8 @@ int CheckSparseMappingPayload(const char *mode, uint32_t seed) {
       for (auto h : public_heaps)
         h->Release();
       require(deaths() == 5, "queue prepare cleanup");
-      std::printf("QUEUE_PLAN_PREPARE_FAILURE calls=0 destroyed=5 removed=0\n");
+      std::printf("QUEUE_PLAN_PREPARE_FAILURE calls=0 destroyed=5 removed=1 "
+                  "admitted=1 drained=1\n");
       public_device->Release();
       return 0;
     }
@@ -457,14 +681,50 @@ int CheckSparseMappingPayload(const char *mode, uint32_t seed) {
       SetEnvironmentVariableA(
           "DXMT_TEST_SPARSE_BUFFER_COPY_FAIL_AT",
           !std::strcmp(mode, "plan-queue-generation-failure-late") ? "2" : "1");
-      require(queue->SubmitSparsePlanForTesting(plans[2], gate, terminal,
-                                                UINT_MAX, nullptr,
-                                                nullptr) == E_OUTOFMEMORY &&
-                  plans[2] && SUCCEEDED(device->GetDeviceRemovedReason()),
-              "generation resolution allocation failure");
+      require(SUCCEEDED(queue->SubmitSparsePlanForTesting(
+                  plans[2], gate, terminal, UINT_MAX, nullptr, nullptr)) &&
+                  !plans[2],
+              "deferred resolution admission");
+      HANDLE removed = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+      require(removed &&
+                  SUCCEEDED(fence->SetEventOnCompletion(UINT64_MAX, removed)),
+              "resolution removal event");
+      gate.signalValue(1);
+      require(WaitForSingleObject(removed, 10000) == WAIT_OBJECT_0 &&
+                  FAILED(device->GetDeviceRemovedReason()),
+              "deferred resolution failure");
+      CloseHandle(removed);
+      public_queue->Release();
+      WMT::Buffer unchanged;
+      UINT64 unchanged_offset = UINT64_MAX;
+      require(SUCCEEDED(resources[1]->GetTileMapping(0, unchanged,
+                                                     unchanged_offset)) &&
+                  !unchanged_offset &&
+                  unchanged.handle == heaps[2]->GetTileBackingBuffer().handle,
+              "failed resolution published mapping");
       SetEnvironmentVariableA("DXMT_TEST_SPARSE_BUFFER_COPY_FAILURE", nullptr);
       SetEnvironmentVariableA("DXMT_TEST_SPARSE_BUFFER_COPY_FAIL_AT", nullptr);
-      std::printf("GENERATION_RETRY retained=1 removed=0 calls=0\n");
+      for (auto r : public_resources)
+        r->Release();
+      for (auto h : public_heaps)
+        h->Release();
+      require(deaths() == 5, "resolution cleanup");
+      std::printf("GENERATION_DEFERRED_FAILURE admitted=1 removed=1 "
+                  "copy_calls=0 unchanged=1 destroyed=5 drained=1\n");
+      public_device->Release();
+      return 0;
+    }
+    if (!std::strcmp(mode, "plan-queue-barrier-failure")) {
+      require(SUCCEEDED(queue->Signal(fence.ptr, 61)), "barrier setup signal");
+      gate.signalValue(1);
+      HANDLE setup = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+      require(setup && SUCCEEDED(fence->SetEventOnCompletion(61, setup)) &&
+                  WaitForSingleObject(setup, 10000) == WAIT_OBJECT_0,
+              "barrier setup drain");
+      CloseHandle(setup);
+      gate = metal.newSharedEvent();
+      require(gate != nullptr, "barrier failure gate");
+      SetEnvironmentVariableA("DXMT_TEST_SPARSE_BARRIER_FAILURE", "submitted");
     }
     HRESULT last = S_OK;
     HANDLE issued = nullptr, resume = nullptr;
@@ -505,6 +765,16 @@ int CheckSparseMappingPayload(const char *mode, uint32_t seed) {
               "copy capacity admission");
       last = next.get();
     } else if (removal) {
+      // Let earlier mappings retire, then pause after this copy's real prefix.
+      require(SUCCEEDED(queue->Signal(fence.ptr, 61)), "removal setup signal");
+      gate.signalValue(1);
+      HANDLE setup = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+      require(setup && SUCCEEDED(fence->SetEventOnCompletion(61, setup)) &&
+                  WaitForSingleObject(setup, 10000) == WAIT_OBJECT_0,
+              "removal setup drain");
+      CloseHandle(setup);
+      gate = metal.newSharedEvent();
+      require(gate != nullptr, "removal prefix gate");
       issued = CreateEventW(nullptr, TRUE, FALSE, nullptr);
       resume = CreateEventW(nullptr, TRUE, FALSE, nullptr);
       require(issued && resume, "removal events");
@@ -530,30 +800,7 @@ int CheckSparseMappingPayload(const char *mode, uint32_t seed) {
                                                          : UINT_MAX,
                                                nullptr, nullptr);
     }
-    require(!plans[2] && (partial || removal || rejected
-                              ? last == DXGI_ERROR_DEVICE_REMOVED
-                              : SUCCEEDED(last)),
-            "sealed record transfer");
-    WMT::Buffer backing;
-    UINT64 at = UINT64_MAX;
-    const unsigned logical_heap = generation && !generation_aba    ? 2
-                                  : partial || removal || rejected ? 2
-                                                                   : 0;
-    require(SUCCEEDED(resources[generation_self ? 0 : 1]->GetTileMapping(
-                generation_self ? 1 : 0, backing, at)) &&
-                at == 0 &&
-                (generation_null
-                     ? !backing
-                     : backing.handle ==
-                           heaps[logical_heap]->GetTileBackingBuffer().handle),
-            "logical prefix publication");
-    if (generation_lifetime)
-      require(!deaths(), "current old target not retained by copy admission");
-    if (generation)
-      std::printf(
-          "GENERATION_LOGICAL heap=%u self=%u aba=%u capacity=%u retry=%u\n",
-          logical_heap, generation_self, generation_aba, generation_capacity,
-          generation_failure);
+    require(!plans[2] && SUCCEEDED(last), "deferred record transfer");
     if (empty) {
       std::unique_ptr<D3D12SparseBufferMappingPlan> skip;
       D3D12_TILE_RANGE_FLAGS flag = D3D12_TILE_RANGE_FLAG_SKIP;
@@ -566,14 +813,11 @@ int CheckSparseMappingPayload(const char *mode, uint32_t seed) {
                   !skip,
               "empty queue record");
     }
-    if (partial || removal || rejected) {
-      require(queue->Signal(fence.ptr, 77) == DXGI_ERROR_DEVICE_REMOVED,
-              "failure admitted success");
-    } else {
-      require(SUCCEEDED(queue->Signal(fence.ptr, 77)) &&
-                  fence->GetCompletedValue() < 77,
-              "FIFO signal premature");
-    }
+    const HRESULT signal_hr = queue->Signal(fence.ptr, 77);
+    require(partial || removal || rejected
+                ? SUCCEEDED(signal_hr) || signal_hr == DXGI_ERROR_DEVICE_REMOVED
+                : SUCCEEDED(signal_hr) && fence->GetCompletedValue() < 77,
+            "FIFO signal admission");
     if (release) {
       for (auto r : public_resources)
         r->Release();
@@ -612,6 +856,26 @@ int CheckSparseMappingPayload(const char *mode, uint32_t seed) {
     require(fence->GetCompletedValue() ==
                 (partial || removal || rejected ? UINT64_MAX : 77),
             "queue FIFO final fence");
+    WMT::Buffer backing;
+    UINT64 at = UINT64_MAX;
+    const unsigned logical_heap = generation && !generation_aba    ? 2
+                                  : partial || removal || rejected ? 2
+                                                                   : 0;
+    if (!release)
+      require(
+          SUCCEEDED(resources[generation_self ? 0 : 1]->GetTileMapping(
+              generation_self ? 1 : 0, backing, at)) &&
+              at == 0 &&
+              (generation_null
+                   ? !backing
+                   : backing.handle ==
+                         heaps[logical_heap]->GetTileBackingBuffer().handle),
+          "logical prefix publication");
+    if (generation)
+      std::printf(
+          "GENERATION_LOGICAL heap=%u self=%u aba=%u capacity=%u retry=%u\n",
+          logical_heap, generation_self, generation_aba, generation_capacity,
+          generation_failure);
     if (generation_lifetime)
       require(destroyed[3] == 1 && deaths() == 1,
               "current old target not retired after terminal proof");
@@ -2950,7 +3214,8 @@ int Run(const char *read_path, const char *write_path, UINT seed,
 }
 } // namespace
 int main(int argc, char **argv) {
-  if (argc == 3 && (!std::strncmp(argv[1], "plan-queue", 10) ||
+  if (argc == 3 && (!std::strncmp(argv[1], "plan-cross-", 11) ||
+                    !std::strncmp(argv[1], "plan-queue", 10) ||
                     !std::strcmp(argv[1], "plan-cost") ||
                     !std::strcmp(argv[1], "plan-normal") ||
                     !std::strcmp(argv[1], "plan-partial") ||

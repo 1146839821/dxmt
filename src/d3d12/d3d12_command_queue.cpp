@@ -83,11 +83,28 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
   WMT::Reference<WMT::SharedEvent> sparse_event_;
   uint64_t sparse_event_value_ = 0;
 
+  // Transient intent owned by the existing bounded FIFO; no resolved tile map.
+  struct SparseIssue {
+    WMT::Reference<WMT::Event> gate;
+    uint64_t main_signal = 0;
+    UINT flags = 0;
+    UINT limit = UINT_MAX;
+    HANDLE issued = nullptr;
+    HANDLE resume = nullptr;
+    ~SparseIssue() {
+      if (issued)
+        CloseHandle(issued);
+      if (resume)
+        CloseHandle(resume);
+    }
+  };
+
   struct Submission {
     uint64_t serial = 0;
     WMT::Reference<WMT::CommandBuffer> command_buffer;
     WMT::Reference<WMT::SparseBarrierCompletion> sparse_barrier;
     std::unique_ptr<D3D12SparseBufferMappingPlan> sparse_plan;
+    std::unique_ptr<SparseIssue> sparse_issue;
     std::shared_ptr<D3D12CommandListSubmission> recording_lifetime;
     struct CommandList {
       uint64_t recording_id = 0;
@@ -458,6 +475,57 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
   }
 
   void
+  IssueDeferredSparse(Submission &submission) {
+    if (!submission.sparse_issue)
+      return;
+    auto &issue = *submission.sparse_issue;
+    // The pre-handoff and every preceding FIFO record have completed. Resolve
+    // live source mappings here, never at CPU admission ahead of a queue Wait.
+    if (FAILED(device_->GetDeviceRemovedReason())) {
+      submission.sparse_plan.reset();
+      submission.sparse_barrier = {};
+      return;
+    }
+    const HRESULT hr = submission.sparse_plan->PrepareNative(sparse_mapping_queue_);
+    if (FAILED(hr) || !submission.sparse_plan->PrepareTerminal(issue.flags)) {
+      device_->MarkDeviceRemoved(FAILED(hr) ? hr : E_OUTOFMEMORY);
+      ERR("SPARSE_PLAN_FIFO prepare_failed serial=", submission.serial, " hr=", hr);
+      submission.sparse_plan.reset(); // No native operations have been issued.
+      submission.sparse_barrier = {};
+      return;
+    }
+    sparse_mapping_queue_.waitForEvent(sparse_event_, issue.main_signal);
+    if (issue.gate)
+      sparse_mapping_queue_.waitForEvent(issue.gate, 1);
+    const bool pre_submitted = submission.sparse_barrier.submit();
+    size_t issued_count = 0;
+    const auto count = submission.sparse_plan->OperationCount();
+    if (pre_submitted && SUCCEEDED(device_->GetDeviceRemovedReason())) {
+      while (issued_count < count && issued_count < issue.limit && submission.sparse_plan->IssueNext())
+        ++issued_count;
+    }
+    bool resumed = true;
+    if (issue.issued) {
+      SetEvent(issue.issued);
+      resumed = WaitForSingleObject(issue.resume, 30000) == WAIT_OBJECT_0;
+    }
+    const bool accepted =
+        resumed && pre_submitted && issued_count == count && SUCCEEDED(device_->GetDeviceRemovedReason());
+    const auto outcome = accepted       ? WMTSparseMappingHostAccepted
+                         : issued_count ? WMTSparseMappingHostFailedAfterIssue
+                                        : WMTSparseMappingHostRejected;
+    const bool sealed = submission.sparse_plan->Finish(outcome);
+    if (!accepted || !sealed)
+      device_->MarkDeviceRemoved(DXGI_ERROR_DEVICE_REMOVED);
+    // Admission already reserved this even value for following classic work.
+    // Removal signals MAX instead; never enqueue a lower value after removal.
+    if (SUCCEEDED(device_->GetDeviceRemovedReason()))
+      sparse_mapping_queue_.signalEvent(sparse_event_, issue.main_signal + 1);
+    ERR("SPARSE_PLAN_FIFO issue serial=", submission.serial, " issued=", issued_count, " sealed=", sealed,
+        " host=", outcome);
+  }
+
+  void
   CompletionThread() {
     for (;;) {
       Submission submission;
@@ -487,6 +555,8 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
                 log.description().getUTF8String());
         }
       }
+
+      IssueDeferredSparse(submission);
 
       if (submission.sparse_barrier) {
         if (sparse_completion_trace_) {
@@ -729,9 +799,22 @@ public:
     auto pool = WMT::MakeAutoreleasePool();
     if (!WaitForSubmissionSpaceLocked())
       return DXGI_ERROR_DEVICE_REMOVED;
-    HRESULT hr = plan->PrepareNative(sparse_mapping_queue_);
-    if (FAILED(hr) || !plan->PrepareTerminal(flags))
-      return FAILED(hr) ? hr : E_OUTOFMEMORY;
+    std::unique_ptr<SparseIssue> issue;
+    try {
+      issue = std::make_unique<SparseIssue>();
+    } catch (const std::bad_alloc &) {
+      return E_OUTOFMEMORY;
+    }
+    issue->gate = gate;
+    issue->flags = flags;
+    issue->limit = issue_limit;
+    // The caller may close its handles as soon as asynchronous admission returns.
+    if (issued &&
+        (!DuplicateHandle(
+             GetCurrentProcess(), issued, GetCurrentProcess(), &issue->issued, EVENT_MODIFY_STATE, FALSE, 0
+         ) ||
+         !DuplicateHandle(GetCurrentProcess(), resume, GetCurrentProcess(), &issue->resume, SYNCHRONIZE, FALSE, 0)))
+      return E_INVALIDARG;
     auto barrier = sparse_mapping_queue_.prepareBarrierBeforeResourceState();
     if (!barrier)
       return E_OUTOFMEMORY;
@@ -753,45 +836,22 @@ public:
     submission.command_buffer = cmdbuf;
     submission.sparse_barrier = std::move(barrier);
     submission.sparse_plan = std::move(plan);
-    sparse_mapping_queue_.waitForEvent(sparse_event_, main_signal);
-    if (gate)
-      sparse_mapping_queue_.waitForEvent(gate, 1);
+    issue->main_signal = main_signal;
+    submission.sparse_issue = std::move(issue);
+    // Reserve the completion value before later command buffers are committed.
+    // The completion owner issues the native mapping without taking commit_mutex_.
+    sparse_event_value_ = main_signal + 1;
     cmdbuf.commit();
-    const bool pre_submitted = submission.sparse_barrier.submit();
-    size_t issued_count = 0;
-    const auto count = submission.sparse_plan->OperationCount();
-    if (pre_submitted && SUCCEEDED(device_->GetDeviceRemovedReason())) {
-      while (issued_count < count && issued_count < issue_limit && submission.sparse_plan->IssueNext())
-        ++issued_count;
-    }
-    // Probe holds admission here to exercise a removal race, not a GPU wait.
-    bool resumed = true;
-    if (issued) {
-      SetEvent(issued);
-      resumed = WaitForSingleObject(resume, 30000) == WAIT_OBJECT_0;
-    }
-    const bool accepted =
-        resumed && pre_submitted && issued_count == count && SUCCEEDED(device_->GetDeviceRemovedReason());
-    const auto outcome = accepted       ? WMTSparseMappingHostAccepted
-                         : issued_count ? WMTSparseMappingHostFailedAfterIssue
-                                        : WMTSparseMappingHostRejected;
-    const bool sealed = submission.sparse_plan->Finish(outcome);
-    EndSparseMapping(main_signal);
-    // Close admission before publishing cleanup, so no concurrent Signal can
-    // publish success between this failed prefix and device removal.
-    if (!accepted || !sealed)
-      device_->MarkDeviceRemoved(DXGI_ERROR_DEVICE_REMOVED);
     {
       std::lock_guard lock(submission_state_->mutex);
-      // Even a removed device must retain its already-issued cleanup record.
+      // Queue acceptance transfers intent; native success is asynchronous.
       submission.serial = next_submission_serial_++;
-      ERR("SPARSE_PLAN_FIFO publish serial=", submission.serial, " count=", submission_count_ + 1,
-          " issued=", issued_count, " sealed=", sealed, " host=", outcome);
+      ERR("SPARSE_PLAN_FIFO publish serial=", submission.serial, " count=", submission_count_ + 1, " deferred=1");
       PublishSubmissionLocked(submission);
     }
     commit_lock.unlock();
     submission_state_->ready.notify_one();
-    return accepted && sealed ? S_OK : DXGI_ERROR_DEVICE_REMOVED;
+    return S_OK;
   }
 
   HRESULT
