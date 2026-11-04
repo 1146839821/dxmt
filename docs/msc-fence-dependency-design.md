@@ -531,3 +531,208 @@ from legacy/enhanced barriers in the existing encoder-boundary records, includin
 barriers with no resource access and split/alias boundaries. Validate those
 facts against existing barrier probes before combining them with IA coverage;
 keep current waits. The larger MSC/HLSL/performance task is still incomplete.
+
+
+## Explicit barrier recording slice — design card, 2026-11-04
+
+1. **Goal / node:** N13; retain explicit barrier obligations alongside the existing immutable encoder chain before any fence-stage experiment.
+2. **Baseline:** `65fdbedb`, `feat/d3d12`; preserve the user's `.gitignore`; macOS/Xcode/Metal 27.2 and the existing isolated patched-LLVM build.
+3. **Evidence:** legacy barriers emit mapped packets; enhanced SyncBefore/SyncAfter are discarded after admission; split/alias barriers invalidate the pass. See `d3d12_command_list.cpp:2512`, `:2601`, `:6238`, `:6272`, `:8402` at baseline.
+4. **Invariants:** INV-03/04/07/08; retain explicit execution dependencies even with NO_ACCESS. Existing transition events own resource state, split pairing and lifetime.
+5. **Selection:** a bounded summary on each existing EncoderData, including the head sentinel; reject a new barrier/event vector, resource map, scheduler or additional encoder splits.
+6. **Ownership:** accumulate on the current encoder, or the last linked encoder/head when no encoder is open; it covers barriers inside that encoder and its trailing gap, not a precise packet location.
+7. **Content:** legacy render-stage masks mapped per barrier before union (including COMMON), original enhanced sync masks and transition/UAV/alias/split-kind bits. Union conservatively; never infer matching pairs, resource independence or safe waits from this summary alone.
+8. **Scope / files:** existing encoder header, command-list recording, command-list probe and these reports. Queue policy, native packets, pending flush and resource admission are unchanged.
+9. **Cost:** fixed storage per encoder/head and constant-time OR operations per admitted barrier; no new locks, scans, dynamic allocations, native barriers or draws.
+10. **Proof:** head/trailing and empty/sync-only barriers, mixed masks, split/alias across boundaries, reset/ClearState, immutable replay; existing rendered/compute barrier oracles and split submission probes with runtime identity and validation.
+11. **Risks / rollback:** future consumers must include the head, trailing gaps and all prior relevant nodes; masks are not a dependency certificate. Revert this focused commit if recording or GPU regressions occur.
+12. **Done / capability:** build, metadata assertions, GPU regression and cost evidence; no FL/SM/Tier or scheduling promotion. Remaining full early-access/alias/transitive proof stays open.
+
+
+### Ownership and specification evidence
+
+`EncoderData::BarrierUse` (`d3d12_command_encoder.hpp:74`) is an immutable
+recording summary once Close succeeds. `RecordBarrier` (`d3d12_command_list.cpp:2458`)
+accumulates on the open encoder, or the last linked encoder/head in a gap.
+Consumers must examine the head sentinel, barriers inside each encoder and its
+trailing gap, and relevant predecessors across lists/submissions. Attaching a
+barrier to the predecessor does not make it only an outgoing dependency: a
+barrier inside an encoder may constrain its later commands against much older
+work. The summary is conservative and loses exact intra-encoder positions.
+
+Legacy transition stages are mapped **before** union, so COMMON's zero state
+cannot disappear when mixed with a narrow later state. These fields describe
+render stages only; legacy/UAV/alias/split kind bits must still force conservative
+handling of other domains. Enhanced sync bits retain the application's original
+scopes, including one-sided sync and NO_ACCESS. A completely empty
+NONE/NONE + NO_ACCESS/NO_ACCESS barrier without a layout change leaves no record.
+SPLIT is retained as an opaque scope bit with begin/end reasons: an aggregated
+mask is not a legal individual D3D12 barrier and cannot establish pairing.
+Existing resource transition events remain the only state/pairing authority.
+
+Split barriers record both halves before pass invalidation (`:2616`, `:6270`);
+aliasing records its reason even for NULL/NULL (`:6312`). ClearState may end the
+pass but does not erase recorded obligations. Reset starts a new zeroed head;
+previous allocator-owned chains survive until allocator Reset. No queue consumer,
+new pass boundary, fence wait, resource reference or WMT packet layout is added.
+
+For an enhanced texture range, the scope packet and summary are now emitted
+once after range admission (`:8677`), while layout events remain per subresource.
+Previously these identical adjacent packets were already merged (or ORed into
+the pending scope). No GPU work occurs between the layout entries. This keeps
+summary collection constant per admitted barrier and retains the serialized
+native scope; it is not a new synchronization optimization or a changed layout
+validation rule. Buffer/global entry points share the same record/emission helper
+at `:8442`. Existing error/admission tests remain required.
+
+**SPEC_REQUIRED:** Microsoft Enhanced Barriers, retained source lines 287–304,
+separates explicit execution scopes from resource accesses; lines 707–735 define
+split synchronization. Legacy barrier stage inference must remain conservative.
+The two Microsoft primary sources were fetched again on 2026-11-04; their hashes
+match the prior dependency-design evidence. See external `sources.json`.
+Installed Metal fence/encoder API evidence in the earlier section still applies.
+
+**MULLION_OBSERVED (source only):** pinned `93de32b9145885ceb2e45be7d445e56d62499b3c`,
+`mullion-command-list.cpp:5007–5068` and `mullion-command-queue.cpp:150–220` use
+barrier ordering, grouped pass synchronization and predecessor sets. DXMT keeps
+its existing recording owner; no Mullion source or LGPL-covered implementation
+is transplanted. Windows native and Mullion runtime observations are NOT_RUN.
+
+### Regression coverage
+
+The existing `dx12_command_list_type.cpp` probe gains `--barrier-records`
+(`:4788`): nine checks cover empty, one-sided, early sync-only, mixed legacy
+COMMON/narrow stages, UAV, NULL alias, both split types, head/trailing boundaries,
+ClearState, same-allocator new recordings, allocator Reset and invalid sync.
+`--barrier-records wrong` changes only an expected kind bit and must exit 1.
+These are private recording assertions, not GPU ordering or alias-data proof.
+
+`--barrier-records-gpu` extends the existing global/buffer/texture compute oracle
+with recorded-scope and post-completion immutability assertions (`:5745`).
+Global/buffer cases replay the same closed list; texture cases run once because
+their initial/final layouts differ. Each data-bearing submission checks all 64
+uint outputs. NO_ACCESS cases intentionally perform no resource access: they
+check the native command packets and completion, and label readback NOT_RUN.
+`--adjacent-memory-barriers` additionally checks explicit PIXEL→VERTEX NO_ACCESS
+scope in a rendered case and retains its native packet/pixel/buffer oracle.
+
+The unchanged enhanced-barrier executable covers admission and actual split
+copy/readback across one list, ordered lists, replay and separate submissions
+with allocator Reset. These are synchronization regressions; the alias flag's
+presence is tested, but a new placed-alias memory-reuse oracle is NOT_RUN.
+
+### Validation and cost evidence
+
+Environment: Apple M1 Max, macOS 27.2 `26B123`, Xcode 27.2 `27B52`, Metal
+`32023.922`, Wine 11.0, SDK API 4.0.3 and the existing patched LLVM x64 release
+build. All temporary tooling/evidence remains outside the repository in
+`dxmt-test/n95-capability-gate/result-msc-barrier-records-20261104/`.
+Stages are `stage-msc-barrier-records-20261104` and
+`stage-msc-barrier-baseline-20261104`; both use the isolated
+`prefix-msc-barrier-records-20261104`. The user's Wine/prefix/toolchain is intact.
+The baseline stage's D3D12 bytes are checked against the `65fdbedb` delivery
+manifest. Candidate stage files are checked against the current build, including
+WineMetal PE/Unix pairing. Logs verify actual load paths and, for the modified
+probe and MSC runner, loaded export bytes.
+
+The compiler size probe uses headers from both baseline and candidate:
+`EncoderData` 96 → 112 bytes; `RenderEncoderData` 816 → 832 bytes;
+`BarrierUse` is 16 bytes. Existing encoder allocations grow by that fixed amount;
+there is no new allocation, lock, descriptor scan, draw-time traversal or native
+barrier. This is storage size, not measured application resident memory.
+
+Retained non-GPU failure: the first recording fixture switched directly from
+legacy COPY_DEST into enhanced buffer semantics. Close correctly rejected it;
+the fixture now transitions through COMMON. The initial log is retained.
+The size-only compiler probe initially resolved the host GCC wrapper, which
+rejects `-fblocks`; it was rerun with the build's explicit LLVM-MinGW compiler.
+Neither failure caused a production admission change.
+
+
+The external performance collector initially mistook `native_buffers` for a
+copy-command count; it actually counts new Metal buffer allocations and is zero
+in this probe. The executable had passed all 25 readbacks. The corrected
+collector reused that saved baseline log, verified its sequences/identities,
+and continued without repeating successful GPU work. Both scripts/logs remain.
+
+| Gate / check | Result | Evidence and practical limit |
+| --- | --- | --- |
+| Gate 0 / Gate 1 | PASS | Current `65fdbedb` baseline, CodeGraph-first owner audit, refreshed Microsoft sources, pinned Mullion source and bounded design above. |
+| Gate 2 | PASS | Existing recording owner only; five changed files, no new source module, resource map or queue branch. |
+| Full x64 default-target build | LOCAL_PASS | `build-verified.log` / `build-result.json`; exit 0, existing compiler warnings retained. |
+| Recording assertions | LOCAL_PASS | Nine checks; altered expected-bit control exits 1. Invalid sync leaves an empty record and rejects Close. |
+| Compute/render barrier GPU regressions | LOCAL_PASS | 36 compute packet/record checks (including eight repeated submissions), four render cases, 22 data readbacks; NO_ACCESS cases explicitly label readback NOT_RUN. |
+| Enhanced admission / split execution | LOCAL_PASS | Existing admission suite and same-list, ordered-list, replay, cross-Execute/reset split copy/readback cases. Four split result markers; raw logs retain each mode's work. |
+| API/GPU validation / deployment | LOCAL_PASS | All 12 barrier processes have API and GPU validation enabled; no validation errors. `runs.json`, `correctness-audit.json`, loaded paths/export bytes and build/stage pairing. |
+| MSC IA / VB / texture regression | LOCAL_PASS | 32 processes, 112 full-image and 28 scratch readbacks, eight expected wrong-output exits. `overlap-audit.json`; actual artifact hashes match final stage/build. Validated cases and timing cases remain separate. |
+| Scoped formatting / diff check | PASS | `static-checks.json`; only changed C++ regions formatted. |
+| Recording/submit cost A/B | MEASURED | Eight alternating processes, 200 exact changing-payload readbacks; summary below. |
+| x86 / Windows native / Mullion runtime / new GPU trace / placed-alias data oracle | NOT_RUN | No promotion, overlap or complete dependency claim. |
+| Gate 3 / Gate 4 | PASS within recording scope | Source/record/native-packet/output checks pass; performance cost and remaining dependency gaps are explicit. |
+
+Cost uses the pre-existing `dx12_command_list_type --split-cost`: 2,000
+begin/end pairs and two copies per round, 25 rounds per process, four processes
+per build in ABBA/ABBA order. Exclude each process's first round from timing
+statistics (96 warm samples per build); include every round in correctness.
+Both builds use the same test executable, WineMetal PE/Unix and MSC bytes.
+DXGI differs only in `.buildid`; all other sections are identical
+(`dxgi-section-comparison.json`). The two native blit encoders and zero new
+Metal buffers remain the same. API/GPU validation is disabled for timing.
+
+| Metric | Baseline median / P95 / range | Candidate median / P95 / range |
+| --- | --- | --- |
+| CPU record, µs/split pair | 0.096725 / 0.107750 / 0.093750–0.116000 | 0.101050 / 0.109100 / 0.097100–0.114900 |
+| CPU Close, µs/round | 45.25 / 50.80 / 43.70–59.70 | 44.20 / 48.60 / 42.00–49.40 |
+| CPU submit, µs/round | 101.35 / 153.20 / 91.80–178.50 | 106.35 / 159.40 / 95.80–181.40 |
+
+The observed warm recording median increases by 0.004325 µs per split pair
+(about 4.5%). Submit median also rises by 5 µs. The ranges overlap; this is
+measured overhead in a barrier-heavy microbenchmark, **not a no-regression
+result or performance optimization**. Application frame time, GPU overlap,
+occupancy and resident memory were not measured. Retain these bounded facts
+only as groundwork for dependency analysis; any scheduling proposal must
+justify their cost with its own end-to-end benefit and correctness proof.
+
+Reproduction: use the build environment from `docs/DEVELOPMENT.md` with the
+same external patched LLVM, cross file and isolated build-time DXC prefix.
+Run `meson compile -C BUILD`, then stage matching PE/Unix files. `runs.json`
+contains exact executable arguments and isolated environment. Probe commands:
+`dx12_command_list_type.exe --barrier-records`, `--barrier-records wrong`,
+`--barrier-records-gpu`, `--adjacent-memory-barriers`,
+`--texture-access-only-barriers`; use `dx12_enhanced_barriers.exe` and its
+`--split-order-probe MODE` cases above. MSC regression uses the unchanged
+`run_msc_execution_overlap.py` with `--processes 2 --samples 2 --iterations 1024`
+and the IA/VB switches in the previous section. External `run_checks.py`,
+`run_overlap_perf.py` and `resume_perf.py` retain orchestration and raw results;
+no runner is added to the repository.
+
+### Delivery audit and next slice
+
+| Changed file | Responsibility |
+| --- | --- |
+| `src/d3d12/d3d12_command_encoder.hpp:74` | Fixed encoder/head barrier summary, with explicit kind and scope domains. |
+| `src/d3d12/d3d12_command_list.cpp:2458` | Collect admitted barrier facts before they are lowered or pass boundaries lose their reason; emit identical texture-range scopes once. |
+| `tests/dx12/dx12_command_list_type.cpp:4788` | Recording/negative probes, GPU packet/scope checks, closed-list replay immutability and optional loaded-code identity evidence. |
+| `docs/msc-fence-dependency-design.md` | Design, specification/source anchors, regression and cost evidence, boundaries of the proof. |
+| `docs/D3D12_MSC_HLSL_PERFORMANCE_WORK.md` | Updated overlap status and remaining work. |
+
+Public FL/SM/Tier, queue Fence stages, WineMetal/public COM ABI and D3D10/11
+behavior are not changed. Internal encoder layout changes, so private-record
+probes must be rebuilt with the DLL. Unknown shader/indirect/internal accesses,
+alias backing identity, descriptor mutation and transitive predecessor sets
+remain unresolved; IA plus barrier summaries are not sufficient to relax waits.
+The closed-list guard prevents this new summary helper from altering an
+allocator's subsequent recording through a closed list. It does not broaden
+existing invalid-command-after-Close behavior guarantees.
+
+Commit this slice with `feat(d3d12): preserve explicit barrier execution scopes`;
+leave the user's `.gitignore` unstaged and do not push. The external delivery
+manifest records the final commit and file hashes. Rollback is this focused
+commit; there is no cache/schema migration. Overall MSC/HLSL/performance work
+remains incomplete.
+
+**Next recommended slice:** establish ordinary MSC vertex shader resource-access
+completeness using the existing reflection/binding owner, with controlled VS
+root/table reads and writes plus negative unknown/volatile/indirect paths.
+Preserve current waits. This fills the next missing proof component without
+adding a scheduler or treating residency deltas as complete resource accesses.

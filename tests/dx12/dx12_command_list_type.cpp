@@ -4761,6 +4761,249 @@ public:
   }
 };
 
+using BarrierUse = dxmt::EncoderData::BarrierUse;
+
+bool SameBarriers(const BarrierUse &a, const BarrierUse &b) {
+  return a.kinds == b.kinds &&
+         a.legacy_stages_before == b.legacy_stages_before &&
+         a.legacy_stages_after == b.legacy_stages_after &&
+         a.sync_before == b.sync_before && a.sync_after == b.sync_after;
+}
+
+std::vector<BarrierUse> BarrierRecords(ID3D12GraphicsCommandList *list) {
+  std::vector<BarrierUse> records;
+  for (auto *encoder =
+           static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list)->entry;
+       encoder; encoder = encoder->next)
+    records.push_back(encoder->barriers);
+  return records;
+}
+
+bool SameBarrierRecords(const std::vector<BarrierUse> &a,
+                        const std::vector<BarrierUse> &b) {
+  return a.size() == b.size() &&
+         std::equal(a.begin(), a.end(), b.begin(), SameBarriers);
+}
+
+bool TestBarrierRecords(bool wrong = false) {
+  Owned<ID3D12Device> device;
+  Owned<ID3D12CommandAllocator> allocator;
+  Owned<ID3D12GraphicsCommandList> list;
+  Owned<ID3D12GraphicsCommandList7> list7;
+  Owned<ID3D12Resource> upload, buffer;
+  D3D12_HEAP_PROPERTIES heap = {};
+  heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+  D3D12_RESOURCE_DESC desc = {};
+  desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  desc.Width = 256;
+  desc.Height = desc.DepthOrArraySize = desc.MipLevels = desc.SampleDesc.Count =
+      1;
+  desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  if (!CheckHR("barrier records device",
+               D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+                                 IID_PPV_ARGS(&device.ptr))) ||
+      !CheckHR("barrier records allocator",
+               device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                              IID_PPV_ARGS(&allocator.ptr))) ||
+      !CheckHR("barrier records list",
+               device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                         allocator.ptr, nullptr,
+                                         IID_PPV_ARGS(&list.ptr))) ||
+      !CheckHR("barrier records list7",
+               list->QueryInterface(IID_PPV_ARGS(&list7.ptr))) ||
+      !CheckHR(
+          "barrier records upload",
+          device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                          D3D12_RESOURCE_STATE_GENERIC_READ,
+                                          nullptr, IID_PPV_ARGS(&upload.ptr))))
+    return false;
+  heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+  if (!CheckHR(
+          "barrier records buffer",
+          device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                          D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                          IID_PPV_ARGS(&buffer.ptr))))
+    return false;
+  auto global = [&](D3D12_BARRIER_SYNC before, D3D12_BARRIER_SYNC after) {
+    const D3D12_GLOBAL_BARRIER barrier = {before, after,
+                                          D3D12_BARRIER_ACCESS_NO_ACCESS,
+                                          D3D12_BARRIER_ACCESS_NO_ACCESS};
+    D3D12_BARRIER_GROUP group = {};
+    group.Type = D3D12_BARRIER_TYPE_GLOBAL;
+    group.NumBarriers = 1;
+    group.pGlobalBarriers = &barrier;
+    list7->Barrier(1, &group);
+  };
+  auto verify = [&](const char *name,
+                    std::initializer_list<BarrierUse> expected) {
+    if (!CheckHR(name, list->Close()))
+      return false;
+    auto records = BarrierRecords(list.ptr);
+    std::vector<BarrierUse> wanted(expected);
+    if (wrong && !wanted.empty())
+      wanted.front().kinds ^= BarrierUse::Aliasing;
+    const bool good = SameBarrierRecords(records, wanted);
+    std::cout << "barrier-records case=" << name << " nodes=" << records.size()
+              << " result=" << (good ? "PASS" : "FAIL") << "\n";
+    return good;
+  };
+  auto reset = [&]() {
+    return CheckHR("barrier records allocator Reset", allocator->Reset()) &&
+           CheckHR("barrier records Reset",
+                   list->Reset(allocator.ptr, nullptr));
+  };
+  // Empty, one-sided and sync-only scopes are distinguishable without any
+  // encoder/resource access; Close/ClearState must not discard the head.
+  global(D3D12_BARRIER_SYNC_NONE, D3D12_BARRIER_SYNC_NONE);
+  if (!verify("empty", {{}}) || !reset())
+    return false;
+  for (const bool before : {true, false}) {
+    global(before ? D3D12_BARRIER_SYNC_DRAW : D3D12_BARRIER_SYNC_NONE,
+           before ? D3D12_BARRIER_SYNC_NONE : D3D12_BARRIER_SYNC_DRAW);
+    list->ClearState(nullptr);
+    if (!verify(before ? "release" : "acquire",
+                {{.kinds = BarrierUse::Enhanced,
+                  .sync_before = before ? D3D12_BARRIER_SYNC_DRAW
+                                        : D3D12_BARRIER_SYNC_NONE,
+                  .sync_after = before ? D3D12_BARRIER_SYNC_NONE
+                                       : D3D12_BARRIER_SYNC_DRAW}}) ||
+        !reset())
+      return false;
+  }
+  global(D3D12_BARRIER_SYNC_COMPUTE_SHADING, D3D12_BARRIER_SYNC_INDEX_INPUT);
+  global(D3D12_BARRIER_SYNC_PIXEL_SHADING, D3D12_BARRIER_SYNC_VERTEX_SHADING);
+  list->ClearState(nullptr);
+  const BarrierUse head = {.kinds = BarrierUse::Enhanced,
+                           .sync_before = D3D12_BARRIER_SYNC_COMPUTE_SHADING |
+                                          D3D12_BARRIER_SYNC_PIXEL_SHADING,
+                           .sync_after = D3D12_BARRIER_SYNC_INDEX_INPUT |
+                                         D3D12_BARRIER_SYNC_VERTEX_SHADING};
+  list->CopyBufferRegion(buffer.ptr, 0, upload.ptr, 0, 256);
+  D3D12_RESOURCE_BARRIER legacy = {};
+  legacy.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+  legacy.Transition = {buffer.ptr, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                       D3D12_RESOURCE_STATE_COPY_DEST,
+                       D3D12_RESOURCE_STATE_COMMON};
+  list->ResourceBarrier(1, &legacy);
+  legacy.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+  legacy.Transition.StateAfter = D3D12_RESOURCE_STATE_INDEX_BUFFER;
+  list->ResourceBarrier(1, &legacy);
+  // A later narrow state must not erase COMMON's conservative stage scope.
+  legacy.Transition.StateBefore = D3D12_RESOURCE_STATE_INDEX_BUFFER;
+  legacy.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+  legacy.Flags = D3D12_RESOURCE_BARRIER_FLAG_BEGIN_ONLY;
+  list->ResourceBarrier(1, &legacy);
+  legacy.Flags = D3D12_RESOURCE_BARRIER_FLAG_END_ONLY;
+  list->ResourceBarrier(1, &legacy);
+  legacy = {};
+  legacy.Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING;
+  list->ResourceBarrier(1, &legacy);
+  const auto all = WMTRenderStagePreRaster | WMTRenderStageFragment;
+  const BarrierUse first = {BarrierUse::LegacyTransition |
+                                BarrierUse::Aliasing | BarrierUse::SplitBegin |
+                                BarrierUse::SplitEnd,
+                            all, all};
+  legacy = {};
+  legacy.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+  legacy.Transition = {buffer.ptr, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                       D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                       D3D12_RESOURCE_STATE_COPY_DEST};
+  list->ResourceBarrier(1, &legacy);
+  list->CopyBufferRegion(buffer.ptr, 0, upload.ptr, 0, 256);
+  // Enter enhanced buffer semantics from legacy COMMON.
+  legacy.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+  legacy.Transition.StateAfter = D3D12_RESOURCE_STATE_COMMON;
+  list->ResourceBarrier(1, &legacy);
+  D3D12_BUFFER_BARRIER split = {};
+  split.SyncBefore = D3D12_BARRIER_SYNC_COPY;
+  split.SyncAfter = D3D12_BARRIER_SYNC_SPLIT;
+  split.AccessBefore = D3D12_BARRIER_ACCESS_COPY_DEST;
+  split.AccessAfter = D3D12_BARRIER_ACCESS_COPY_SOURCE;
+  split.pResource = buffer.ptr;
+  split.Size = UINT64_MAX;
+  D3D12_BARRIER_GROUP group = {};
+  group.Type = D3D12_BARRIER_TYPE_BUFFER;
+  group.NumBarriers = 1;
+  group.pBufferBarriers = &split;
+  list7->Barrier(1, &group);
+  list->ClearState(nullptr);
+  split.SyncBefore = D3D12_BARRIER_SYNC_SPLIT;
+  split.SyncAfter = D3D12_BARRIER_SYNC_COPY;
+  list7->Barrier(1, &group);
+  legacy = {};
+  legacy.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+  list->ResourceBarrier(1, &legacy);
+  const BarrierUse second = {
+      BarrierUse::Enhanced | BarrierUse::LegacyUAV |
+          BarrierUse::LegacyTransition | BarrierUse::SplitBegin |
+          BarrierUse::SplitEnd,
+      all, all, D3D12_BARRIER_SYNC_COPY | D3D12_BARRIER_SYNC_SPLIT,
+      D3D12_BARRIER_SYNC_COPY | D3D12_BARRIER_SYNC_SPLIT};
+  if (!verify("boundaries", {head, first, second}))
+    return false;
+  // New recording in the same allocator must not mutate the retained chain.
+  const auto *old_head =
+      static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list.ptr)->entry;
+  if (!CheckHR("barrier records same allocator Reset",
+               list->Reset(allocator.ptr, nullptr)) ||
+      !verify("fresh", {{}}) || !SameBarriers(old_head->barriers, head) ||
+      !SameBarriers(old_head->next->barriers, first) ||
+      !SameBarriers(old_head->next->next->barriers, second) || !reset())
+    return false;
+  if (!verify("allocator-reset", {{}}) || !reset())
+    return false;
+  Owned<ID3D12Resource> texture;
+  desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+  desc.Width = desc.Height = 8;
+  desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+  if (!CheckHR(
+          "barrier records texture",
+          device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                          D3D12_RESOURCE_STATE_COPY_DEST,
+                                          nullptr, IID_PPV_ARGS(&texture.ptr))))
+    return false;
+  D3D12_TEXTURE_BARRIER texture_split = {};
+  texture_split.SyncBefore = D3D12_BARRIER_SYNC_COPY;
+  texture_split.SyncAfter = D3D12_BARRIER_SYNC_SPLIT;
+  texture_split.AccessBefore = D3D12_BARRIER_ACCESS_COPY_DEST;
+  texture_split.AccessAfter = D3D12_BARRIER_ACCESS_COPY_SOURCE;
+  texture_split.LayoutBefore = D3D12_BARRIER_LAYOUT_COPY_DEST;
+  texture_split.LayoutAfter = D3D12_BARRIER_LAYOUT_COPY_SOURCE;
+  texture_split.pResource = texture.ptr;
+  texture_split.Subresources.IndexOrFirstMipLevel =
+      D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+  group.Type = D3D12_BARRIER_TYPE_TEXTURE;
+  group.pTextureBarriers = &texture_split;
+  list7->Barrier(1, &group);
+  const BarrierUse begin = {.kinds =
+                                BarrierUse::Enhanced | BarrierUse::SplitBegin,
+                            .sync_before = D3D12_BARRIER_SYNC_COPY,
+                            .sync_after = D3D12_BARRIER_SYNC_SPLIT};
+  if (!verify("texture-begin", {begin}))
+    return false;
+  old_head = static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list.ptr)->entry;
+  if (!CheckHR("barrier records texture Reset",
+               list->Reset(allocator.ptr, nullptr)))
+    return false;
+  texture_split.SyncBefore = D3D12_BARRIER_SYNC_SPLIT;
+  texture_split.SyncAfter = D3D12_BARRIER_SYNC_COPY;
+  list7->Barrier(1, &group);
+  if (!verify("texture-end",
+              {{.kinds = BarrierUse::Enhanced | BarrierUse::SplitEnd,
+                .sync_before = D3D12_BARRIER_SYNC_SPLIT,
+                .sync_after = D3D12_BARRIER_SYNC_COPY}}) ||
+      !SameBarriers(old_head->barriers, begin) || !reset())
+    return false;
+  global(static_cast<D3D12_BARRIER_SYNC>(0x10000),
+         D3D12_BARRIER_SYNC_VERTEX_SHADING);
+  const bool rejected = list->Close() == E_FAIL &&
+                        SameBarrierRecords(BarrierRecords(list.ptr), {{}});
+  std::cout << "barrier-records case=invalid nodes=1 result="
+            << (rejected ? "PASS" : "FAIL") << "\n";
+  return rejected;
+}
+
 // Observe the serialized native dependency between two dispatches, without
 // inserting a fence or otherwise changing the commands sent to Metal.
 class ComputeBarrierCounter {
@@ -5084,7 +5327,9 @@ bool TestConstantBufferBarrierStages(bool adjacent = false, bool immediate = fal
       list->ResourceBarrier(1, &transition);
     }
     D3D12_GLOBAL_BARRIER dependency = {
-        D3D12_BARRIER_SYNC_PIXEL_SHADING, D3D12_BARRIER_SYNC_PIXEL_SHADING,
+        D3D12_BARRIER_SYNC_PIXEL_SHADING,
+        mode == 3 ? D3D12_BARRIER_SYNC_VERTEX_SHADING
+                  : D3D12_BARRIER_SYNC_PIXEL_SHADING,
         D3D12_BARRIER_ACCESS_NO_ACCESS, D3D12_BARRIER_ACCESS_NO_ACCESS};
     D3D12_BARRIER_GROUP dependencies = {};
     dependencies.Type = D3D12_BARRIER_TYPE_GLOBAL;
@@ -5167,6 +5412,15 @@ bool TestConstantBufferBarrierStages(bool adjacent = false, bool immediate = fal
     list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
     if (!CheckHR("CBV stages Close", list->Close()))
       return false;
+    const auto records = BarrierRecords(list.ptr);
+    const auto render =
+        std::find_if(records.begin(), records.end(), [](const auto &record) {
+          return record.sync_before & D3D12_BARRIER_SYNC_PIXEL_SHADING;
+        });
+    const bool early_scope =
+        !adjacent || mode != 3 ||
+        (render != records.end() &&
+         (render->sync_after & D3D12_BARRIER_SYNC_VERTEX_SHADING));
     RenderBarrierCounter counter;
     if (!counter.Install())
       return false;
@@ -5203,6 +5457,8 @@ bool TestConstantBufferBarrierStages(bool adjacent = false, bool immediate = fal
           counter.second_barriers == 1 &&
           counter.second_scope == counter.scope &&
           counter.second_after == all && counter.second_before == all));
+    const bool immutable =
+        SameBarrierRecords(records, BarrierRecords(list.ptr));
     const bool written = mode == 1 || mode == 2;
     const bool pixels =
         pixel_value == 0xff00ff00u &&
@@ -5218,17 +5474,19 @@ bool TestConstantBufferBarrierStages(bool adjacent = false, bool immediate = fal
               << " scope=" << counter.scope
               << " second_barriers=" << counter.second_barriers
               << " second_scope=" << counter.second_scope
+              << " early_scope=" << early_scope << " immutable=" << immutable
               << " native=" << native << " pixel=0x" << std::hex << pixel_value
               << "/0x" << second_pixel << std::dec
               << " buffer=" << buffer_color[0] << "," << buffer_color[1] << ","
               << buffer_color[2] << "," << buffer_color[3]
               << " readback=" << (pixels ? "PASS" : "FAIL") << "\n";
-    good &= native && pixels;
+    good &= native && pixels && early_scope && immutable;
   }
   return good;
 }
 
-bool TestCommonAccessBarriers(bool adjacent = false, bool access_only = false) {
+bool TestCommonAccessBarriers(bool adjacent = false, bool access_only = false,
+                              bool replay = false) {
   struct Compiler {
     HMODULE module = LoadLibraryA(D3DCOMPILER_DLL_A);
     ~Compiler() {
@@ -5484,62 +5742,88 @@ bool TestCommonAccessBarriers(bool adjacent = false, bool access_only = false) {
       }
       if (!CheckHR("common access Close", list->Close()))
         return false;
-      ComputeBarrierCounter counter;
-      if (!counter.Install())
-        return false;
-      ID3D12CommandList *batch[] = {list.ptr};
-      queue->ExecuteCommandLists(1, batch);
-      if (!CheckHR("common access Signal", queue->Signal(fence.ptr, 1)) ||
-          !CheckHR("common access completion",
-                   fence->SetEventOnCompletion(1, event.value)) ||
-          WaitForSingleObject(event.value, 5000) != WAIT_OBJECT_0 ||
-          !CheckHR("common access device status",
-                   device->GetDeviceRemovedReason()))
-        return false;
-      bool pixels = true;
-      if (!no_access) {
-        void *mapped = nullptr;
-        if (!CheckHR("common access Map", readback->Map(0, nullptr, &mapped)))
-          return false;
-        for (UINT i = 0; i < 64; ++i) {
-          const auto offset =
-              texture ? footprint.Offset +
-                            (i / 8) * footprint.Footprint.RowPitch + (i % 8) * 4
-                      : i * 4;
-          UINT actual;
-          std::memcpy(&actual, static_cast<const BYTE *>(mapped) + offset,
-                      sizeof(actual));
-          const UINT first = 3u * (0x12345600u ^ i) + 7u;
-          pixels &= actual == (adjacent ? 3u * first + 7u : first);
-        }
-        const D3D12_RANGE no_write = {};
-        readback->Unmap(0, &no_write);
+      const auto recorded_barriers = BarrierRecords(list.ptr);
+      BarrierUse combined = {};
+      for (const auto &record : recorded_barriers) {
+        combined.kinds |= record.kinds;
+        combined.sync_before |= record.sync_before;
+        combined.sync_after |= record.sync_after;
       }
-      const UINT expected_scope =
-          texture ? WMTBarrierScopeTextures : WMTBarrierScopeBuffers;
-      const bool native =
-          counter.dispatches == (adjacent ? 3u : 2u) && counter.same_encoder &&
-          counter.barriers == (mode == 2 ? 0u : 1u) &&
-          (mode == 2 || (counter.scope & expected_scope)) &&
-          (!adjacent ||
-           (counter.second_barriers == (mode == 2 ? 0u : 1u) &&
-            (mode == 2 || (counter.scope == (WMTBarrierScopeBuffers |
-                                             WMTBarrierScopeTextures) &&
-                           counter.second_scope == counter.scope))));
-      std::cout << "common-access type=" << type << " mode=" << mode
-                << " access_only=" << access_only
-                << " dispatches=" << counter.dispatches
-                << " same_encoder=" << counter.same_encoder
-                << " barriers=" << counter.barriers
-                << " scope=" << counter.scope << " adjacent=" << adjacent
-                << " second_barriers=" << counter.second_barriers
-                << " second_scope=" << counter.second_scope
-                << " native=" << native << " readback="
-                << (no_access ? "NOT_RUN"
-                    : pixels  ? "PASS"
-                              : "FAIL")
-                << "\n";
-      good &= native && pixels;
+      const auto expected_before = mode == 2
+                                       ? D3D12_BARRIER_SYNC_NONE
+                                       : D3D12_BARRIER_SYNC_COMPUTE_SHADING;
+      const auto expected_after =
+          no_access ? expected_before
+                    : expected_before | D3D12_BARRIER_SYNC_COPY;
+      const bool recorded =
+          combined.kinds == (mode == 2 ? 0u : BarrierUse::Enhanced) &&
+          combined.sync_before == expected_before &&
+          combined.sync_after == expected_after;
+      for (UINT submission = 0; submission < (replay && !texture ? 2u : 1u);
+           ++submission) {
+        ComputeBarrierCounter counter;
+        if (!counter.Install())
+          return false;
+        ID3D12CommandList *batch[] = {list.ptr};
+        queue->ExecuteCommandLists(1, batch);
+        if (!CheckHR("common access Signal",
+                     queue->Signal(fence.ptr, submission + 1)) ||
+            !CheckHR(
+                "common access completion",
+                fence->SetEventOnCompletion(submission + 1, event.value)) ||
+            WaitForSingleObject(event.value, 5000) != WAIT_OBJECT_0 ||
+            !CheckHR("common access device status",
+                     device->GetDeviceRemovedReason()))
+          return false;
+        const bool immutable =
+            SameBarrierRecords(recorded_barriers, BarrierRecords(list.ptr));
+        bool pixels = true;
+        if (!no_access) {
+          void *mapped = nullptr;
+          if (!CheckHR("common access Map", readback->Map(0, nullptr, &mapped)))
+            return false;
+          for (UINT i = 0; i < 64; ++i) {
+            const auto offset =
+                texture
+                    ? footprint.Offset +
+                          (i / 8) * footprint.Footprint.RowPitch + (i % 8) * 4
+                    : i * 4;
+            UINT actual;
+            std::memcpy(&actual, static_cast<const BYTE *>(mapped) + offset,
+                        sizeof(actual));
+            const UINT first = 3u * (0x12345600u ^ i) + 7u;
+            pixels &= actual == (adjacent ? 3u * first + 7u : first);
+          }
+          const D3D12_RANGE no_write = {};
+          readback->Unmap(0, &no_write);
+        }
+        const UINT expected_scope =
+            texture ? WMTBarrierScopeTextures : WMTBarrierScopeBuffers;
+        const bool native =
+            counter.dispatches == (adjacent ? 3u : 2u) &&
+            counter.same_encoder && counter.barriers == (mode == 2 ? 0u : 1u) &&
+            (mode == 2 || (counter.scope & expected_scope)) &&
+            (!adjacent ||
+             (counter.second_barriers == (mode == 2 ? 0u : 1u) &&
+              (mode == 2 || (counter.scope == (WMTBarrierScopeBuffers |
+                                               WMTBarrierScopeTextures) &&
+                             counter.second_scope == counter.scope))));
+        std::cout << "common-access type=" << type << " mode=" << mode
+                  << " access_only=" << access_only << " replay=" << submission
+                  << " dispatches=" << counter.dispatches
+                  << " same_encoder=" << counter.same_encoder
+                  << " barriers=" << counter.barriers
+                  << " scope=" << counter.scope << " adjacent=" << adjacent
+                  << " second_barriers=" << counter.second_barriers
+                  << " second_scope=" << counter.second_scope
+                  << " native=" << native << " recorded=" << recorded
+                  << " immutable=" << immutable << " readback="
+                  << (no_access ? "NOT_RUN"
+                      : pixels  ? "PASS"
+                                : "FAIL")
+                  << "\n";
+        good &= native && pixels && recorded && immutable;
+      }
     }
   }
   return good;
@@ -6210,6 +6494,31 @@ bool TestWriteBufferImmediate(const char *mode) {
 }
 
 int main(int argc, char **argv) {
+  // Optional loaded-code evidence for isolated deployments and private-record
+  // probes.
+  if (std::getenv("DXMT_TEST_PRINT_LOADED_CODE")) {
+    for (auto [dll, symbol] :
+         {std::pair{"d3d12.dll", "D3D12CreateDevice"},
+          std::pair{"winemetal.dll", "DXMTMSCGetCapabilities"}}) {
+      auto module = GetModuleHandleA(dll);
+      auto *code =
+          module
+              ? reinterpret_cast<const BYTE *>(GetProcAddress(module, symbol))
+              : nullptr;
+      if (!code)
+        return 2;
+      std::cout << "LOADED_CODE " << dll << ' ' << symbol << ' ';
+      constexpr char digits[] = "0123456789abcdef";
+      for (UINT i = 0; i < 16; ++i)
+        std::cout << digits[code[i] >> 4] << digits[code[i] & 15];
+      std::cout << "\n";
+    }
+  }
+  if (argc == 2 && !std::strcmp(argv[1], "--barrier-records-gpu"))
+    return TestCommonAccessBarriers(true, false, true) ? 0 : 1;
+  if ((argc == 2 || argc == 3) && !std::strcmp(argv[1], "--barrier-records"))
+    return TestBarrierRecords(argc == 3 && !std::strcmp(argv[2], "wrong")) ? 0
+                                                                           : 1;
   if (argc == 3 && !std::strcmp(argv[1], "--stage-bindings"))
     return TestStageBindings(argv[2]) ? 0 : 1;
   if (argc == 3 && !std::strcmp(argv[1], "--indirect-bindings"))

@@ -124,7 +124,7 @@ the detailed sections below preserve original measurements and limits.
 | Linear versus root layout | A native Metal control compared linear and explicit layouts with one SRV and one UAV, including reflection, readback and timing; D3D12 equivalence remains unproven. | Measure representative resource sets and D3D12 binding costs before any production change. |
 | GPU and OS targets | Apple6/Apple7 controlled conversion and GPU output were compared on M1 Max; target parameters are included in the conversion key. | Test OS targets and additional devices; do not promote minimum platform. |
 | Argument buffer/occupancy | Root and table residency is tracked in command list (`d3d12_command_list.cpp:949-975`). No register or occupancy counters captured. | Capture representative vertex/fragment/compute counters and CPU binding cost before changing ABI. |
-| Execution overlap | Exact readbacks and 50 timing samples per visibility passed. After correcting layout-depth handling and adding submission/execution-point checks, three fresh ALL/PIXEL trace pairs passed: 72 workloads, 216 point pairs, no observed Compute/Vertex overlap. The N13 audit found that residency deltas, direct bindings, transitive predecessors and alias/barrier obligations do not provide a complete early-access proof. Direct/transitive/split-list CS→VB tests pass; the encoder now records ordinary direct IA coverage with unknown paths kept unclassified. | Next: preserve explicit early-stage barrier obligations in existing encoder boundary records. Current Fence stages remain unchanged; see the [dependency contract and regression](msc-fence-dependency-design.md) and [trace evidence](msc-trace-attribution.md). |
+| Execution overlap | Exact readbacks and 50 timing samples per visibility passed. After correcting layout-depth handling and adding submission/execution-point checks, three fresh ALL/PIXEL trace pairs passed: 72 workloads, 216 point pairs, no observed Compute/Vertex overlap. The N13 audit found that residency deltas, direct bindings, transitive predecessors and alias/barrier obligations do not provide a complete early-access proof. Direct/transitive/split-list CS→VB tests pass; the encoder now records ordinary direct IA coverage with unknown paths kept unclassified. Explicit legacy/enhanced barrier scopes and split/alias reasons are retained on the same recording chain. | Next: establish ordinary MSC vertex shader resource-access completeness through the existing reflection/binding owner; combine only after alias and transitive obligations are also proven. Current Fence stages remain unchanged; see the [dependency contract and regression](msc-fence-dependency-design.md) and [trace evidence](msc-trace-attribution.md). |
 | Input DXIL | Controlled `-Od` and `-O3` pixel tests passed; embedded debug exposed an LLVM metadata incompatibility addressed by a separately built patched toolchain. | Expand shader coverage and deployment verification; do not recompile game shaders. |
 | Root validation | Unset, zero, bound-resource and DXIL validation were compared on one valid/missing-resource pair; DXIL validation also passed controlled HLSL GPU pixels. | Validate broader inputs and runtime versions before changing production flags. |
 | In-process and persistent cache | Process cache plus single-flight exists, disk cache explicitly disabled (`d3d12_shader_converter.cpp:199-213,228-237,1812-1837`). Map has no evident capacity bound. Key includes stage, source, root, targets, spaces, configuration and flags, but loaded-dylib content identity is not trusted for persistent use. | Measure hits, waits and memory growth; validate content identity, corruption recovery and opt-in before disk cache. Function specializations require separate keys. |
@@ -1715,3 +1715,32 @@ identities, raw statistics and limitations. This summary is not complete
 dependency evidence and cannot authorize stage relaxation by itself. Next
 preserve explicit early-stage barrier obligations in existing boundary records;
 alias identity, transitive dependencies and full shader access remain open.
+
+
+### Explicit barrier execution records — 2026-11-04
+
+At baseline `65fdbedb`, N13 preserves barrier scope/reason facts on the existing
+encoder chain, including the head sentinel and trailing gaps. Legacy render
+scopes are mapped per barrier before union; enhanced sync bits are retained
+independently of memory access. Split halves and NULL alias barriers retain
+explicit reasons. ClearState, Reset and replay respect recording ownership.
+The queue keeps its current waits; no resource-state map, lock, allocation,
+extra encoder, public capability or WineMetal ABI change is introduced.
+
+The x64 full build, nine recording checks, negative expected-bit control,
+36 compute record/packet checks, four render cases, enhanced admission and
+four split submission modes passed. API/GPU validation was enabled for all
+12 barrier processes. MSC adjacency regression passed 32 processes, 112 image
+and 28 scratch readbacks with eight expected wrong-output controls. Deployment
+checks match the current build and actual loaded identities. The fixed record
+adds 16 bytes per encoder/head.
+
+An eight-process alternating split-heavy A/B passed 200 changing-payload
+readbacks. Warm recording median increased 0.096725 → 0.101050 µs per split
+pair (about 4.5%); CPU submit median was 101.35 → 106.35 µs. This measured cost
+is retained explicitly, with overlapping ranges and no optimization or
+no-regression claim. See the [barrier recording report](msc-fence-dependency-design.md#explicit-barrier-recording-slice--design-card-2026-11-04)
+for exact source anchors, commands, P95/ranges, artifact identities and limits.
+Next establish ordinary MSC VS resource-access completeness in the existing
+reflection/binding path. Alias identity, transitive predecessors and broader
+shader access remain required before any Fence-stage change.

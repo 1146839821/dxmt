@@ -68,6 +68,24 @@ struct EncoderData {
   EncoderType type;
   EncoderData *next = nullptr;
   uint64_t id;
+  // Barriers recorded inside this encoder and in its trailing gap. Before the
+  // first encoder, the recording-head sentinel owns this summary. It is an
+  // overapproximation, not an ordered event list or a resource-state owner.
+  struct BarrierUse {
+    enum Kind : uint32_t {
+      LegacyTransition = 1 << 0,
+      LegacyUAV = 1 << 1,
+      Aliasing = 1 << 2,
+      Enhanced = 1 << 3,
+      SplitBegin = 1 << 4,
+      SplitEnd = 1 << 5,
+    };
+    uint32_t kinds = 0;
+    WMTRenderStages legacy_stages_before = (WMTRenderStages)0;
+    WMTRenderStages legacy_stages_after = (WMTRenderStages)0;
+    D3D12_BARRIER_SYNC sync_before = D3D12_BARRIER_SYNC_NONE;
+    D3D12_BARRIER_SYNC sync_after = D3D12_BARRIER_SYNC_NONE;
+  } barriers;
   // Commands store native resource handles for compact translation. Keep a
   // strong reference alongside each encoder so a D3D12 resource released
   // after Close() cannot invalidate the handle before ExecuteCommandLists

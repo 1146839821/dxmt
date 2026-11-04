@@ -2452,6 +2452,23 @@ public:
     return true;
   }
 
+  using BarrierUse = EncoderData::BarrierUse;
+
+  void
+  RecordBarrier(const BarrierUse &use) {
+    // A closed list may share its allocator with a new recording.
+    if (encoder_count != std::numeric_limits<size_t>::max())
+      return;
+    auto *owner = allocator_->encoder_current ? allocator_->encoder_current : allocator_->encoder_last;
+    assert(owner); // StartRecord installs the head before opening the list.
+    auto &record = owner->barriers;
+    record.kinds |= use.kinds;
+    record.legacy_stages_before |= use.legacy_stages_before;
+    record.legacy_stages_after |= use.legacy_stages_after;
+    record.sync_before |= use.sync_before;
+    record.sync_after |= use.sync_after;
+  }
+
   void
   EmitMemoryBarrier(WMTBarrierScope scope, WMTRenderStages stages_after, WMTRenderStages stages_before) {
     switch (allocator_->encoder_current->type) {
@@ -2525,7 +2542,10 @@ public:
   }
 
   void
-  RecordEnhancedSplit(const EnhancedSplitBarrier &state, EnhancedSplitPhase phase, WMTBarrierScope scope) {
+  RecordEnhancedSplit(
+      const EnhancedSplitBarrier &state, EnhancedSplitPhase phase, WMTBarrierScope scope,
+      D3D12_BARRIER_SYNC sync_before, D3D12_BARRIER_SYNC sync_after
+  ) {
     const auto first_transition = resource_state_transitions_.size();
     const auto index = enhanced_split_barriers_.size();
     D3D12_RESOURCE_STATES tracked_before = D3D12_RESOURCE_STATE_COMMON;
@@ -2593,6 +2613,12 @@ public:
       FailRecording(__func__, "split barrier recording allocation failed");
       return;
     }
+    RecordBarrier(
+        {.kinds = BarrierUse::Enhanced |
+                  (phase == EnhancedSplitPhase::Begin ? BarrierUse::SplitBegin : BarrierUse::SplitEnd),
+         .sync_before = sync_before,
+         .sync_after = sync_after}
+    );
     // Both halves delimit encoders. Validation/pairing happens later, in
     // submission order, without changing this immutable recorded synchronization.
     EncodeMemoryBarrier(scope, state.before_state, state.after_state);
@@ -6235,10 +6261,20 @@ public:
           }
         }
 
-        if (barrier.Transition.StateBefore != barrier.Transition.StateAfter)
+        if (barrier.Transition.StateBefore != barrier.Transition.StateAfter) {
+          uint32_t kinds = BarrierUse::LegacyTransition;
+          if (barrier.Flags == D3D12_RESOURCE_BARRIER_FLAG_BEGIN_ONLY)
+            kinds |= BarrierUse::SplitBegin;
+          if (barrier.Flags == D3D12_RESOURCE_BARRIER_FLAG_END_ONLY)
+            kinds |= BarrierUse::SplitEnd;
+          RecordBarrier(
+              {kinds, render_stages_for_state(barrier.Transition.StateBefore),
+               render_stages_for_state(barrier.Transition.StateAfter)}
+          );
           EncodeMemoryBarrier(
               resource_barrier_scope(resource), barrier.Transition.StateBefore, barrier.Transition.StateAfter
           );
+        }
         try {
           ResourceStateTransition transition{resource, subresource, barrier.Transition.StateBefore,
                                              barrier.Transition.StateAfter,
@@ -6259,6 +6295,10 @@ public:
           FailRecording(__func__, "UAV resource belongs to another device");
           break;
         }
+        RecordBarrier(
+            {BarrierUse::LegacyUAV, WMTRenderStagePreRaster | WMTRenderStageFragment,
+             WMTRenderStagePreRaster | WMTRenderStageFragment}
+        );
         EncodeMemoryBarrier(resource_barrier_scope(static_cast<MTLD3D12Resource *>(barrier.UAV.pResource)),
                             D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         break;
@@ -6269,6 +6309,7 @@ public:
           FailRecording(__func__, "aliasing resource belongs to another device");
           break;
         }
+        RecordBarrier({.kinds = BarrierUse::Aliasing});
         // Metal serializes the encoder boundary, which is the visibility point needed for alias reuse.
         allocator_->InvalidateCurrentPass();
         break;
@@ -8405,9 +8446,11 @@ public:
       // COMMON means broad access, whereas NO_ACCESS means none. Both lower
       // to legacy COMMON for stage selection; that zero is not an empty scope.
       // Empty cache access does not cancel a nonempty execution dependency.
-      if (layout_transition || access_before != D3D12_BARRIER_ACCESS_NO_ACCESS ||
-          access_after != D3D12_BARRIER_ACCESS_NO_ACCESS ||
-          (sync_before != D3D12_BARRIER_SYNC_NONE && sync_after != D3D12_BARRIER_SYNC_NONE))
+      const bool memory = layout_transition || access_before != D3D12_BARRIER_ACCESS_NO_ACCESS ||
+                          access_after != D3D12_BARRIER_ACCESS_NO_ACCESS;
+      if (memory || sync_before != D3D12_BARRIER_SYNC_NONE || sync_after != D3D12_BARRIER_SYNC_NONE)
+        RecordBarrier({.kinds = BarrierUse::Enhanced, .sync_before = sync_before, .sync_after = sync_after});
+      if (memory || (sync_before != D3D12_BARRIER_SYNC_NONE && sync_after != D3D12_BARRIER_SYNC_NONE))
         EncodeMemoryBarrier(scope, before, after);
     };
 
@@ -8488,7 +8531,9 @@ public:
                 before,
                 after,
             };
-            RecordEnhancedSplit(state, split_phase, resource_barrier_scope(resource));
+            RecordEnhancedSplit(
+                state, split_phase, resource_barrier_scope(resource), barrier.SyncBefore, barrier.SyncAfter
+            );
             continue;
           }
 
@@ -8623,16 +8668,20 @@ public:
                 before_layout,
                 after_layout,
             };
-            RecordEnhancedSplit(state, split_phase, resource_barrier_scope(resource));
+            RecordEnhancedSplit(
+                state, split_phase, resource_barrier_scope(resource), barrier.SyncBefore, barrier.SyncAfter
+            );
             continue;
           }
 
-          auto emit_subresource = [&](UINT subresource) {
+          auto emit_texture_barrier = [&]() {
             emit_memory_barrier(
                 resource_barrier_scope(resource), before_layout != after_layout ? before_layout : before_access,
                 before_layout != after_layout ? after_layout : after_access, barrier.AccessBefore,
                 barrier.AccessAfter, barrier.SyncBefore, barrier.SyncAfter, barrier.LayoutBefore != barrier.LayoutAfter
             );
+          };
+          auto track_subresource = [&](UINT subresource) {
             // Access scopes do not replace the layout when interoping with legacy barriers.
             resource_state_transitions_.push_back(
                 {resource, subresource, tracked_before_layout, tracked_after_layout, false, discard, access_only, true}
@@ -8640,13 +8689,13 @@ public:
           };
 
           if (!range.NumMipLevels) {
-            if (range.IndexOrFirstMipLevel == D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES) {
-              emit_subresource(D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES);
-            } else if (!resource->HasSubresource(range.IndexOrFirstMipLevel)) {
+            if (range.IndexOrFirstMipLevel != D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES &&
+                !resource->HasSubresource(range.IndexOrFirstMipLevel)) {
               invalid_barrier();
-            } else {
-              emit_subresource(range.IndexOrFirstMipLevel);
+              continue;
             }
+            emit_texture_barrier();
+            track_subresource(range.IndexOrFirstMipLevel);
             continue;
           }
 
@@ -8669,11 +8718,14 @@ public:
             continue;
           }
 
+          // The memory packet covers the whole scope; only layout tracking
+          // is per subresource. No GPU commands intervene between entries.
+          emit_texture_barrier();
           for (UINT plane = range.FirstPlane; plane < range.FirstPlane + range.NumPlanes; plane++) {
             for (UINT slice = range.FirstArraySlice; slice < range.FirstArraySlice + range.NumArraySlices; slice++) {
               for (UINT mip = range.IndexOrFirstMipLevel;
                    mip < range.IndexOrFirstMipLevel + range.NumMipLevels; mip++) {
-                emit_subresource(static_cast<UINT>(mip + mip_levels * (slice + array_size * plane)));
+                track_subresource(static_cast<UINT>(mip + mip_levels * (slice + array_size * plane)));
               }
             }
           }
