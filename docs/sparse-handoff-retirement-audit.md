@@ -124,3 +124,105 @@ Gate conclusions: Gate 0 evidence sufficient for the bounded test, Gate 1 approv
 ### 10. Next Recommended Slice
 
 One N13 Design Card: establish the native sparse ResourceState barrier's asynchronous feedback and allocator/command-buffer completion ownership contract, then design a bounded failure-propagation oracle through existing D3D12 queue/device owners. First verify SDK contracts and Mullion differences; retain current waits and public capabilities. Do not widen into resource-backend replacement or automatically implement a new bridge ABI. This recommendation is not an implemented fix.
+
+## N13 follow-up — ResourceState barrier feedback and completion Design Card
+
+2026-11-05. **Gate 0 complete; Gate 1 PROPOSED; Gate 2 not started.** This follow-up is an audit/design deliverable, not a production fix or a new GPU result. The earlier fenced-retirement results above remain historical evidence at their stated source/artifact identity.
+
+### Task Summary / Goal / Baseline
+
+Goal: connect asynchronous native ResourceState-barrier completion/error evidence to DXMT's existing submission completion owner, without confusing API admission, GPU event ordering, CPU feedback delivery or safe resource retirement. The first recommended implementation prerequisite is a native feedback-timing prototype, not a broad sparse backend replacement.
+
+Target baseline: `feat/d3d12`, `d21b4ace8faed35a42c1e4949ad58b0c1c14345b`; initial worktree contains only the user's original `.gitignore` modification, SHA256 `764aac09922db4654ca6de63fd20cf014739d9292623eb979f448f38e609b759`. Local tracking ref is 0 behind / 11 ahead. Fresh `ls-remote` observations: target `d1e83d41db5abb86d03bdbde4b7254c54debac6f`; Mullion `93de32b9145885ceb2e45be7d445e56d62499b3c`. No fetch or history changes.
+
+New evidence E2: `/Users/zhangbo/Documents/Vibe-Codeding/dxmt-test/n95-capability-gate/result-sparse-barrier-feedback-design-20261105`. It contains current source hashes/excerpts, installed SDK headers, freshly fetched pinned Mullion source, official documentation snapshots, remote refs and the explicitly non-GPU ordering model. `sources.json` records URLs and hashes. Environment rechecked: macOS 27.2 `26B123`, Xcode 27.2 `27B52`; M1 Max/Apple7 GPU evidence is inherited from the preceding real tests, not rerun here. No capability emulation.
+
+### Gate 0 Findings / specification and reference evidence
+
+Paths below are relative to `/Users/zhangbo/Documents/Vibe-Codeding/dxmt` unless prefixed E2. New production conclusions are source-level observations, not reproduced native GPU failures.
+
+| ID | Conclusion | Source and evidence type |
+| --- | --- | --- |
+| F1 | Checked barrier entry returns synchronous Unix-call status only. The native commit installs no feedback handler. | `src/winemetal/winemetal_thunks.c:1597–1604`; `src/winemetal/unix/winemetal_unix.c:4131–4175`; `src/winemetal/Metal.hpp:926–934`. SOURCE_AUDIT; BACKEND_NOT_IMPLEMENTED for asynchronous barrier feedback transport. |
+| F2 | Main queue completion waits its classic command buffer; it has no auxiliary barrier-completion result to consume before retiring its FIFO record or publishing a fence. | `src/d3d12/d3d12_command_queue.cpp:86–110,456–515`. SOURCE_AUDIT. Absence of a consumer is confirmed; loss of an actual GPU error was not reproduced. |
+| F3 | Installed API provides completion/error feedback for committed command buffers. Mapping methods are separate void queue operations with no corresponding feedback parameter. Barrier success therefore cannot certify later mapping success. | E2/MTL4CommitFeedback.h:19–40; E2/MTL4CommandQueue.h:236–259,353–435. SDK_CONTRACT. |
+| F4 | GPU event completion is not a documented CPU-feedback-delivery guarantee. Mullion explicitly retains feedback work after GPU events/fences and settles it separately. | E2/MTL4CommandQueue.h:261–275; E2/mullion-queue.cpp:529–562; E2/mullion-bridge.c:5656–5681,5721–5737. SOURCE_AUDIT / DESIGN_INFERENCE, not MULLION_OBSERVED on this device. |
+| F5 | Existing device-removal listeners already cancel pending CPU/GPU waits; fence state rejects later signals once removed. Native callbacks cannot directly call these PE C++ objects. | `src/d3d12/d3d12_command_queue.cpp:124–142`; `src/d3d12/d3d12_device.cpp:1794–1821`; `src/d3d12/d3d12_fence.cpp:131–141,179–210`. SOURCE_AUDIT. Retain this authority instead of another removal registry. |
+| F6 | Native barrier currently releases its allocator and command buffer after commit. Header text constrains allocator Reset, while Apple's WWDC explanation discusses release when encoding will not continue. These do not precisely settle every committed-object internal-retention detail. | `src/winemetal/unix/winemetal_unix.c:4161–4166`; E2/MTL4CommandAllocator.h:43–50; E2/apple-core.json; E2/apple-wwdc.txt:254–273. SPEC_UNVERIFIED for the exact release contract; not a proven UAF or a hardware blocker. |
+| F7 | Existing barrier fault cases cover native factory failures and a synchronously reported post-commit injection. They do not execute a delayed native feedback-error path. | `src/winemetal/unix/winemetal_unix.c:4110–4128,4166–4168`; `tests/dx12/dx12_reserved_buffer.cpp:177–219,320–399`. TEST_SOURCE_AUDIT. |
+
+Official references: [Apple Metal 4 core API](https://developer.apple.com/documentation/metal/understanding-the-metal-4-core-api), [commit feedback](https://developer.apple.com/documentation/metal/mtl4commitfeedback), [WWDC25 Explore Metal 4 games](https://developer.apple.com/videos/play/wwdc2025/254/), and [Microsoft GetCompletedValue](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12fence-getcompletedvalue). Microsoft specifies UINT64_MAX for a removed device; this must remain distinct from a successful requested fence value. Full URLs and retrieved bytes are retained in E2, rather than treating search snippets as evidence.
+
+### Mullion comparison / shareable semantics
+
+Mullion's native wrapper holds per-command-buffer feedback, a completion group, allocator and other objects (`E2/mullion-bridge.c:5121–5155,5235–5259`). Its callback stores error/timestamps and completes the group (`5665–5673`). Its wait handles error feedback even if a GPU event cannot signal (`5721–5737`). Its queue additionally keeps an `unsettled_` collection after GPU completion (`E2/mullion-queue.cpp:529–562`).
+
+Share the distinction between GPU progress and CPU feedback, retain callback payloads, and handle errors when GPU-event progress is missing. Do not transplant Mullion's full native command-buffer wrapper, held-work scheduler, allocator pool or unsettled submission registry. No reference source code is copied by this documentation change; any later code port still requires a license/source review.
+
+### Design alternatives / decision
+
+1. **Poll a queue-local sticky error at the next API call or just before fence publication. Reject as sufficient closure.** There may be no later API call, feedback may arrive after that poll, and a main command buffer may remain blocked on a sparse event.
+2. **Wait for every barrier on the application's mapping call. Reject as the default.** This adds CPU/GPU synchronization to a currently asynchronous API and can prevent the application from reaching the work that opens an existing queue gate.
+3. **Native callback calls PE device/queue methods, or a new error-monitor thread. Reject.** This introduces cross-ABI execution/lifetime hazards or another scheduling owner.
+4. **Proposed: native completion credential owned by the existing bounded Submission record.** Prepare the credential before publishing its owning record; have the existing FIFO completion thread consume it. The Unix callback updates native completion evidence only. This is the preferred design to prototype, not an approved bridge implementation.
+
+A credential contains completion/error evidence for one auxiliary native workload. It is not another D3D12 resource-state map, capability snapshot, scheduler or device-removal authority. Per-credential completion avoids assuming callback delivery order; taking a maximum completed sequence is insufficient if a later callback arrives first.
+
+### Architecture / module boundary / proposed transitions
+
+Affected invariants: INV-03, INV-04, INV-08, INV-11, INV-12, INV-14. One selected node: N13. Existing N14 device/fence contracts are dependencies, not a second development task.
+
+Proposed sequence, subject to the native prototype and Gate approval:
+
+1. Under current queue admission/commit ownership, prepare a native barrier credential and native objects **without submitting GPU work**. Attach it to the existing main-queue handoff `Submission` before `CommitSubmissionLocked` publishes that record. Creation failure is handled before a record can wait on a missing credential.
+2. Submit the current main signal; keep existing sparse-queue wait, ResourceState visibility barrier, mappings and mapping signal. Commit the prepared barrier with `MTL4CommitOptions`. The native callback captures native payload/event references, never a PE `this` pointer.
+3. Track separately: native submit admission, feedback terminal state/error, and safe native retirement. A real callback is completion evidence. Aborted-before-submit can retire without a callback. A synchronous test hook reporting failure after a real commit **cannot** grant early retirement; the real workload still needs completion evidence.
+4. If feedback reports a terminal error, retain the first native diagnostic, publish the result, then release the internal sparse-event wait through the existing cancellation convention. This signal is an error-unblock mechanism, never successful mapping/fence evidence. Do not hold a native result lock while calling Metal or destructing captured objects.
+5. The existing PE completion thread waits for the corresponding classic main command buffer and consumes that record's native feedback, outside `commit_mutex_` and `submission_state_->mutex`. It invokes the existing `MarkDeviceRemoved` path on a real native execution failure before later FIFO records can publish affected success. Healthy records submitted before the failing barrier retain their ordering.
+6. Resources of later, unblocked main command buffers remain alive until their actual terminal completion. Device removal and callback delivery are not permission to release in-flight GPU allocations. Only after both required completions can the record/credential payload retire.
+
+The callback may run early, late or in a different order from another callback. Its result must remain available if delivered before the PE waiter starts. A per-record condition/group avoids polling; use no additional scheduler or permanent monitor thread. The existing 32-entry admission ring bounds published credentials, plus at most one under preparation; do not add an unbounded pending-feedback vector. FIFO publication closes the late-error window even if the mapping GPU event and subsequent classic command buffer finish before CPU feedback arrives.
+
+No normal path adds a GPU fence/event or a GPU wait beyond the current handoff. The cancellation convention needs explicit lost-event/late-callback tests; missing feedback must not be silently turned into success or a fabricated GPU completion. An ordinary diagnostic timeout does not establish device removal. Exact safe teardown when the driver supplies no terminal evidence remains a risk to resolve before implementation acceptance.
+
+### Proposed Changes / ABI inventory / Scope and Non-Scope
+
+Possible future additive interfaces, names not frozen: prepare a barrier credential; submit it; wait/read its terminal feedback. Keep existing `SparseMappingQueue_tryBarrierBeforeResourceState` behavior and old exports available. Do not reinterpret its synchronous boolean as asynchronous completion. Native payload ownership must have an exact retain/release ledger, including aborted-before-submit, submitted host-error injection, callback-before-wait and queue release; callback/options/payload references must not form a cycle.
+
+Any later bridge slice is limited to existing `src/winemetal/{winemetal.h,winemetal_thunks.h,winemetal_thunks.c,winemetal.def,Metal.hpp}`, `src/winemetal/unix/winemetal_unix.c`, existing `src/d3d12/d3d12_command_queue.cpp` and the selected existing test. Add Unix-call identifiers at the end of both tables; verify PE/Unix pairs, native/WoW64 structure layout, optional API availability and null factories. No new `src/d3d12` file. The current commit changes **only this report**.
+
+Non-scope: sparse mapping-operation error coverage beyond the barrier commit, new descriptor/root ABI, native backend migration, Metal3 replacement, D3D11 changes, MSC compilation/runtime changes, FL/SM/Tier promotion, and intentional GPU faults. In particular, adding a post-mapping dummy commit does not prove its feedback reports a previous void mapping operation's failure; that claim remains SPEC_UNVERIFIED.
+
+### Test Plan / minimum M1 Max verification matrix
+
+These are acceptance cases for future work. **All GPU rows are NOT_RUN in this design round.** Use real supportsFamily/supportsPlacementSparse/page-size queries and retain their output; do not override them. Reuse existing R32/64-KiB fixture and the previous retirement probe wherever possible.
+
+| Stage | Case / oracle | Failure boundary |
+| --- | --- | --- |
+| First native prototype | Correct ResourceState barrier and real mapping on M1 Max; nonuniform mapped data → shader/CopyTiles readback, then NULL unmap → zero. Record native feedback error=nil, callback count and actual GPU event progress. | Baseline capability must be queried, and a missing callback/readback must fail rather than skip. |
+| First native prototype | Hold a **test-controlled report gate** after receiving actual native feedback; let the real GPU event/readback complete first. Verify the consumer remains pending until report release. Also deliver before the waiter starts. | Simulated report latency is not a native GPU failure or proof that a particular driver naturally delays feedback. |
+| First native prototype | Two credentials, deliberately release reports in reverse order; drop the caller's queue handle while an explicit native fixture owner remains through callback/drain; check exactly-once cleanup. | No maximum-sequence shortcut, callback/owner cycle or resource release before actual completion. |
+| Bridge after separate approval | At the real callback adapter, independently exercise success and a clearly labelled **synthetic error result** after real benign GPU work. Existing pending fence wakes with UINT64_MAX, later Signal is rejected, no affected success is published. | This proves propagation only, not native GPU-fault generation or recovery. Never issue unsafe work to manufacture an error. |
+| Bridge after separate approval | Error notification while the main queue waits on the sparse event; never-submitted prepare failure; existing synchronous submitted-failure hook. | Gate cancellation must unblock; safe retirement still waits for real native/main completion where work was submitted. |
+| Nearest regression | Existing `dx12_reserved_buffer` barrier update/copy fault cases, `dx12_reserved_texture_overlap --handoff-retirement` and both negative controls, multiheap/cross-queue and packed smoke. | Preserve current HRESULT contracts, complete-word/edge checks and healthy prefix fence completion. |
+| Compatibility gate | Relevant D3D11/Airconv smoke, Metal3/no-placement path on an available real target; x64 and x86 builds with compatible bridge pairs. | NOT_RUN when the necessary target is absent, never fake a capability to create a passing result. |
+| Later differential | Windows native device-removal behavior and actual naturally captured native error feedback, when available. | TARGET_DEVICE_NOT_AVAILABLE / NOT_RUN until genuine evidence exists. |
+
+For new bridge tests extend the existing `dx12_reserved_buffer` failure entry instead of adding another repository runner. External prototype/scripts/results remain under `dxmt-test`. Use isolated Wine prefixes, per-case shader caches, Metal API/Shader Validation, actual module/export bytes, Unix/MSC loaded paths/UUIDs and artifact hashes. Separate native evidence, injected transport results and static models in the manifest.
+
+### Performance / Risks / Rollback / Definition of Done
+
+Cost hypothesis: one native result payload/options/condition and callback per existing sparse barrier; no added draw/dispatch work or descriptor scan. Waiting for CPU feedback can delay FIFO retirement, ring capacity and public CPU fence notification even after GPU completion. **Performance is UNMEASURED**, not zero overhead. Next prototype must measure callback-delivery lag and admission/backpressure separately from GPU time, with warm/cold samples; a later bridge change needs equivalent-build A/B comparison. This is a correctness trade-off to measure, not a claimed optimization.
+
+Risks: callback late/missing delivery, failure without an event signal, accidental lock inversion, callback/native-reference cycle, preparation/record-publication race, suppression of healthy prior fence values, premature cleanup after an injected submitted error, and PE/Unix ABI mismatch. Preserve original waits and use existing first-error device authority. Rollback is the focused future commit; this documentation commit has no runtime effect.
+
+Prototype DoD: actual queried device identity; real mapped/unmapped full-data oracle; actual native callback observed; early/late/reversed report ordering and exactly-once ownership verified; explicit separation of synthetic/native failures; no validation diagnostics; retained commands/artifact identities; measured callback lag. This round does not meet that GPU DoD. Bridge DoD additionally requires device/fence propagation, admission/cancellation/teardown regressions and measured cost. Do not mark the asynchronous gap closed when only the prototype or synchronous fault tests pass.
+
+### Validation Results / Capability Impact / Git State / Next Recommended Slice
+
+- **PASS — SOURCE/SPEC AUDIT:** installed headers and current target/pinned Mullion source inspected; fresh Mullion bytes match the retained pinned reference. Official documentation snapshots and source hashes retained in E2. No production source or test changed.
+- **STATIC_MODEL_PASS_NOT_GPU_EVIDENCE:** E2/check_order_model.py enumerates four schedules for a single post-GPU error poll; one permits publication before feedback. Requiring both main completion and the record's feedback admits three schedules with no premature publication under the listed assumptions. It also checks reverse report order and separation of submitted-error status from safe native retirement. This is a design counterexample/proof boundary, **not LOCAL_FAIL/LOCAL_PASS for Metal**. An unused-loop error in the initial external model script was corrected and recorded in E2/model-initial-failure.txt; it was not a GPU/build failure.
+- **NOT_RUN:** production rebuild and GPU/runtime tests; this is a documentation-only design round and no bridge implementation was made. Earlier real-test results are not re-labelled as this round's executions.
+- **CAPABILITY IMPACT:** none. No new MSC_SEMANTIC_GAP or BLOCKED_BY_HARDWARE conclusion. The M1 Max target is available; missing asynchronous feedback is BACKEND_NOT_IMPLEMENTED, while exact release/void-mapping error contracts remain SPEC_UNVERIFIED. Other GPUs/Windows-native differential remain TARGET_DEVICE_NOT_AVAILABLE / NOT_RUN.
+- **GIT:** baseline above; only this report is committed with repository style, no push. The original `.gitignore` edit stays untouched. Final commit ID, status and evidence hashes are in E2/delivery-manifest.json.
+- **NEXT:** execute one external native feedback-timing/ownership prototype on M1 Max with real R32 sparse readback and controlled report delay, before approving any additive bridge ABI. Stop before production integration and review its results against this Design Card. The broad development goal remains active.
