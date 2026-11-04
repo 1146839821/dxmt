@@ -2339,7 +2339,8 @@ int CheckSparseFIFO(const char *mode) {
   return 0;
 }
 int Run(const char *read_path, const char *write_path, UINT seed,
-        bool wrong_oracle, bool queue_failure) {
+        bool wrong_oracle, bool queue_failure,
+        const char *owned_mode = nullptr) {
   auto read_shader = ReadShader(read_path),
        write_shader = ReadShader(write_path);
   Owned<ID3D12Device> device;
@@ -2379,6 +2380,39 @@ int Run(const char *read_path, const char *write_path, UINT seed,
     std::cout << "SKIP: reserved buffer has no shader-visible backing\n";
     return 77;
   }
+  const bool owned = owned_mode != nullptr;
+  const bool same_queue = owned && (std::strstr(owned_mode, "same") != nullptr);
+  const bool copy_plan = owned && (std::strstr(owned_mode, "copy") != nullptr);
+  const bool gated = owned && std::strstr(owned_mode, "ungated") == nullptr;
+  const UINT terminal_flags = !owned || std::strstr(owned_mode, "event") ? 0
+                              : std::strstr(owned_mode, "delay")         ? 3
+                                                                         : 1;
+  auto consumer = same_queue ? direct.ptr : compute.ptr;
+  const auto consumer_type = same_queue ? D3D12_COMMAND_LIST_TYPE_DIRECT
+                                        : D3D12_COMMAND_LIST_TYPE_COMPUTE;
+  if (owned) {
+    if (!GetModuleHandleA("winemetal.dll"))
+      throw std::runtime_error("owned consumer requires matched DXMT");
+    auto metal =
+        static_cast<dxmt::MTLD3D12Device *>(device.ptr)->GetMTLDevice();
+    if (!metal.supportsPlacementSparse() ||
+        !metal.supportsFamily(WMTGPUFamilyMetal4))
+      throw std::runtime_error(
+          "owned consumer requires actual placement sparse");
+    std::printf("OWNED_CONSUMER_DEVICE apple7=%u apple8=%u apple9=%u metal4=%u "
+                "placement=%u\n",
+                metal.supportsFamily(WMTGPUFamilyApple7),
+                metal.supportsFamily(WMTGPUFamilyApple8),
+                metal.supportsFamily(WMTGPUFamilyApple9),
+                metal.supportsFamily(WMTGPUFamilyMetal4),
+                metal.supportsPlacementSparse());
+    SetEnvironmentVariableA("DXMT_TEST_SPARSE_SUBMISSION", "1");
+  }
+  Owned<ID3D12Resource> copy_source;
+  if (copy_plan)
+    Check("copy source", device->CreateReservedResource(
+                             &d, D3D12_RESOURCE_STATE_COMMON, nullptr,
+                             IID_PPV_ARGS(&copy_source.ptr)));
   const auto stable_va = sparse->GetGPUVirtualAddress();
   if (queue_failure) CheckSparseQueueAdmission(device.ptr);
   auto create = [&](Owned<ID3D12Resource> &r, UINT bytes, D3D12_HEAP_TYPE type,
@@ -2445,6 +2479,10 @@ int Run(const char *read_path, const char *write_path, UINT seed,
   D3D12_TILE_REGION_SIZE region = {}; region.NumTiles = 2;
   UINT offset = 0;
   direct->UpdateTileMappings(sparse.ptr, 1, &coord, &region, heap.ptr, 1, nullptr, &offset, nullptr, D3D12_TILE_MAPPING_FLAG_NONE);
+  if (copy_plan)
+    direct->UpdateTileMappings(copy_source.ptr, 1, &coord, &region, heap.ptr, 1,
+                               nullptr, &offset, nullptr,
+                               D3D12_TILE_MAPPING_FLAG_NONE);
   const ULONG heap_public_ref_after_mapping = heap->AddRef();
   heap->Release();
   if (heap_public_ref_after_mapping != heap_public_ref_after_create) {
@@ -2465,61 +2503,168 @@ int Run(const char *read_path, const char *write_path, UINT seed,
   region.NumTiles = 1;
   bool written[2] = {};
   UINT64 words_checked = 0;
+  Owned<ID3D12CommandAllocator> remap_allocator;
+  Owned<ID3D12GraphicsCommandList> remap_list;
   auto phase = [&](const char *name, int tile, bool write, UINT expected,
                    bool delayed = false) {
-    if (serial > 1)
+    if (serial > 1 && !same_queue)
       Check("direct waits previous compute",
             direct->Wait(compute_done.ptr, serial - 1));
     if (delayed)
       Check("hold mapping queue", direct->Wait(gate.ptr, 1));
     D3D12_TILE_RANGE_FLAGS flags = tile < 0 ? D3D12_TILE_RANGE_FLAG_NULL : D3D12_TILE_RANGE_FLAG_NONE;
     UINT heap_tile = tile < 0 ? 0 : static_cast<UINT>(tile);
-    direct->UpdateTileMappings(sparse.ptr, 1, &coord, &region, tile < 0 ? nullptr : heap.ptr,
-                              1, &flags, &heap_tile, nullptr, D3D12_TILE_MAPPING_FLAG_NONE);
-    Check("mapping signal", direct->Signal(mapping_done.ptr, serial + 1));
-    Check("compute waits mapping", compute->Wait(mapping_done.ptr, serial + 1));
-    // Use a fresh allocator/list for every phase.  The queue fence signals
-    // submission ordering, while DXMT retires command allocators on the
-    // Metal command-buffer completion callback; reusing one allocator here
-    // can race that callback and produce a spurious E_FAIL from Reset().
+    auto map_and_order = [&](WMT::Event native_gate) {
+      if (owned) {
+        std::unique_ptr<dxmt::D3D12SparseBufferMappingPlan> plan;
+        auto resource = static_cast<dxmt::MTLD3D12Resource *>(sparse.ptr);
+        if (copy_plan && tile >= 0) {
+          auto source_start = coord;
+          source_start.X = heap_tile;
+          Check("owned copy preparation",
+                resource->PrepareBufferTileCopy(
+                    static_cast<dxmt::MTLD3D12Resource *>(copy_source.ptr),
+                    &coord, &source_start, &region,
+                    D3D12_TILE_MAPPING_FLAG_NONE, plan));
+        } else {
+          Check("owned update preparation",
+                resource->PrepareBufferTileUpdate(
+                    1, &coord, &region, tile < 0 ? nullptr : heap.ptr, 1,
+                    &flags, &heap_tile, nullptr, D3D12_TILE_MAPPING_FLAG_NONE,
+                    plan));
+        }
+        Check("owned submit",
+              static_cast<dxmt::MTLD3D12CommandQueue *>(direct.ptr)
+                  ->SubmitSparsePlanForTesting(plan, native_gate,
+                                               terminal_flags, UINT_MAX,
+                                               nullptr, nullptr));
+        if (plan)
+          throw std::runtime_error("owned plan not transferred");
+      } else {
+        direct->UpdateTileMappings(
+            sparse.ptr, 1, &coord, &region, tile < 0 ? nullptr : heap.ptr, 1,
+            &flags, &heap_tile, nullptr, D3D12_TILE_MAPPING_FLAG_NONE);
+      }
+      Check("mapping signal", direct->Signal(mapping_done.ptr, serial + 1));
+      if (!same_queue)
+        Check("compute waits mapping",
+              consumer->Wait(mapping_done.ptr, serial + 1));
+    };
+    if (!owned)
+      map_and_order({});
+    // Use a fresh allocator/list unless replaying the unchanged closed
+    // recording. The queue fence signals submission ordering, while DXMT
+    // retires command allocators on the Metal command-buffer completion
+    // callback; reusing one allocator here can race that callback and produce a
+    // spurious E_FAIL from Reset().
     Owned<ID3D12CommandAllocator> phase_allocator;
     Owned<ID3D12GraphicsCommandList> phase_list;
-    Check("phase allocator", device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COMPUTE,
-                                                              IID_PPV_ARGS(&phase_allocator.ptr)));
-    Check("phase list", device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COMPUTE,
-                                                    phase_allocator.ptr,
-                                                    write ? write_pso.ptr : read_pso.ptr,
-                                                    IID_PPV_ARGS(&phase_list.ptr)));
-    phase_list->SetComputeRootSignature(root.ptr);
-    ID3D12DescriptorHeap *heaps[] = {descriptors.ptr};
-    phase_list->SetDescriptorHeaps(1, heaps);
-    phase_list->SetComputeRootDescriptorTable(0, descriptors->GetGPUDescriptorHandleForHeapStart());
-    const auto access = write ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-    Transition(phase_list.ptr, sparse.ptr, D3D12_RESOURCE_STATE_COMMON, access);
-    if (!write)
-      Transition(phase_list.ptr, output.ptr, D3D12_RESOURCE_STATE_COMMON,
-                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    phase_list->Dispatch(write ? 1 : TileBytes / (4 * 64), 1, 1);
-    if (!write) {
-      Transition(phase_list.ptr, output.ptr, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
-      phase_list->CopyBufferRegion(readback.ptr, 0, output.ptr, 0, TileBytes);
-      Transition(phase_list.ptr, output.ptr, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
+    const bool remap_replay = owned && serial == 2;
+    if (remap_replay) {
+      phase_allocator.ptr = remap_allocator.ptr;
+      phase_allocator->AddRef();
+      phase_list.ptr = remap_list.ptr;
+      phase_list->AddRef();
+    } else {
+      Check("phase allocator",
+            device->CreateCommandAllocator(consumer_type,
+                                           IID_PPV_ARGS(&phase_allocator.ptr)));
+      Check("phase list",
+            device->CreateCommandList(0, consumer_type, phase_allocator.ptr,
+                                      write ? write_pso.ptr : read_pso.ptr,
+                                      IID_PPV_ARGS(&phase_list.ptr)));
+      phase_list->SetComputeRootSignature(root.ptr);
+      ID3D12DescriptorHeap *heaps[] = {descriptors.ptr};
+      phase_list->SetDescriptorHeaps(1, heaps);
+      phase_list->SetComputeRootDescriptorTable(
+          0, descriptors->GetGPUDescriptorHandleForHeapStart());
+      const auto access = write
+                              ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS
+                              : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+      Transition(phase_list.ptr, sparse.ptr, D3D12_RESOURCE_STATE_COMMON,
+                 access);
+      if (!write)
+        Transition(phase_list.ptr, output.ptr, D3D12_RESOURCE_STATE_COMMON,
+                   D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+      phase_list->Dispatch(write ? 1 : TileBytes / (4 * 64), 1, 1);
+      if (!write) {
+        Transition(phase_list.ptr, output.ptr,
+                   D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                   D3D12_RESOURCE_STATE_COPY_SOURCE);
+        phase_list->CopyBufferRegion(readback.ptr, 0, output.ptr, 0, TileBytes);
+        Transition(phase_list.ptr, output.ptr, D3D12_RESOURCE_STATE_COPY_SOURCE,
+                   D3D12_RESOURCE_STATE_COMMON);
+      }
+      if (tile >= 0) {
+        Transition(phase_list.ptr, sparse.ptr, access,
+                   D3D12_RESOURCE_STATE_COPY_SOURCE);
+        phase_list->CopyTiles(
+            sparse.ptr, &coord, &region, readback.ptr, TileBytes,
+            D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER);
+        if (write)
+          written[tile] = true;
+      }
+      Transition(phase_list.ptr, sparse.ptr,
+                 tile >= 0 ? D3D12_RESOURCE_STATE_COPY_SOURCE : access,
+                 D3D12_RESOURCE_STATE_COMMON);
+      Check("phase close", phase_list->Close());
     }
-    if (tile >= 0) {
-      Transition(phase_list.ptr, sparse.ptr, access, D3D12_RESOURCE_STATE_COPY_SOURCE);
-      phase_list->CopyTiles(sparse.ptr, &coord, &region, readback.ptr, TileBytes, D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER);
-      if (write)
-        written[tile] = true;
+    if (owned && serial == 1) {
+      remap_allocator.ptr = phase_allocator.ptr;
+      remap_allocator->AddRef();
+      remap_list.ptr = phase_list.ptr;
+      remap_list->AddRef();
     }
-    Transition(phase_list.ptr, sparse.ptr,
-               tile >= 0 ? D3D12_RESOURCE_STATE_COPY_SOURCE : access,
-               D3D12_RESOURCE_STATE_COMMON);
-    Check("phase close", phase_list->Close());
+    auto pool = WMT::MakeAutoreleasePool();
+    WMT::Reference<WMT::SharedEvent> native_gate;
+    struct ReleaseNativeGate {
+      WMT::Reference<WMT::SharedEvent> &gate;
+      ~ReleaseNativeGate() {
+        // A failed assertion must unblock actual native work before the queue
+        // destructor drains it; opening the gate is not completion evidence.
+        if (gate)
+          gate.signalValue(1);
+      }
+    } release_gate{native_gate};
+    if (owned) {
+      if (gated) {
+        native_gate = static_cast<dxmt::MTLD3D12Device *>(device.ptr)
+                          ->GetMTLDevice()
+                          .newSharedEvent();
+        if (!native_gate)
+          throw std::runtime_error("owned native gate");
+      }
+      map_and_order(native_gate);
+    }
     ID3D12CommandList *lists[] = {phase_list.ptr};
-    compute->ExecuteCommandLists(1, lists);
-    Check("compute signal", compute->Signal(compute_done.ptr, serial));
+    consumer->ExecuteCommandLists(1, lists);
+    Check("compute signal", consumer->Signal(compute_done.ptr, serial));
     if (delayed)
       Check("release mapping queue", gate->Signal(1));
+    if (gated) {
+      HANDLE done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+      if (!done)
+        throw std::runtime_error("owned pending event");
+      Check("owned completion event",
+            compute_done->SetEventOnCompletion(serial, done));
+      const DWORD status = WaitForSingleObject(done, 25);
+      CloseHandle(done);
+      if (status != WAIT_TIMEOUT ||
+          compute_done->GetCompletedValue() >= serial ||
+          mapping_done->GetCompletedValue() >= serial + 1 ||
+          FAILED(device->GetDeviceRemovedReason()))
+        throw std::runtime_error("owned consumer escaped pending map");
+      std::printf("OWNED_CONSUMER_PENDING phase=%llu same=%u copy=%u "
+                  "terminal=%u replay=%u cpu_map_wait=0\n",
+                  (unsigned long long)serial, same_queue, copy_plan,
+                  terminal_flags, remap_replay);
+      std::fflush(stdout);
+      native_gate.signalValue(1);
+    }
+    if (owned && !gated)
+      std::printf("OWNED_CONSUMER_SUBMITTED phase=%llu same=%u gate=0 "
+                  "replay=%u cpu_map_wait=0\n",
+                  (unsigned long long)serial, same_queue, remap_replay);
     Wait(compute_done.ptr, serial++);
     if (!write || tile >= 0) {
       Check("readback map",
@@ -2571,8 +2716,8 @@ int Run(const char *read_path, const char *write_path, UINT seed,
       Check("replay fence",
             device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
                                 IID_PPV_ARGS(&replay_done.ptr)));
-      compute->ExecuteCommandLists(1, lists);
-      Check("replay signal", compute->Signal(replay_done.ptr, 1));
+      consumer->ExecuteCommandLists(1, lists);
+      Check("replay signal", consumer->Signal(replay_done.ptr, 1));
       Wait(replay_done.ptr, 1);
       Check("replay map",
             readback->Map(0, nullptr, reinterpret_cast<void **>(&data)));
@@ -2589,6 +2734,11 @@ int Run(const char *read_path, const char *write_path, UINT seed,
     }
     if (sparse->GetGPUVirtualAddress() != stable_va)
       throw std::runtime_error("VA changed on remap");
+    if (owned)
+      std::printf("OWNED_CONSUMER_COMPLETE phase=%llu tile=%d write=%u "
+                  "replay=%u words=%llu\n",
+                  (unsigned long long)(serial - 1), tile, write, remap_replay,
+                  (unsigned long long)words_checked);
     std::cout << name << " passed\n";
   };
   phase("nonzero backing A / descriptors before map", 0, false, (A ^ seed) + 1);
@@ -2603,6 +2753,10 @@ int Run(const char *read_path, const char *write_path, UINT seed,
   phase("mapped UAV write and CopyTiles readback", 1, true, Written);
   phase("SRV sees mapped UAV write", 1, false, Written + 1);
   phase("mapped write leaves other backing intact", 0, false, (A ^ seed) + 1);
+  if (owned)
+    std::printf("OWNED_CONSUMER_RESULT seed=%u mode=%s phases=11 words=%llu "
+                "cpu_map_wait=0\n",
+                seed, owned_mode, (unsigned long long)words_checked);
   std::cout << "Reserved buffer shader, remap, NULL and cross-queue tests "
                "passed seed="
             << seed << " words=" << words_checked << "\n";
@@ -2641,7 +2795,10 @@ int main(int argc, char **argv) {
     std::cerr
         << "usage: dx12_reserved_buffer <probe_read.cso> "
            "<probe_write.cso> [seed rounds "
-           "[wrong-oracle|queue-init-failure|barrier-update|barrier-copy|"
+           "[owned-same|owned-cross|owned-copy-cross|owned-delay-cross|"
+           "owned-event-same|owned-ungated-same|owned-ungated-cross|"
+           "owned-wrong-oracle|wrong-oracle|queue-init-failure|barrier-update|"
+           "barrier-copy|"
            "buffer-update|buffer-unmap|buffer-copy|buffer-copy-null|"
            "buffer-self|buffer-self-null|buffer-self-mixed|buffer-self-"
            "multiheap|fifo-delay|fifo-reverse|fifo-error|fifo-cancel|fifo-perf|"
@@ -2654,6 +2811,26 @@ int main(int argc, char **argv) {
     return 2;
   }
   try {
+    if (argc == 6 && (!std::strcmp(argv[5], "owned-same") ||
+                      !std::strcmp(argv[5], "owned-cross") ||
+                      !std::strcmp(argv[5], "owned-ungated-same") ||
+                      !std::strcmp(argv[5], "owned-ungated-cross") ||
+                      !std::strcmp(argv[5], "owned-copy-cross") ||
+                      !std::strcmp(argv[5], "owned-delay-cross") ||
+                      !std::strcmp(argv[5], "owned-event-same") ||
+                      !std::strcmp(argv[5], "owned-wrong-oracle"))) {
+      const UINT rounds = std::stoul(argv[4]), seed = std::stoul(argv[3]);
+      if (!rounds || rounds > 64)
+        return 2;
+      for (UINT round = 0; round < rounds; ++round) {
+        int result =
+            Run(argv[1], argv[2], seed + round,
+                !std::strcmp(argv[5], "owned-wrong-oracle"), false, argv[5]);
+        if (result)
+          return result;
+      }
+      return 0;
+    }
     if (argc == 6 && (!std::strcmp(argv[5], "fifo-delay") ||
                       !std::strcmp(argv[5], "fifo-reverse") ||
                       !std::strcmp(argv[5], "fifo-perf") ||

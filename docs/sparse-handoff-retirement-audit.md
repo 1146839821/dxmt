@@ -1417,3 +1417,78 @@ Commit the five intended files as feat(d3d12), no push. Original .gitignore stay
 Next single slice: **verify controlled owned buffer plans followed immediately by actual D3D12 ExecuteCommandLists/MSC shader consumers**, without a CPU mapping-completion wait, including same-queue ordering and one explicit cross-queue fence handoff. Reuse existing reserved-buffer DXIL fixture/runner and current admission owner; keep public mapping activation disabled and do not combine texture plans or capability promotion. Gate0/1 for that slice remains necessary; this round stops at delivery.
 
 Gate conclusions: Gate0 evidence refreshed; Gate1 controlled card satisfied; Gate2 scoped implementation complete; Gate3 stated build/functional checks PASS with explicit NOT_RUN limits; Gate4 diff/identity/ownership/capability audit PASS. These gates approve delivery of this controlled slice, not automatic public activation or genuine-error retirement.
+
+## Controlled sparse plans to MSC consumers — execution card, 2026-11-05
+
+GOAL: Verify real D3D12 shader consumers immediately after the controlled owned plan, with no CPU mapping-completion wait.
+BASELINE: d8be64478f368aacb9cbd0bcfafa7734b8d8e6b1; original .gitignore preserved; previous round delivered progress.
+PATH: Existing reserved-buffer DXIL fixture -> owned buffer plan -> existing bounded queue -> ExecuteCommandLists -> MSC dispatch/readback.
+INVARIANTS: Mapping and preceding consumers ordered; public fences respect FIFO; closed recording/descriptors/VA survive remap; no capability promotion.
+EVIDENCE: E15 proved native blit retirement/ownership; actual D3D12/MSC consumption of that controlled path remains unverified.
+SCOPE: Extend existing Run/phase fixture for same queue, explicit direct-to-compute fence, owned copy plans, NULL, UAV writes and replay.
+NON-SCOPE: Production mapping activation, texture plans, genuine GPU-fault retirement, new shader/backend/runner in repository.
+DESIGN: Record before mapping, issue/close owned mapping, submit shader immediately, assert pending behind a real gate, then check whole-page output.
+PERF: Test-only work; production source must stay byte-identical. No optimization or no-regression claim.
+PROOF: Changing seeds, wrong-word negative, omitted private event/delayed report, same/cross-queue consumers, closed-list remap replay and adjacent E15 probes.
+RISKS/ROLLBACK: Any scheduling or shader failure is retained and diagnosed, not masked by CPU completion waits; revert focused test/report commit.
+DONE: Actual identities/paired WineMetal, x64 build and directed GPU validation, scoped audit, repository-style commit/no push; overall goal stays active.
+
+## Controlled sparse plans to MSC consumers — delivery audit, 2026-11-05
+
+### Task Summary / Baseline Evidence
+
+One N15/N13 validation slice is complete: controlled owned buffer mapping plans now have regression coverage followed immediately by real D3D12/MSC compute consumers on the same DIRECT queue or an explicitly synchronized COMPUTE queue. No CPU mapping-completion wait is inserted. CPU waits for the final consumer/readback remain necessary. This is test coverage, not production activation or completion of the wider sparse/MSC goal.
+
+Baseline d8be64478f368aacb9cbd0bcfafa7734b8d8e6b1 on feat/d3d12; locally cached origin comparison was ahead10/behind0 before this commit, without remote refresh. E16 = /Users/zhangbo/Documents/Vibe-Codeding/dxmt-test/n95-capability-gate/result-sparse-msc-consumer-20261105. Actual device: Apple M1 Max, macOS27.2/26B123, Xcode27.2/27B52, Wine11.0. Runtime probes report Apple7/Metal4/PlacementSparse true and Apple8/9 false. Compiled MSC SDK API4.0.3; runtime product version is not dynamically queried. Original .gitignore hash764aac09922db4654ca6de63fd20cf014739d9292623eb979f448f38e609b759 remains unchanged.
+
+### Findings / Specification / Mullion Evidence
+
+- SPEC_REQUIRED: Microsoft ID3D12CommandQueue::Wait queues a GPU-side wait and returns immediately; it is not a CPU completion wait. UpdateTileMappings and CopyTileMappings supply queue mapping operations whose producer/consumer ordering must remain valid. E16/sources.json retains freshly fetched official Wait/Update/Copy pages, URLs and SHA256 values. These contracts do not establish genuine Metal fault quiescence.
+- SPEC_REQUIRED: installed MTL4CommandEncoder.h:49–72 describes ordering prior queue stages before later command stages; MTL4CommitFeedback.h:19–40 describes actual committed-work completion. Installed SDK snapshots/hashes and refreshed Apple documentation are retained with E16. The private mapping event may be omitted only by the existing controlled test hook; actual successful native terminal feedback remains required.
+- REFERENCE_SOURCE: pinned Mullion93de32b9145885ceb2e45be7d445e56d62499b3c, src/d3d12/d3d12_command_queue.cpp:593–625 owns mapping inputs, commits residency, submits mappings, observes its mapped event and orders consumers. Update/Copy captures at1338–1353/1392–1404 retain their inputs. Retained source SHA256641a21ad8fce6aa6f3f6f0cb02e0b0e3ae162a97a0eb7740d738c5f70ece6492. This is pinned reference-source evidence, not a current Mullion HEAD or runtime result; its separate queue architecture is not transplanted.
+- LOCAL_PASS: E15's existing bounded owned-plan path supports seeded MSC SRV reads/UAV writes, A/B remapping, copied mappings, NULL behavior and closed-list replay in the tested compute cases. Both gated pending observations and immediate ungated submissions pass. Missing private mapping events do not lose the public consumer ordering in these cases. This does not prove all shader stages, general concurrent preparation or safe retirement after genuine GPU faults.
+
+### Design Decisions / Changed Files
+
+- tests/dx12/dx12_reserved_buffer.cpp:2341 extends the existing Run fixture with optional owned modes. Actual device checks at2383 require real Metal4/PlacementSparse and the matched internal test entry; there is no fabricated capability result. Ordinary fixture arguments retain the legacy public mapping path.
+- tests/dx12/dx12_reserved_buffer.cpp:2517 prepares existing owned update/copy plans, transfers them into the existing bounded Submission, signals the public mapping fence and optionally queues a direct-to-compute Wait. Initial backing population remains the established public producer path. No second scheduler, resource registry, new shader or repository runner is introduced.
+- tests/dx12/dx12_reserved_buffer.cpp:2562 replays the exact closed list from A against B after remapping, using its original allocator, descriptors and virtual address. Fresh lists are otherwise recorded and closed before mapping submission. Full-page expected patterns and first/last UAV writes expose stale mappings and aliases; later phases also verify the untouched backing.
+- tests/dx12/dx12_reserved_buffer.cpp:2620 releases the real native gate on assertion unwinding so test failure cannot strand native work during queue destruction. At2657 gated cases require both mapping and consumer fences to remain pending before opening that gate. Ungated modes omit this extra gate and submit immediately. Opening a gate is never counted as completion evidence.
+- tests/dx12/dx12_reserved_buffer.cpp:2757 emits final phase/word evidence; main at2814 accepts seven positive modes and one deliberate wrong-word mode. Both changing seeds exercise each positive mode. docs/sparse-handoff-retirement-audit.md records the execution card, source evidence, results and remaining gates.
+
+Rejected shortcuts: a CPU wait for mapping completion would hide the ordering under test; a later draw overwriting an earlier result would hide stale reads; private-event presence alone would omit the E15 fallback path. No change to production src/include, HLSL, Meson targets, public mapping entry points or MSC flags is needed for this slice.
+
+### Validation Results
+
+| Check | Result / evidence |
+|---|---|
+| Full x64 default build | PASS using .github/build_dxmt.sh configuration, repository LLVM-MinGW and external patched LLVM15, release with D3D12/tests/NVAPI/NVNGX enabled. E16/build-delivery.log. This is a full-target incremental build, not a clean or warning-free build; the pre-existing SparsePayloadSentinel non-virtual-destructor warning remains. |
+| i686 probe compile | PASS with repository LLVM-MinGW against the final source; probe-i686-final.json/log. Compile-only: no full32bit build/link or runtime claim. |
+| Owned-plan MSC matrix | LOCAL_PASS14 positive processes, seven modes times two changing seeds. 154 phases compare4358144DWORDs, including14 closed-list remap replays and14 same-mapping replays. Each process checks311296DWORDs across11 phases. Modes: owned-same, owned-cross, owned-copy-cross, owned-delay-cross, owned-event-same, owned-ungated-same, owned-ungated-cross. E16/matrix-delivery.log and consumer-summary.json. |
+| Native terminal/order evidence | LOCAL_PASS154 actual successful native callbacks and154 sealed FIFO plan completions. 132 completions omit the private mapping event;22 include it. 110 phases establish pending fences behind the real native gate;44 run without that gate. Delayed-report cases use the existing delayed callback hook. All shader submissions occur before a CPU mapping-completion wait; CPU final-readback waits are retained. |
+| Wrong-word negative control | LOCAL_PASS one expected exit1: the first completed shader readback disagrees in exactly the deliberately altered first-word oracle. No success result is accepted. This is an oracle control, not simulated GPU failure or native error-quiescence evidence. |
+| Nearby regressions | LOCAL_PASS five processes: existing public reserved-buffer MSC fixture311296DWORDs; bounded queue capacity; full-capacity removal; packed full-mips/mapping-copy fixture; actual D3D11 copy256DWORDs with loaded export checks. E16/regressions-delivery.log. |
+| Final identity / validation audit | PASS20 selected processes,19 expected successes plus one deliberate exit1. API and GPU validation enabled in all20, without unexpected validation/assertion/address faults. Actual loaded PE paths/export bytes and WineMetal Unix path/UUID8963C1DC-2CEA-3397-AEC6-0AC846C82683 match the isolated build/stage pair. DXIL blobs contain DXIL and no SHDR/SHEX. E16/delivery-audit.json, artifacts.json, runs.json retain exact commands, environments, identities and hashes. |
+| Diff / formatting / preservation | PASS scoped clang-format, git diff --check, original .gitignore hash and no src/include/HLSL/Meson changes versus baseline. Final tests were rerun after adding failure-path gate cleanup. Earlier pre-format/pre-cleanup runs are retained separately and excluded from final totals. |
+| Other platforms / broader proofs | NOT_RUN Windows native, Mullion runtime, other GPU, forced Metal3,32bit runtime, genuine GPU fault/missing callback, GPU trace and performance A/B. Current M1 Max is not BLOCKED_BY_HARDWARE. |
+
+Reproduction: build the existing dx12_reserved_buffer target and unchanged reserved_buffer.probe_read.cs.cso / reserved_buffer.probe_write.cs.cso fixtures. In a matched isolated Wine stage/prefix with API/GPU validation and a separate cache, run dx12_reserved_buffer.exe reserved_buffer.probe_read.cs.cso reserved_buffer.probe_write.cs.cso 23781 1 owned-cross; repeat with seed771239 and each listed mode. E16/matrix.py, regressions.py and per-process JSON preserve the exact local invocation/environment, including DLL overrides, Unix path and MSC library selection. Those orchestration scripts are external evidence, not new repository infrastructure.
+
+Retained tooling correction: the first collector expected a DXMTMSCCompileDXIL export log that this fixture does not emit. The GPU case itself passed. The collector now checks the existing D3D12CreateDevice / DXMTMSCGetCapabilities export identity logs, actual Unix identity, matched artifacts and real DXIL readback. matrix-first-collector.log retains the initial collector failure; all selected final runs use the corrected checks and final executable. No GPU failure is converted to PASS.
+
+### Capability Impact / Regression Risks
+
+No Feature Level, Tiled Resources Tier, Shader Model, D3D11 behavior, Metal3 backend or MSC runtime compatibility change. All production source bytes remain baseline-identical; this test-only slice supplies evidence rather than a runtime optimization. Performance NOT_RUN and no speedup/no-regression claim.
+
+- BACKEND_NOT_IMPLEMENTED: public owned-plan activation, texture/packed owned plans and general concurrent mapping preparation/source-generation coverage. Existing public shadow backing and reserved-resource behavior remain the production authority.
+- SPEC_UNVERIFIED: native quiescence after genuine GPU errors, standalone void-mapping error attribution and the previously retained scheduling-sensitive prototype anomaly. Successful controlled consumer runs do not close those gaps; final release may still wait indefinitely without actual terminal proof.
+- MSC_SEMANTIC_GAP: none newly demonstrated in these compute SRV/UAV/NULL cases; graphics stages, all descriptor access forms and other shader families are not established by this matrix. NULL assertions use existing logical handling and do not claim native unmapped-read guarantees.
+- TARGET_DEVICE_NOT_AVAILABLE: Windows native/other GPU comparisons only. Apple7 hardware capability is not used as a placement-sparse blocker. Test command/resources remain alive through readback; this round does not establish an additional public early-release lifetime contract.
+
+### Git State / Rollback / Next Recommended Slice
+
+Commit only tests/dx12/dx12_reserved_buffer.cpp and this report with a focused test(d3d12) subject; do not push. Original .gitignore remains unstaged and excluded, with no new repository files. E16/delivery-manifest.json records the final committed SHA, status, source/evidence hashes and no-push state after commit. Revert this focused test/report commit to remove the added modes without altering E15 or production mapping behavior.
+
+Next single recommended slice: **audit and design the source-mapping generation/ownership contract across buffer-plan preparation and queue admission**, especially CopyTileMappings source changes between those steps. Identify the existing authoritative owner and locking boundary before proposing the smallest concurrency regression/implementation. Do not activate public mappings, add a parallel state map or combine texture work into that slice. This round stops after delivery.
+
+Gate conclusions: Gate0 evidence refreshed; Gate1 execution card satisfied; Gate2 scoped regression implementation complete; Gate3 final builds and directed GPU checks PASS with the explicit NOT_RUN limits; Gate4 identity/diff/capability delivery audit PASS. Overall sparse/MSC development remains active and no capability promotion is authorized by these results.
