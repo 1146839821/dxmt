@@ -2512,6 +2512,12 @@ WINEMETAL_API void SparseMappingQueue_copyTextureMappings(
     const struct WMTCopySparseTextureMappingOperation *operations, uint64_t count
 );
 
+// Additive checked entry: synchronous preparation/issuance status, not GPU completion.
+WINEMETAL_API uint32_t SparseMappingQueue_tryCopyTextureMappings(
+    obj_handle_t queue, obj_handle_t source, obj_handle_t destination,
+    const struct WMTCopySparseTextureMappingOperation *operations, uint64_t count
+);
+
 struct WMTSizeAndAlign {
   // 32-bit is sufficient
   uint32_t size;

@@ -52,6 +52,24 @@ FailTextureUpdatePreparationForTesting() {
   }
 }
 
+static void
+FailTextureCopyPreparationForTesting(const char *point) {
+  char phase[16] = {}, at[16] = {};
+  const DWORD length = GetEnvironmentVariableA("DXMT_TEST_SPARSE_TEXTURE_COPY_FAILURE", phase, sizeof(phase));
+  if (!length || length >= sizeof(phase) || std::strcmp(phase, point))
+    return;
+  const DWORD at_length = GetEnvironmentVariableA("DXMT_TEST_SPARSE_TEXTURE_COPY_FAIL_AT", at, sizeof(at));
+  if (at_length >= sizeof(at) || (at_length && std::strcmp(at, "1") && std::strcmp(at, "2")))
+    return;
+  const uint64_t target = at_length && !std::strcmp(at, "2") ? 2 : 1;
+  static std::atomic<uint64_t> calls{0};
+  const auto call = calls.fetch_add(1, std::memory_order_relaxed) + 1;
+  if (call == target) {
+    ERR("DXMT_TEST_SPARSE_TEXTURE_COPY_FAILURE phase=", point, " call=", call);
+    throw std::bad_alloc();
+  }
+}
+
 struct TextureTransferLayout {
   uint64_t row_size;
   uint64_t row_count;
@@ -2077,7 +2095,7 @@ public:
       MTLD3D12Resource *pSourceResource, const D3D12_TILED_RESOURCE_COORDINATE *pDstRegionStartCoordinate,
       const D3D12_TILED_RESOURCE_COORDINATE *pSrcRegionStartCoordinate, const D3D12_TILE_REGION_SIZE *pRegionSize,
       D3D12_TILE_MAPPING_FLAGS Flags, WMT::SparseMappingQueue sparse_mapping_queue
-  ) override {
+  ) override try {
     if (!reserved_ || !pSourceResource || !pDstRegionStartCoordinate || !pSrcRegionStartCoordinate || !pRegionSize ||
         !pSourceResource->IsReservedTexture() ||
         !IsSameDevice(device_, pSourceResource) || (Flags & ~D3D12_TILE_MAPPING_FLAG_NO_HAZARD))
@@ -2133,6 +2151,8 @@ public:
     if (sparse_mapping_queue) {
       if (!texture || !texture->current() || !source->texture || !source->texture->current())
         return E_OUTOFMEMORY;
+      if (source != this)
+        FailTextureCopyPreparationForTesting("prepare");
       mapping_operations.reserve(destination_tiles.size());
       for (size_t i = 0; i < destination_packed_start; i++) {
         auto &operation = mapping_operations.emplace_back();
@@ -2162,6 +2182,8 @@ public:
       }
     }
 
+    if (source != this)
+      FailTextureCopyPreparationForTesting("snapshot");
     std::vector<TileMapping> copied;
     {
       std::unique_lock<dxmt::mutex> source_lock(source->tile_mapping_mutex_);
@@ -2169,6 +2191,14 @@ public:
       for (UINT tile : source_tiles)
         copied.push_back(source->tile_mappings_[tile]);
     }
+    if (sparse_mapping_queue && source != this) {
+      if (!sparse_mapping_queue.tryCopyTextureMappings(
+              source->texture->current()->texture(), texture->current()->texture(), mapping_operations.data(),
+              mapping_operations.size()
+          ))
+        return DXGI_ERROR_DEVICE_REMOVED;
+    }
+    // Cross-resource native submission must succeed before publishing its snapshot.
     {
       std::unique_lock<dxmt::mutex> destination_lock(tile_mapping_mutex_);
       for (size_t i = 0; i < destination_tiles.size(); i++)
@@ -2194,14 +2224,11 @@ public:
               texture->current()->texture(), saved.heap ? saved.heap->GetMetalHeap() : WMT::Heap{}, &update, 1
           );
         }
-      } else {
-        sparse_mapping_queue.copyTextureMappings(
-            source->texture->current()->texture(), texture->current()->texture(), mapping_operations.data(),
-            mapping_operations.size()
-        );
       }
     }
     return S_OK;
+  } catch (const std::bad_alloc &) {
+    return E_OUTOFMEMORY;
   }
 };
 

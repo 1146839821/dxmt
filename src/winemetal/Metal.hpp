@@ -981,6 +981,13 @@ public:
   ) {
     SparseMappingQueue_copyTextureMappings(handle, source.handle, destination.handle, operations, count);
   }
+
+  bool
+  tryCopyTextureMappings(
+      Texture source, Texture destination, const WMTCopySparseTextureMappingOperation *operations, uint64_t count
+  ) {
+    return SparseMappingQueue_tryCopyTextureMappings(handle, source.handle, destination.handle, operations, count) != 0;
+  }
 };
 
 class Library : public Object {

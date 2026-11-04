@@ -4390,6 +4390,25 @@ _SparseMappingQueue_copyBufferMappings(void *obj) {
   return STATUS_UNSUCCESSFUL;
 }
 
+static const char *
+sparse_texture_copy_failure_for_testing(void) {
+  const char *phase = getenv("DXMT_TEST_SPARSE_TEXTURE_COPY_FAILURE");
+  if (!phase || (strcmp(phase, "allocation") && strcmp(phase, "submitted")))
+    return NULL;
+  const char *at = getenv("DXMT_TEST_SPARSE_TEXTURE_COPY_FAIL_AT");
+  char *end = NULL;
+  unsigned long long target = at ? strtoull(at, &end, 10) : 1;
+  if (!target || (at && (!end || *end)))
+    return NULL;
+  static atomic_uint_fast64_t calls = 0;
+  uint64_t call = atomic_fetch_add_explicit(&calls, 1, memory_order_relaxed) + 1;
+  fprintf(stderr, "DXMT_TEST_SPARSE_TEXTURE_COPY observed_call=%llu\n", (unsigned long long)call);
+  if (call != target)
+    return NULL;
+  fprintf(stderr, "DXMT_TEST_SPARSE_TEXTURE_COPY_FAILURE phase=%s call=%llu\n", phase, (unsigned long long)call);
+  return phase;
+}
+
 static NTSTATUS
 _SparseMappingQueue_copyTextureMappings(void *obj) {
   struct unixcall_sparsemappingqueue_copy_mappings *params = obj;
@@ -4397,18 +4416,57 @@ _SparseMappingQueue_copyTextureMappings(void *obj) {
   if (@available(macOS 26.0, *)) {
     if (!params->count)
       return STATUS_SUCCESS;
-    MTL4CopySparseTextureMappingOperation *operations = copy_sparse_texture_mapping_copy_operations(
-        params->operations.ptr, params->count
-    );
-    if (!operations)
+    const char *failure = sparse_texture_copy_failure_for_testing();
+    if (getenv("DXMT_TEST_SPARSE_TEXTURE_COPY_FAILURE"))
+      fprintf(
+          stderr, "DXMT_TEST_SPARSE_TEXTURE_COPY operations=%llu same_resource=%u\n", (unsigned long long)params->count,
+          params->source == params->destination
+      );
+    MTL4CopySparseTextureMappingOperation *operations =
+        failure && !strcmp(failure, "allocation")
+            ? NULL
+            : copy_sparse_texture_mapping_copy_operations(params->operations.ptr, params->count);
+    if (!operations) {
+      // Drain prior mappings before terminal cleanup in an injected failure.
+      if (failure) {
+        id<MTL4CommandQueue> queue = (id<MTL4CommandQueue>)params->queue;
+        id<MTLSharedEvent> completion = [[queue device] newSharedEvent];
+        if (!completion)
+          abort();
+        [queue signalEvent:completion value:1];
+        BOOL completed = [completion waitUntilSignaledValue:1 timeoutMS:30000];
+        [completion release];
+        if (!completed)
+          abort();
+        fprintf(stderr, "DXMT_TEST_SPARSE_TEXTURE_COPY prior_completed=1\n");
+      }
       return STATUS_UNSUCCESSFUL;
-    [(id<MTL4CommandQueue>)params->queue
-        copyTextureMappingsFromTexture:(id<MTLTexture>)params->source
-                             toTexture:(id<MTLTexture>)params->destination
-                           operations:operations
-                                count:(NSUInteger)params->count];
+    }
+    // A submitted-failure probe must keep its resources alive until mapping
+    // completion, even though device removal prevents a later public Signal.
+    id<MTL4CommandQueue> queue = (id<MTL4CommandQueue>)params->queue;
+    id<MTLSharedEvent> test_completion =
+        failure && !strcmp(failure, "submitted") ? [[queue device] newSharedEvent] : nil;
+    if (failure && !strcmp(failure, "submitted") && !test_completion) {
+      free(operations);
+      return STATUS_UNSUCCESSFUL;
+    }
+    [queue copyTextureMappingsFromTexture:(id<MTLTexture>)params->source
+                                toTexture:(id<MTLTexture>)params->destination
+                               operations:operations
+                                    count:(NSUInteger)params->count];
     free(operations);
-    return STATUS_SUCCESS;
+    if (test_completion) {
+      [queue signalEvent:test_completion value:1];
+      BOOL completed = [test_completion waitUntilSignaledValue:1 timeoutMS:30000];
+      [test_completion release];
+      if (!completed) {
+        fprintf(stderr, "DXMT_TEST_SPARSE_TEXTURE_COPY completion timeout\n");
+        abort(); // Do not unwind and release resources still used by the GPU.
+      }
+      fprintf(stderr, "DXMT_TEST_SPARSE_TEXTURE_COPY submitted_completed=1\n");
+    }
+    return failure && !strcmp(failure, "submitted") ? STATUS_UNSUCCESSFUL : STATUS_SUCCESS;
   }
 #endif
   return STATUS_UNSUCCESSFUL;
