@@ -74,6 +74,17 @@ and does not justify another unchanged local MS_LOAD or Submit timing matrix.
   activation, mixed legacy ownership, texture plans and production performance
   remain OPEN. See [deferred delivery](sparse-handoff-retirement-audit.md#deferred-controlled-buffer-mapping-issue--delivery-2026-11-05).
   See [cross-queue audit](sparse-handoff-retirement-audit.md#cross-queue-mapping-publication-and-native-copy--n15-audit-2026-11-05).
+  The subsequent public-consumer audit confirms native buffer CopyTiles and raw/
+  structured descriptors use stable sparse backing/VA rather than CPU tile-map
+  snapshots. It reproduces a separate shared-native-queue cycle when a later
+  eager legacy update precedes deferred controlled native issue, even on a
+  different resource. Two final mixed runs time out at the bounded observation
+  with the device healthy; two matched pure-controlled runs complete. This is
+  liveness evidence, not new GPU data readback. Public activation stays OPEN.
+  Next prerequisite: controlled texture-owned intent extraction, followed by
+  one common native issue owner and backing-lifetime validation; no hardware
+  blocker or Tier/FL promotion is inferred. See
+  [consumer audit and Design Card](sparse-handoff-retirement-audit.md#public-buffer-plan-activation-consumers--n15-audit-2026-11-05).
 
 - [x] N09 typed-buffer format admission rejects unsupported native SRV/UAV
   formats before publication. See the 2026-10-27 slice below; BGRA SRV usage,
