@@ -17,7 +17,8 @@ struct Converted {
 };
 
 static bool convert(const char *path, bool constants, bool explicit_zero,
-                    bool legacy_zero, uint32_t gpu_family, Converted &out, bool both_spaces = false) {
+                    bool legacy_zero, uint32_t gpu_family, Converted &out, bool both_spaces = false,
+                    bool explicit_root = false) {
   std::ifstream file(path, std::ios::binary);
   std::vector<char> dxil((std::istreambuf_iterator<char>(file)), {});
   if (dxil.empty())
@@ -27,6 +28,10 @@ static bool convert(const char *path, bool constants, bool explicit_zero,
   p.dxil = dxil.data();
   p.dxil_size = dxil.size();
   p.stage = DXMT_MSC_STAGE_FRAGMENT;
+  if (explicit_root) {
+    p.root_signature = dxil.data();
+    p.root_signature_size = dxil.size();
+  }
   p.minimum_gpu_family = gpu_family;
   if (explicit_zero)
     p.reserved = DXMT_MSC_COMPILE_FLAG_EXPLICIT_COMPATIBILITY;
@@ -235,6 +240,8 @@ int main(int argc, char **argv) {
                                    std::strcmp(argv[3], "--both-spaces-wrong") == 0 ||
                                    std::strcmp(argv[3], "--combined") == 0 ||
                                    std::strcmp(argv[3], "--combined-wrong") == 0 ||
+                                   std::strcmp(argv[3], "--combined-explicit-root") == 0 ||
+                                   std::strcmp(argv[3], "--combined-explicit-root-wrong") == 0 ||
                                    std::strcmp(argv[3], "--gpu9") == 0)))
     return 2;
   auto module = GetModuleHandleA("winemetal.dll");
@@ -248,8 +255,9 @@ int main(int argc, char **argv) {
   for (unsigned i = 0; i < 16; ++i)
     std::cout << hex[code[i] >> 4] << hex[code[i] & 15];
   std::cout << "\n";
-  const bool combined = argc == 4 && (!std::strcmp(argv[3], "--combined") || !std::strcmp(argv[3], "--combined-wrong"));
-  const bool wrong = argc == 4 && (!std::strcmp(argv[3], "--wrong") || !std::strcmp(argv[3], "--both-spaces-wrong") || !std::strcmp(argv[3], "--combined-wrong"));
+  const bool explicit_root = argc == 4 && (!std::strcmp(argv[3], "--combined-explicit-root") || !std::strcmp(argv[3], "--combined-explicit-root-wrong"));
+  const bool combined = explicit_root || (argc == 4 && (!std::strcmp(argv[3], "--combined") || !std::strcmp(argv[3], "--combined-wrong")));
+  const bool wrong = argc == 4 && (!std::strcmp(argv[3], "--wrong") || !std::strcmp(argv[3], "--both-spaces-wrong") || !std::strcmp(argv[3], "--combined-wrong") || !std::strcmp(argv[3], "--combined-explicit-root-wrong"));
   const bool both_spaces = combined || (argc == 4 && (!std::strcmp(argv[3], "--both-spaces") || !std::strcmp(argv[3], "--both-spaces-wrong")));
   const bool explicit_zero =
       argc == 4 && std::strcmp(argv[3], "--zero-flags") == 0;
@@ -283,7 +291,7 @@ int main(int argc, char **argv) {
   }
   Converted fc, fetch;
   if (!convert(argv[1], true, explicit_zero, legacy_zero, gpu_family, fc, both_spaces) ||
-      !convert(argv[2], false, explicit_zero, legacy_zero, gpu_family, fetch, both_spaces))
+      !convert(argv[2], false, explicit_zero, legacy_zero, gpu_family, fetch, both_spaces, explicit_root))
     return 3;
   if (!fc.reflection.needs_function_constants ||
       fc.reflection.function_constant_count != 1 ||

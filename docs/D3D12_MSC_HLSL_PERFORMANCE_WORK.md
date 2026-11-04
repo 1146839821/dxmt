@@ -330,6 +330,18 @@ explicit root-signature blob in this test; successful output and the embedded
 part's presence do not independently prove how MSC consumed that embedded
 signature or prove application descriptor collision behavior.
 
+The combined probe now also has an explicit-root mode: it passes the complete
+root-containing DXIL container as the bridge root-signature blob, an input
+form documented by `IRVersionedRootSignatureDescriptorCreateFromBlob` in the
+installed SDK. Two isolated Wine processes passed both specialized GPU pixel
+values and the deliberately wrong-pixel control with Metal API/GPU validation.
+The previous implicit-root mode was rerun successfully. Paired build and loaded
+bridge/runtime checks are recorded under
+`result-msc-combined-explicit-root-20261104/` and
+`result-msc-combined-root-recheck-20261104/`. This tests successful conversion
+and output for one explicit signature; it does not independently inspect the
+special resources' descriptor locations or establish general collision safety.
+
 The root-validation comparison now includes `ValidateDXIL`, alongside unset,
 zero and bound-resource validation. Three processes per mode each compiled six
 valid and six missing-resource instances. All valid roots compiled and all

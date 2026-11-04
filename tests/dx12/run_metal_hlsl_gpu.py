@@ -26,26 +26,27 @@ def main():
     parser.add_argument('--both-spaces', action='store_true', help='enable both distinct extension spaces')
     parser.add_argument('--combined', action='store_true', help='use one shader containing both extensions')
     parser.add_argument('--combined-root', action='store_true', help='use combined shader with embedded root signature')
+    parser.add_argument('--combined-explicit-root', action='store_true', help='pass the root-containing DXIL as explicit root blob')
     args = parser.parse_args()
     if args.trace_config and args.trace_dxil_validation:
         parser.error('trace options are mutually exclusive')
-    if sum((args.combined, args.combined_root, args.both_spaces)) > 1:
+    if sum((args.combined, args.combined_root, args.combined_explicit_root, args.both_spaces)) > 1:
         parser.error('combined, combined-root and both-spaces are separate modes')
-    combined = args.combined or args.combined_root
+    combined = args.combined or args.combined_root or args.combined_explicit_root
     if not 1 <= args.repeats <= 20:
         parser.error('--repeats must be in 1..20')
     stage, prefix, build, converter = (getattr(args, name).resolve(strict=True)
                                         for name in ('stage', 'prefix', 'build', 'converter'))
     pairs = [('src/winemetal/winemetal.dll', 'winemetal.dll'),
              ('src/winemetal/unix/winemetal.so', 'wine/lib/wine/x86_64-unix/winemetal.so')]
-    fragment = ('metal_hlsl_combined_root.ps.cso' if args.combined_root else
+    fragment = ('metal_hlsl_combined_root.ps.cso' if args.combined_root or args.combined_explicit_root else
                 'metal_hlsl_combined.ps.cso' if args.combined else 'metal_hlsl_framebuffer.ps.cso')
     pairs += [('tests/dx12/' + name, name) for name in
               ('dx12_metal_hlsl_gpu.exe', 'metal_hlsl_constants.ps.cso', fragment)]
     for source, target in pairs:
         if (build / source).read_bytes() != (stage / target).read_bytes():
             raise SystemExit('stage/build mismatch: ' + target)
-    if args.combined_root:
+    if args.combined_root or args.combined_explicit_root:
         data = (stage / fragment).read_bytes()
         if len(data) < 32 or data[:4] != b'DXBC':
             raise SystemExit('combined-root fixture is not a DXBC container')
@@ -79,7 +80,7 @@ def main():
     results = []
     cases = []
     if args.both_spaces or combined:
-        option = '--combined' if combined else '--both-spaces'
+        option = '--combined-explicit-root' if args.combined_explicit_root else '--combined' if combined else '--both-spaces'
         cases = [(f'positive-{i}', [option], 0) for i in range(args.repeats)]
         cases += [('wrong-oracle', [option + '-wrong'], 10)]
     else:
