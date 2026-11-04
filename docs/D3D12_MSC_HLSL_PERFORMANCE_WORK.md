@@ -342,6 +342,18 @@ bridge/runtime checks are recorded under
 and output for one explicit signature; it does not independently inspect the
 special resources' descriptor locations or establish general collision safety.
 
+An offline MSC CLI reflection control compared the combined fixture with and
+without the embedded root table. Both reported zero ordinary used resources
+and the expected function constant. The no-root result had an empty top-level
+argument buffer; the root-table result reported one 8-byte table entry. Thus,
+on this MSC CLI and these fixtures the special resources were not reported as
+ordinary used resources, while the table itself still had a top-level entry.
+A negative control substituting the no-root fixture for the root fixture was
+rejected. `tests/dx12/run_msc_special_reflection.py` saves the reflection,
+commands and hashes in `result-msc-special-reflection-20261104/`. These are
+offline CLI observations, not a loaded dylib identity, D3D12 descriptor ABI
+proof, or a test of ordinary resources sharing either special space.
+
 The root-validation comparison now includes `ValidateDXIL`, alongside unset,
 zero and bound-resource validation. Three processes per mode each compiled six
 valid and six missing-resource instances. All valid roots compiled and all
