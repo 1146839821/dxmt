@@ -80,33 +80,93 @@ def parse_cache_trace(log, entries, hits, misses):
     return snapshots
 
 
-def prepare_corpus(repository, output, wine, prefix, count):
+def prepare_corpus(repository, output, wine, prefix, count, gpu=False):
     dxc = repository / 'tools/dxc/bin/x64/dxc.exe'
-    source = repository / 'tests/dx12/shader_embedded_compute.hlsl'
+    source = repository / 'tests/dx12' / (
+        'compute_sm6_threadgroup_coherency.hlsl' if gpu else 'shader_embedded_compute.hlsl')
     env = {key: value for key, value in os.environ.items()
            if not key.startswith(('DYLD_', 'DXMT_', 'WINE'))}
     env.update(WINEPREFIX=str(prefix), WINEDEBUG='-all')
-    paths, hashes = [], []
+    paths, hashes, expected_hashes = [], [], []
     windows_path = lambda p: 'Z:' + str(p).replace('/', '\\')
     for i in range(count):
         path = output / f'corpus-{i + 1}.cso'
-        command = [str(wine), str(dxc), '-E', 'cs_main', '-T', 'cs_6_0', '-O3',
-                   '-D', f'DXMT_TEST_THREADS={i + 1}', str(source), '-Fo', str(path)]
+        define = f'DXMT_TEST_CACHE_VARIANT={i}' if gpu else f'DXMT_TEST_THREADS={i + 1}'
+        command = [str(wine), str(dxc), '-E', 'main' if gpu else 'cs_main', '-T', 'cs_6_0', '-O3',
+                   '-D', define, str(source), '-Fo', str(path)]
         result = subprocess.run(command, env=env, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, timeout=120)
         (output / f'dxc-{i + 1}.log').write_bytes(result.stdout)
         result.check_returncode()
-        paths.append(windows_path(path))
+        if gpu:
+            fixture = output / f'fixture-{i}'
+            subprocess.run([sys.executable, str(repository / 'tests/dx12/make_threadgroup_coherency_fixtures.py'),
+                            str(fixture), '--variant', str(i)], check=True, timeout=30)
+            if i and (fixture / 'inputs.bin').read_bytes() != (output / 'fixture-0/inputs.bin').read_bytes():
+                raise AssertionError('GPU variants must share identical inputs')
+            paths.append(windows_path(path) + '\t' + windows_path(fixture / 'expected.bin'))
+            expected_hashes.append(sha(fixture / 'expected.bin'))
+        else:
+            paths.append(windows_path(path))
         hashes.append(sha(path))
     if len(set(hashes)) != count:
         raise AssertionError('corpus shaders are not distinct')
     manifest = output / 'corpus.txt'
     manifest.write_text('\n'.join(paths) + '\n')
+    if gpu and len(set(expected_hashes)) != count:
+        raise AssertionError('GPU variant reference outputs must differ')
     return windows_path(manifest), {'shader_sha256': hashes, 'source_sha256': sha(source),
                                     'dxc_sha256': sha(dxc),
                                     'dxcompiler_sha256': sha(dxc.with_name('dxcompiler.dll')),
                                     'profile': 'cs_6_0', 'optimization': '-O3',
-                                    'threads_x': list(range(1, count + 1))}
+                                    'threads_x': 64 if gpu else list(range(1, count + 1)),
+                                    'variant_values': list(range(count)) if gpu else None,
+                                    'oracle_generator_sha256': sha(repository / 'tests/dx12/make_threadgroup_coherency_fixtures.py') if gpu else None,
+                                    'expected_sha256': expected_hashes,
+                                    'input_sha256': sha(output / 'fixture-0/inputs.bin') if gpu else None}
+
+
+def validate_gpu_corpus(log, count, negative):
+    expected = [(phase, binding, i) for phase in range(2)
+                for binding in ('root', 'table') for i in range(count)]
+    begins = re.findall(r'^CACHE_GPU_BEGIN (\d+) (root|table) (\d+) shader=(\d+)\s*$', log, re.M)
+    ends = [(int(a), b, int(c)) for a, b, c in
+            re.findall(r'^CACHE_GPU_END (\d+) (root|table) (\d+)\s*$', log, re.M)]
+    if [(int(a), b, int(c)) for a, b, c, _ in begins] != expected:
+        raise AssertionError('missing GPU cache replay case')
+    if ends != (expected[:-1] if negative else expected):
+        raise AssertionError('unexpected GPU cache replay completion')
+    for index, (phase, binding, variant, selected) in enumerate(begins):
+        want = 0 if negative == 'variant' and index == len(begins) - 1 else int(variant)
+        if int(selected) != want:
+            raise AssertionError('unexpected GPU shader selection')
+    segments = re.split(r'^CACHE_GPU_BEGIN [^\n]+\n', log, flags=re.M)[1:]
+    if len(segments) != len(expected):
+        raise AssertionError('unexpected GPU cache replay marker')
+    for index, (segment, (phase, binding, _)) in enumerate(zip(segments, expected)):
+        cold = phase == 0
+        events = re.findall(r'MSC_CACHE event=(\w+)', segment)
+        if events != (['miss', 'insert'] if cold else ['hit']):
+            raise AssertionError('GPU case did not use the expected cold/warm cache path')
+        if segment.count('DXMT_MSC_TRACE_END ok') != int(cold):
+            raise AssertionError('unexpected conversion during GPU cache replay')
+        rows = re.findall(r'MSC numeric kind=int64 binding=' + binding +
+                          r' pass=(\d) cases=32 exact_bytes=3072 guards=64 passed', segment)
+        wrong = bool(negative) and index == len(expected) - 1
+        if rows != ([] if wrong else ['0', '1', '2']):
+            raise AssertionError('missing byte-exact GPU output/guard checks')
+        if segment.count('Numeric closed-list replay/fenced reset/pending reset rejection/release passed') != int(not wrong):
+            raise AssertionError('missing GPU submission-lifetime checks')
+        mismatch = 'FAIL numeric kind=int64 binding=table pass=0 byte=32'
+        if (mismatch in segment) != wrong or ('FAIL numeric' in segment) != wrong:
+            raise AssertionError('negative control did not fail at the intended readback')
+    if ('Metal API Validation Enabled' not in log or 'Metal GPU Validation Enabled' not in log or
+            re.search(r'(?i)metal (?:api|gpu|shader) validation (?:error|warning)|failed assertion', log)):
+        raise AssertionError('GPU validation missing or reported an error')
+    return {'variants': count, 'layouts': ['root', 'table'], 'phases': ['cold', 'cache_hit'],
+            'negative_control': negative, 'successful_case_count': len(ends),
+            'readbacks_per_successful_case': 3, 'bytes_per_readback': 3072,
+            'guard_bytes_per_readback': 64, 'api_and_shader_validation': True}
 
 
 def main():
@@ -121,7 +181,15 @@ def main():
     parser.add_argument("--cache-trace", action="store_true", help="scan cache storage; perturbs timing")
     parser.add_argument("--corpus-count", type=int, default=0,
                         help="2-64 distinct compute shaders, then replay; enables cache tracing")
+    parser.add_argument("--gpu-corpus", action="store_true",
+                        help="resource-using variants, both root layouts and GPU readback on replay")
+    parser.add_argument("--gpu-negative", choices=('reference', 'variant'),
+                        help="deliberately fail the final warm GPU case")
     args = parser.parse_args()
+    if args.gpu_corpus and not args.corpus_count:
+        parser.error("--gpu-corpus requires --corpus-count")
+    if args.gpu_negative and not args.gpu_corpus:
+        parser.error("--gpu-negative requires --gpu-corpus")
     if args.corpus_count and not 2 <= args.corpus_count <= 64:
         parser.error("--corpus-count must be between 2 and 64")
     if args.corpus_count and (args.fail_first or args.two_shaders or args.force_serial or args.no_delay):
@@ -139,10 +207,11 @@ def main():
     output = args.output.absolute()
     output.mkdir(parents=True, exist_ok=False)
     repository = Path(__file__).resolve().parents[2]
+    probe = 'dx12_compute_sm6.exe' if args.gpu_corpus else 'dx12_msc_concurrent.exe'
     pairs = (("src/d3d12/d3d12.dll", "d3d12.dll"), ("src/dxgi/dxgi.dll", "dxgi.dll"),
              ("src/winemetal/winemetal.dll", "winemetal.dll"),
              ("src/winemetal/unix/winemetal.so", "wine/lib/wine/x86_64-unix/winemetal.so"),
-             ("tests/dx12/dx12_msc_concurrent.exe", "dx12_msc_concurrent.exe"),
+             ("tests/dx12/" + probe, probe),
              ("tests/dx12/shader_embedded.compute.cs.cso", "shader_embedded.compute.cs.cso"))
     if args.two_shaders:
         pairs += (("tests/dx12/shader_embedded.compute.second.cs.cso", "shader_embedded.compute.second.cs.cso"),)
@@ -156,18 +225,20 @@ def main():
     corpus_manifest = None
     if args.corpus_count:
         corpus_manifest, corpus_identity = prepare_corpus(
-            repository, output, stage / 'wine/bin/wine', prefix, args.corpus_count)
+            repository, output, stage / 'wine/bin/wine', prefix, args.corpus_count, args.gpu_corpus)
     wrapper = output / "wrapper.dylib"
     subprocess.run(["xcrun", "clang", "-arch", "x86_64", "-dynamiclib", "-I", str(repository / "include"),
                     str(repository / "tests/dx12/msc_conversion_trace_wrapper.c"), str(converter),
                     "-Wl,-rpath," + str(converter.parent), "-o", str(wrapper)], check=True, timeout=30)
-    env = {key: value for key, value in os.environ.items() if not key.startswith("DYLD_") and
-           not key.startswith("DXMT_TEST_TRACE_")}
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith(("DYLD_", "DXMT_TEST_", "MTL_DEBUG_", "MTL_SHADER_VALIDATION"))}
     env.update(WINEPREFIX=str(prefix), WINEDLLPATH=str(stage / "wine/lib/wine"),
                WINEDLLOVERRIDES="d3d12=n;dxgi=n;winemetal=b", WINEDEBUG="+loaddll",
                DXMT_METALIRCONVERTER_PATH=str(wrapper), DYLD_PRINT_LIBRARIES="1",
                DXMT_SHADER_CACHE_PATH=str(output / "cache"), DXMT_LOG_PATH=str(output),
                DXMT_MSC_CACHE_TRACE="1" if cache_trace else "0", DXMT_LOG_LEVEL="info")
+    if args.gpu_corpus:
+        env.update(MTL_DEBUG_LAYER="1", MTL_SHADER_VALIDATION="1", MTL_SHADER_VALIDATION_REPORT_TO_STDERR="1")
     if injected_delay:
         env["DXMT_TEST_TRACE_DELAY"] = "1"
     if args.fail_first:
@@ -177,6 +248,11 @@ def main():
     command = [str(stage / "wine/bin/wine"), "dx12_msc_concurrent.exe", "shader_embedded.compute.cs.cso"]
     if args.corpus_count:
         command = [str(stage / "wine/bin/wine"), "dx12_msc_concurrent.exe", "--corpus", corpus_manifest]
+    if args.gpu_corpus:
+        command = [str(stage / "wine/bin/wine"), probe, corpus_manifest, "--threadgroup-cache-replay",
+                   'Z:' + str(output / 'fixture-0/inputs.bin').replace('/', '\\')]
+        if args.gpu_negative:
+            command.append('--wrong-expected' if args.gpu_negative == 'reference' else '--wrong-variant')
     if args.fail_first:
         command.append("--fail-first")
     if args.two_shaders:
@@ -205,7 +281,12 @@ def main():
         timings[phase.lower()] = {"samples_ns": values, "median_ns": statistics.median(values),
                                   "p95_nearest_rank_ns": ordered[-1],
                                   "min_ns": ordered[0], "max_ns": ordered[-1]}
-    if args.corpus_count:
+    gpu_replay = None
+    if args.gpu_corpus:
+        gpu_replay = validate_gpu_corpus(log, args.corpus_count, args.gpu_negative)
+        after_concurrent = log.split("CACHE_GPU_BEGIN 1 root 0 shader=0\n", 1)[1]
+        memory = None
+    elif args.corpus_count:
         actual = [(int(a), int(b)) for a, b in re.findall(r'^CORPUS_PSO (\d+) (\d+)\s*$', log, re.M)]
         if actual != [(a, b) for a in range(2) for b in range(args.corpus_count)]:
             raise AssertionError('missing corpus PSO creations')
@@ -224,14 +305,19 @@ def main():
     expected_failures = 1 if args.fail_first else 0
     marker = (f"MSC_CORPUS shaders={args.corpus_count} passes=2" if args.corpus_count else
               f"concurrent MSC PSOs=8 failures={expected_failures}")
+    expected_exit = int(bool(args.gpu_negative))
+    if args.gpu_corpus:
+        marker = ('FAIL numeric kind=int64 binding=table pass=0 byte=32' if args.gpu_negative else
+                  f'MSC_CACHE_GPU variants={args.corpus_count} layouts=2 phases=2 passed')
     cache_snapshots = []
     if cache_trace:
-        entries = args.corpus_count or (2 if args.two_shaders else 1)
-        successes = 2 * args.corpus_count if args.corpus_count else 16 - expected_failures
+        entries = (2 * args.corpus_count if args.gpu_corpus else
+                   args.corpus_count or (2 if args.two_shaders else 1))
+        successes = 2 * entries if args.corpus_count else 16 - expected_failures
         cache_snapshots = parse_cache_trace(log, entries, successes - entries, entries + expected_failures)
     elif 'MSC_CACHE ' in log:
         raise AssertionError('cache tracing was enabled unexpectedly')
-    if (result.returncode or marker not in log or
+    if (result.returncode != expected_exit or marker not in log or
             any(value not in log for value in identities) or not all(loaded) or
             str(stage / "wine/lib/wine/x86_64-unix/winemetal.so") not in log or
             str(wrapper) not in log or str(converter) not in log or calls != args.expected_calls or
@@ -244,13 +330,15 @@ def main():
         "exit": result.returncode, "injected_delay": injected_delay, "pso_creation_timing": timings,
         "cache_trace_enabled": cache_trace, "cache_snapshots": cache_snapshots,
         "cache_storage_scope": "vector capacity and mapped values; excludes allocator/node/key overhead, GPU memory and PSO copies; string capacity may be inline",
-        "corpus": corpus_identity,
+        "corpus": corpus_identity, "gpu_cache_replay": gpu_replay, "expected_exit": expected_exit,
         "process_memory": memory,
-        "process_memory_source": "GetProcessMemoryInfo / PROCESS_MEMORY_COUNTERS",
-        "process_memory_scope": "whole process; Wine-dependent counters, not MSC cache or GPU memory",
+        "process_memory_source": None if args.gpu_corpus else "GetProcessMemoryInfo / PROCESS_MEMORY_COUNTERS",
+        "process_memory_scope": "NOT_MEASURED" if args.gpu_corpus else
+                                "whole process; Wine-dependent counters, not MSC cache or GPU memory",
         "converter_sha256": sha(converter), "wrapper_sha256": sha(wrapper),
         "artifacts": {path: sha(stage / path) for _, path in pairs}}, indent=2) + "\n")
-    print(f"{marker}: {calls} real MSC compilation calls")
+    label = 'expected GPU mismatch verified' if args.gpu_negative else marker
+    print(f"{label}: {calls} real MSC compilation calls")
 
 
 if __name__ == "__main__":

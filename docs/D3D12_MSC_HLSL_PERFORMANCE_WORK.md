@@ -1435,3 +1435,15 @@ This completes a limited cache-owned storage observation; representative shader
 workloads, allocator/node overhead, GPU allocation and capacity-policy evidence
 remain incomplete. The trace scans under the cache lock and perturbs timings;
 it is not enabled by default and does not justify a performance claim.
+
+Resource-using conversion-cache replay is now verified for four threadgroup
+compute variants and two root layouts in one process. Eight first conversions
+were followed by eight cache-hit PSO creations with no further conversions or
+storage growth; all 48 GPU readbacks checked 3,072 result bytes and 64 guard
+bytes. Deliberately wrong reference data and wrong cached-shader selection both
+failed at the intended final warm readback. The ordinary threadgroup suite and
+same-key concurrent path also passed. See [the cache GPU evidence](msc-single-flight-design.md#resource-using-cache-replay-results--2026-11-04)
+for commands, identities, controls and limits. This establishes the controlled
+compute path only. Function Constant specialization/PSO cache isolation and
+graphics/stage-in replay still need separate evidence; no production cache
+policy or public capability was changed.

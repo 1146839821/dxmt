@@ -9,6 +9,7 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -428,9 +429,65 @@ bool RunNumericDifferential(const char *shader_path, bool native16, bool table,
   return true;
 }
 
+int RunThreadgroupCacheReplay(const char *manifest_path, const char *input_path,
+                             bool wrong_expected, bool wrong_variant) {
+  for (const auto &[module_name, symbol] :
+       {std::pair{"d3d12.dll", "D3D12CreateDevice"},
+        std::pair{"winemetal.dll", "DXMTMSCPatchSamplerLOD"}}) {
+    const auto module = GetModuleHandleA(module_name);
+    const auto address = module ? reinterpret_cast<const unsigned char *>(GetProcAddress(module, symbol)) : nullptr;
+    if (!address)
+      return 2;
+    static const char hex[] = "0123456789abcdef";
+    std::cout << "LOADED_CODE " << module_name << " " << symbol << " ";
+    for (unsigned i = 0; i < 16; ++i)
+      std::cout << hex[address[i] >> 4] << hex[address[i] & 15];
+    std::cout << "\n";
+  }
+  std::ifstream manifest(manifest_path);
+  std::vector<std::pair<std::string, std::string>> fixtures;
+  std::string line;
+  while (std::getline(manifest, line)) {
+    if (!line.empty() && line.back() == '\r')
+      line.pop_back();
+    const auto separator = line.find('\t');
+    if (separator == std::string::npos || separator == 0 || separator + 1 == line.size() ||
+        line.find('\t', separator + 1) != std::string::npos || fixtures.size() == 64)
+      return 2;
+    fixtures.emplace_back(line.substr(0, separator), line.substr(separator + 1));
+  }
+  if (fixtures.size() < 2)
+    return 2;
+  for (unsigned phase = 0; phase < 2; ++phase) {
+    for (bool table : {false, true}) {
+      for (size_t i = 0; i < fixtures.size(); ++i) {
+        const bool last = phase == 1 && table && i + 1 == fixtures.size();
+        const size_t selected = last && wrong_variant ? 0 : i;
+        std::cout << "CACHE_GPU_BEGIN " << phase << " " << (table ? "table" : "root")
+                  << " " << i << " shader=" << selected << std::endl;
+        if (!RunNumericDifferential(fixtures[selected].first.c_str(), false, table,
+                                    input_path, fixtures[i].second.c_str(),
+                                    last && wrong_expected, true))
+          return 1;
+        std::cout << "CACHE_GPU_END " << phase << " " << (table ? "table" : "root")
+                  << " " << i << std::endl;
+      }
+    }
+  }
+  std::cout << "MSC_CACHE_GPU variants=" << fixtures.size() << " layouts=2 phases=2 passed\n";
+  return 0;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
+  if ((argc == 4 || argc == 5) && !strcmp(argv[2], "--threadgroup-cache-replay")) {
+    const bool wrong_expected = argc == 5 && !strcmp(argv[4], "--wrong-expected");
+    const bool wrong_variant = argc == 5 && !strcmp(argv[4], "--wrong-variant");
+    if (argc == 5 && !wrong_expected && !wrong_variant)
+      return 2;
+    return RunThreadgroupCacheReplay(argv[1], argv[3], wrong_expected, wrong_variant);
+  }
   if ((argc == 6 || argc == 7) &&
       (!strcmp(argv[2], "--threadgroup-differential") ||
        !strcmp(argv[2], "--threadgroup-timed"))) {

@@ -330,3 +330,109 @@ the measured growth to 32 entries is consistent with that ownership. It is not
 proof of a leak or a capacity recommendation. Next: measure resource-using
 shader variants with GPU readback before and after cache replay, using this
 same diagnostic, before designing a capacity or representation change.
+
+## Resource-using cache replay design card
+
+- **Goal:** Prove GPU output correctness after conversion-cache hits across distinct DXIL and root-layout keys.
+- **Baseline:** `7868ed0f`; storage tracing passed for empty shaders; existing threadgroup tests dispatch resource-using shaders but do not recreate PSOs on cache hits.
+- **Evidence:** `RunNumericDifferential` already verifies two inputs, root/table bindings, exact output/guards, closed-list replay, fenced reset and pending-resource release.
+- **Scope:** Reuse that helper for multiple compile-time output variants, both root layouts, first conversion and a second PSO-creation pass in one process.
+- **Non-scope:** Cache policy, key changes, production shader semantics, graphics/stage-in coverage and performance claims.
+- **Boundary:** Existing C++ probe, HLSL, independent Python oracle generator and concurrent-cache runner; no new production code or runner.
+- **Plan:** Generate distinct DXIL/reference pairs; trace eight inserts for four variants and two layouts, then eight stable hits; verify GPU bytes throughout.
+- **Negative controls:** On the last warm case, deliberately corrupt the reference or select variant zero with the last variant's reference; require the targeted GPU mismatch.
+- **Cost / risk:** Validation and cache tracing intentionally perturb timings; fixtures are bounded microtests, not representative workloads.
+- **Validation:** Isolated paired WineMetal, real conversion counts, phase-specific traces, byte/guard checks, runtime identity, old threadgroup regression and focused build.
+- **Rollback / done:** Revert test-only mode/variant support; done when positive and both negative controls run and evidence is recorded without capability promotion.
+
+## Resource-using cache replay results — 2026-11-04
+
+`LOCAL_PASS` on the M1 Max/macOS 27.2/Wine 11.0 isolated stage, with the real
+MSC dylib SHA-256
+`cc487a757f431c83483346c06a3ae8558910ecc510ce59b1e4f905d5d6d72bd4`.
+Four DXIL shaders use the same resource layout and threadgroup barriers, but
+apply compile-time XOR values 0–3 so their outputs differ. Independent Python
+reference files differ too, while their two input datasets are identical.
+Each variant runs with root SRV/UAV descriptors and descriptor tables in the
+same process. Each case creates and releases its own device/PSO/resources;
+the second phase reconstructs them and exercises the process-local conversion
+cache. Every PSO is checked to use the MSC backend and reflected 64×1×1 threads.
+
+The first phase recorded eight misses, eight real conversions and eight
+insertions: four shaders multiplied by two serialized root layouts. The second
+phase recorded eight cache hits, zero conversions and no storage changes.
+All 16 cases passed three byte-exact GPU readbacks each (3,072 output bytes
+plus 64 guard bytes per readback), for 48 readbacks. The reused helper also
+checks closed-command-list replay, fenced reset, rejection of a pending
+allocator reset and release of application references while submission is
+blocked behind a fence. Both Metal API and GPU validation were enabled;
+no validation errors were reported. Stage/build bytes, loaded PE export bytes
+and actual WineMetal Unix and MSC paths were checked.
+
+| Control | Successful GPU cases before termination | Final readback | Actual conversions | Expected process exit |
+| --- | ---: | --- | ---: | ---: |
+| Positive | 16 | Exact output/guards | 8 | 0 |
+| Wrong reference on last warm case | 15 | byte 32: actual 82, expected 83 | 8 | 1 |
+| Wrong cached shader on last warm case | 15 | byte 32: actual 81, expected 82 | 8 | 1 |
+
+Both negative cases deliberately fail only the final warm descriptor-table
+case. The runner requires all preceding checks, the expected cache hit and the
+precise data-mismatch location, rather than accepting any nonzero exit. These
+controls demonstrate sensitivity to incorrect output and shader selection;
+they do not corrupt the production cache. All three processes retain eight
+entries: 38,528 bytes of metallib length/capacity, 72,768 bytes of mapped-value
+objects, 32 entry-point characters (120 capacity), 13 buckets and zero stage-in
+storage. The accounting limits in the preceding section still apply.
+
+`LOCAL_PASS`: Nine log mutations were rejected: missing readback, incorrect
+shader selection, missing warm hit, warm recompilation, missing completion,
+validation error, missing validation, missing submission-lifetime result and
+an extra malformed phase marker. The final runner reparsed both negative logs
+and independently matched every cache snapshot to JSON. A final fresh positive
+run included DXIL, compiler, oracle-generator and input/output fixture hashes.
+
+`LOCAL_PASS`: The default oracle input/output bytes are unchanged; the default
+HLSL variant also produces exactly the previous DXIL SHA-256
+`c57607c73a172d41babae3342a9d2f7cb285b3b6229965f4f866c6d0924faa1b`.
+All six original threadgroup flag/binding/readback controls passed. The old
+concurrent no-delay path still made one conversion for eight concurrent PSOs
+and none for eight repeats. The C++ probe built in both `build` and the separate
+candidate configuration; Python parsing and `git diff --check` passed.
+
+One fixture-build attempt failed with Wine protocol mismatch `930/784` because
+the Meson DXC command uses `toolchains/wine`, while the runtime stage has a
+different Wine binary. Retrying the Meson target with a separate build-only
+prefix (`prefix-dxc-build-cache-gpu-20261104`) succeeded. No running test server
+was stopped or prefix reset. Use separate prefixes for these Wine builds.
+
+Raw artifacts under `dxmt-test/n95-capability-gate/` are
+`result-cache-gpu-final-positive-20261104`,
+`result-cache-gpu-negative-{reference,variant}-20261104`,
+`result-cache-gpu-default-regression-20261104` and
+`result-cache-gpu-legacy-concurrent-20261104`. The earlier positive directory
+also contains `parser-controls.txt`. Reproduce with a new output directory:
+
+```sh
+test_root=/Users/zhangbo/Documents/Vibe-Codeding/dxmt-test/n95-capability-gate
+python3 tests/dx12/run_msc_concurrent.py \
+  --stage "$test_root/stage-msc-cache-gpu-20261104" \
+  --prefix "$test_root/prefix-msc-space-fresh-20261104" \
+  --build "$test_root/dxmt-current-patches-20261103" \
+  --converter /usr/local/lib/libmetalirconverter.dylib \
+  --output "$test_root/result-cache-gpu-next" \
+  --expected-calls 8 --corpus-count 4 --gpu-corpus
+```
+
+Add `--gpu-negative reference` or `--gpu-negative variant` in separate new
+output directories for the negative controls.
+
+**Gate outcome:** Baseline/design, test-only implementation, validation and
+scope review passed for resource-using compute cache replay. Production cache
+code, keys, policy, WineMetal ABI and public FL/SM/Tier declarations did not
+change. These are controlled compute fixtures, not representative game memory
+or all-shader correctness evidence. Graphics/stage-in cache replay, Function
+Constant specialization identity and other GPU/OS/MSC versions remain
+`NOT_RUN`. Cache tracing and Metal validation preclude latency/speedup claims;
+whole-process memory is explicitly unmeasured in GPU corpus mode. The next
+recommended slice is Function Constant specialization/PSO cache isolation,
+which is a separate requirement from ordinary DXIL conversion-cache reuse.
