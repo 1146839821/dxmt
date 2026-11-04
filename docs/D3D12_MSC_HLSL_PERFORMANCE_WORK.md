@@ -1421,3 +1421,17 @@ swapped memory. See the [memory observation design and results](msc-single-fligh
 for raw artifacts, parser controls, timings and reproduction commands.
 Cache-attributed memory, representative growth workloads and GPU memory
 remain unmeasured; no cache policy or capability declaration changed.
+
+The subsequent cache-storage slice adds a default-off diagnostic derived from
+the existing process-local cache owner. Two controlled empty-compute corpora
+(8 and 32 distinct DXIL inputs) retained 32,176 and 128,992 bytes of metallib
+respectively, plus 72,768 and 291,072 bytes of mapped-value objects. All inputs
+were replayed with no extra conversion or storage growth. Capacity fields,
+fixed object storage and whole-process memory are reported separately rather
+than presented as total heap/GPU memory. Same-key, different-key, failure and
+trace-disabled controls passed, along with the existing threadgroup GPU
+readback/negative controls under Metal validation. See [cache storage evidence](msc-single-flight-design.md#cache-retained-storage-measurement--2026-11-04).
+This completes a limited cache-owned storage observation; representative shader
+workloads, allocator/node overhead, GPU allocation and capacity-policy evidence
+remain incomplete. The trace scans under the cache lock and perturbs timings;
+it is not enabled by default and does not justify a performance claim.

@@ -170,6 +170,7 @@ The following environment variables can be used for **debugging** purposes.
 - `DXMT_LOG_PATH=/some/directory` Changes path where log files are stored. Set to `none` to disable log file creation entirely, without disabling logging.
 - `DXMT_SHADER_CACHE=0`: Disables the internal shader cache.
 - `DXMT_SHADER_CACHE_PATH=/some/absolute/darwin/directory`: Path to internal shader cache files. Default to `$(getconf DARWIN_USER_CACHE_DIR)/dxmt/<executable name with extension>`.
+- `DXMT_MSC_CACHE_TRACE=1`: Opt-in D3D12 conversion-cache storage snapshots at info log level. Each event scans the cache under its lock; use only for diagnostics, not timing benchmarks. Reports vector data/capacity and mapped-object sizes, excluding allocator overhead, GPU memory and PSO copies. See [the cache measurement notes](msc-single-flight-design.md).
 
 
 ### Logs

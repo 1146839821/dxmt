@@ -195,3 +195,138 @@ not evidence of an MSC leak or a cache-size measurement; the tiny one-shader
 workload does not test unbounded cache growth. The next measurement should
 attribute retained bytes and entries to the existing process-local conversion
 cache under multiple distinct shaders, without changing its ownership/policy.
+
+## Cache-retained storage design card
+
+- **Goal:** Measure entries and retained conversion data under distinct-shader growth and warm reuse.
+- **Baseline:** `88dbe00b`, `feat/d3d12`; one process-local unordered map owns converted shader copies, with no capacity policy.
+- **Evidence:** `MSCConversionCache` and `ConvertD3D12ShaderInternal` in `src/d3d12/d3d12_shader_converter.cpp`; whole-process counters cannot attribute these allocations.
+- **Scope:** Default-off `DXMT_MSC_CACHE_TRACE=1` snapshots, existing concurrent probe/runner extended with a bounded distinct-shader corpus.
+- **Non-scope:** Eviction, persistent caching, heap allocator overhead, GPU memory, cache-policy changes or new capability claims.
+- **Boundary / selection:** Derive statistics from the existing owner under its lock, rather than maintain duplicate counters or expose a new DLL/COM API.
+- **Changes:** Record entry count, vector sizes/capacities, entry-point size/capacity, inline mapped-value bytes and bucket count on misses, hits and insertions.
+- **Cost / risk:** Disabled mode only checks a process-static flag per event; enabled mode scans O(entries) and logs under the existing lock, so traced timings are diagnostic, not performance evidence.
+- **Test plan:** Trace disabled control, same-key concurrency, distinct shader growth/replay, failed-conversion recovery, parser negatives and adjacent GPU output regression with validation.
+- **Rollback:** Remove tracing and the corpus mode together; retain the cache owner/key/lifetime unchanged.
+- **Done:** Correctly attributed data/storage counts, real compile-count controls, builds, explicit measurement limits and a focused commit.
+
+## Cache-retained storage measurement — 2026-11-04
+
+The default-off `DXMT_MSC_CACHE_TRACE=1` diagnostic emits `MSC_CACHE` events
+at info log level. Each snapshot is computed directly from the process-local
+cache under its existing lock. No parallel accounting state, public export,
+cache key, insertion policy or lifetime changed. Disabled mode performs a
+process-static flag check; enabled mode scans O(entries) and logs while holding
+the lock. It deliberately perturbs timings and must not be used as a speedup
+benchmark. The runner's JSON records whether tracing was enabled.
+
+The storage fields have distinct meanings:
+
+- `metallib_bytes` / `stage_in_bytes`: sum of vector lengths in cached copies.
+- `metallib_capacity_bytes` / `stage_in_capacity_bytes`: sum of vector capacities,
+  excluding allocator bookkeeping or page granularity.
+- `entry_point_chars` / `entry_point_capacity_chars`: string lengths/capacities,
+  excluding the terminating null. Capacity may reside inside the mapped object
+  via small-string optimization; it is not an additional heap allocation.
+- `mapped_value_bytes`: entry count multiplied by `sizeof(D3D12ConvertedShader)`;
+  includes the vector/string objects, fixed reflection and padding, but not
+  the vectors' external storage, map keys, nodes or bucket allocation.
+- `buckets`: number of map buckets, not their allocated byte size.
+
+These observations do not include Metal library/PSO allocations, copies returned
+to callers, in-flight conversion buffers, single-flight state, driver storage,
+GPU memory or allocator overhead. The runner retains whole-process PSAPI
+snapshots separately; subtracting them does not recover an exact cache footprint.
+
+The `--corpus-count` mode uses the existing empty compute HLSL fixture, compiled
+with repository DXC (`cs_6_0`, `-O3`) and threadgroup X sizes 1 through N. It
+requires distinct DXIL hashes, creates every PSO once and then replays all of
+them. Counts are limited to 2–64. All generated inputs, DXC/compiler identities,
+raw logs and cache snapshots are saved outside the repository. The probe flushes
+phase markers before starting later PSOs, so the no-recompile-after-first-pass
+check can observe real ordering rather than buffered output.
+
+`LOCAL_PASS`: Tracing disabled emitted no cache records. With tracing enabled,
+eight same-key concurrent PSOs plus eight repeats retained one entry and made
+one MSC call. The forced-first-failure case left the cache empty at failure,
+then recovered to one entry/one successful conversion. Two distinct concurrent
+shaders retained two entries and made two overlapping conversions. The first
+8-shader corpus recorded eight misses, eight insertions and eight hits, with
+no mutation or conversion in the replay. Its final metallib length/capacity
+was 32,176 bytes and mapped-value storage was 72,768 bytes.
+
+`LOCAL_PASS`: Nine parser controls rejected a missing insertion, duplicate
+insertion, changed state on a hit, negative count, capacity smaller than size,
+unknown event, empty record, duplicate field and malformed record. Raw logs
+were independently parsed and compared with JSON. Native single-flight and
+output-buffer tests both passed. The full `build` and `build-X86` builds
+passed; the final probe edit was rebuilt in `build` and the separate candidate.
+
+`LOCAL_PASS`: The existing threadgroup-memory GPU regression ran with cache
+tracing and Metal API/GPU validation. Default and coherency-enabled compiler
+controls passed with both root-descriptor and descriptor-table bindings;
+both deliberately wrong expected-output controls failed as intended. All six
+logs contained an actual cache insertion and verified runtime paths. The first
+attempt was `NOT_RUN` because the opt-in shader fixture had not been built;
+after building `dx12_compute_sm6_threadgroup_coherency_fixture`, the complete
+regression passed. This covers those fixtures, not a general new feature claim.
+
+Artifacts under `dxmt-test/n95-capability-gate/`:
+`result-cache-storage-{off,same,failure,two,corpus8,corpus32}-20261104`
+and `result-cache-storage-gpu-ready-20261104`. Use a new output directory:
+
+```sh
+test_root=/Users/zhangbo/Documents/Vibe-Codeding/dxmt-test/n95-capability-gate
+python3 tests/dx12/run_msc_concurrent.py \
+  --stage "$test_root/stage-msc-cache-storage-20261104" \
+  --prefix "$test_root/prefix-msc-space-fresh-20261104" \
+  --build "$test_root/dxmt-current-patches-20261103" \
+  --converter /usr/local/lib/libmetalirconverter.dylib \
+  --output "$test_root/result-cache-storage-next" \
+  --expected-calls 32 --corpus-count 32
+```
+
+Use `--cache-trace --expected-calls 1` instead of corpus mode for same-key
+concurrency; add `--fail-first` for recovery. Use `--two-shaders --cache-trace
+--expected-calls 2` for independent-key overlap. With `--no-delay` and no trace
+flag, the existing timing mode remains available.
+
+The 32-shader corpus also passed: exactly 32 real MSC conversions, 32 insertions
+and 32 replay hits. Every input hash differed; replay produced no conversion
+and no change to any storage field. The final snapshots were:
+
+| Distinct compute shaders | Metallib bytes / capacity | Mapped-value bytes | String chars / capacity | Buckets |
+| ---: | ---: | ---: | ---: | ---: |
+| 8 | 32,176 / 32,176 | 72,768 | 56 / 120 | 13 |
+| 32 | 128,992 / 128,992 | 291,072 | 224 / 480 | 59 |
+
+After the final probe cleanup, a separate two-input run passed with the latest
+built executable hash, two insertions and stable replay. Its logs and JSON are
+in `result-cache-storage-final-corpus2-20261104`.
+
+Both cases retained zero stage-in bytes/capacity. On this GCC x86_64 build,
+each mapped value occupies 9,096 bytes, including fixed reflection storage.
+The cached metallib vector capacities equal their actual data sizes; these
+copies do not retain the converter's 64 KiB initial work-buffer capacity for
+each small shader. This is an observed property of the tested copy path/STL,
+not a portable capacity guarantee. `storage-analysis.json` in the 32-input
+result directory records the independently checked corpus hashes, raw cache
+snapshots and phase ordering.
+
+The 8-input process working set was 50,597,888 → 56,623,104 → 56,627,200 bytes;
+the 32-input process was 50,384,896 → 57,188,352 → 57,204,736 bytes. These
+processes ran with heavy tracing and differing host/cache activity; comparing
+their deltas does not measure the incremental per-shader heap cost. No median,
+P95 or optimization percentage is claimed for these diagnostic runs. The
+corpus uses empty compute shaders and cannot establish representative game
+memory, eviction behavior, nonempty stage-in storage or GPU output correctness
+of arbitrary cached shaders. The separate GPU regression addresses only its
+own resource-using fixtures.
+
+**Gate outcome:** Baseline/design, implementation, focused validation and
+scope review passed. There is no public capability or production cache-policy
+change. Source inspection shows the existing static map has no eviction path;
+the measured growth to 32 entries is consistent with that ownership. It is not
+proof of a leak or a capacity recommendation. Next: measure resource-using
+shader variants with GPU readback before and after cache replay, using this
+same diagnostic, before designing a capacity or representation change.

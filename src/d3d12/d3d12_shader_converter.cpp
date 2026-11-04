@@ -22,6 +22,7 @@
 #include "metalirconverter_thunks.h"
 #include "metal_shader_converter/ir_version.h"
 #include "sha1/sha1_util.hpp"
+#include "util_env.hpp"
 
 namespace dxmt {
 
@@ -235,6 +236,36 @@ MSCConversionCache &
 GetMSCConversionCache() {
   static MSCConversionCache cache;
   return cache;
+}
+
+// Caller holds cache.mutex. This opt-in diagnostic derives a snapshot from
+// the owner; it does not maintain a second set of cache accounting state.
+void
+TraceMSCConversionCacheLocked(const MSCConversionCache &cache, const char *event) {
+  static const bool enabled = env::getEnvVar("DXMT_MSC_CACHE_TRACE") == "1";
+  if (!enabled || Logger::logLevel() > LogLevel::Info)
+    return;
+  uint64_t metallib_bytes = 0, metallib_capacity = 0, stage_in_bytes = 0, stage_in_capacity = 0;
+  uint64_t entry_point_chars = 0, entry_point_capacity = 0;
+  for (const auto &entry : cache.entries) {
+    const auto &shader = entry.second;
+    metallib_bytes += shader.metallib.size();
+    metallib_capacity += shader.metallib.capacity();
+    stage_in_bytes += shader.stage_in_metallib.size();
+    stage_in_capacity += shader.stage_in_metallib.capacity();
+    entry_point_chars += shader.entry_point.size();
+    entry_point_capacity += shader.entry_point.capacity();
+  }
+  // Capacities exclude allocator overhead. String capacity may be inline;
+  // do not add it to mapped_value_bytes as an independent heap allocation.
+  Logger::info(str::format(
+      "MSC_CACHE event=", event, " entries=", cache.entries.size(), " metallib_bytes=", metallib_bytes,
+      " metallib_capacity_bytes=", metallib_capacity, " stage_in_bytes=", stage_in_bytes,
+      " stage_in_capacity_bytes=", stage_in_capacity, " entry_point_chars=", entry_point_chars,
+      " entry_point_capacity_chars=", entry_point_capacity,
+      " mapped_value_bytes=", uint64_t(cache.entries.size()) * sizeof(D3D12ConvertedShader),
+      " buckets=", cache.entries.bucket_count()
+  ));
 }
 
 Sha1Digest
@@ -1820,6 +1851,7 @@ ConvertD3D12ShaderInternal(
     if (cached != cache.entries.end()) {
       converted = cached->second;
       DEBUG("MSC shader conversion cache hit");
+      TraceMSCConversionCacheLocked(cache, "hit");
       return S_OK;
     }
   }
@@ -1830,13 +1862,16 @@ ConvertD3D12ShaderInternal(
     if (cached != cache.entries.end()) {
       converted = cached->second;
       DEBUG("MSC shader conversion cache hit after wait");
+      TraceMSCConversionCacheLocked(cache, "hit_after_wait");
       return S_OK;
     }
+    TraceMSCConversionCacheLocked(cache, "miss");
   }
   if (kMSCConversionPersistentCacheEnabled && LoadPersistentMSCConversion(cache_key, converted)) {
     std::unique_lock<std::shared_mutex> lock(cache.mutex);
     cache.entries.emplace(cache_key, converted);
     DEBUG("MSC shader persistent cache hit");
+    TraceMSCConversionCacheLocked(cache, "persistent_insert");
     return S_OK;
   }
 
@@ -1878,6 +1913,7 @@ ConvertD3D12ShaderInternal(
   {
     std::unique_lock<std::shared_mutex> lock(cache.mutex);
     cache.entries.emplace(cache_key, converted);
+    TraceMSCConversionCacheLocked(cache, "insert");
   }
   if (kMSCConversionPersistentCacheEnabled)
     StorePersistentMSCConversion(cache_key, converted);

@@ -29,6 +29,43 @@ static void report_memory(const char *phase) {
     std::cout << "PROCESS_MEMORY " << phase << " NOT_AVAILABLE\n";
   if (psapi)
     FreeLibrary(psapi);
+  std::cout.flush();
+}
+
+static int run_corpus(ID3D12Device *device, ID3D12RootSignature *root,
+                      const char *manifest_path) {
+  std::ifstream manifest(manifest_path);
+  std::vector<std::vector<char>> shaders;
+  std::string path;
+  while (std::getline(manifest, path)) {
+    if (!path.empty() && path.back() == '\r')
+      path.pop_back();
+    std::ifstream file(path, std::ios::binary);
+    shaders.emplace_back(std::istreambuf_iterator<char>(file),
+                         std::istreambuf_iterator<char>());
+    if (shaders.back().empty() || shaders.size() > 64)
+      return 2;
+  }
+  if (shaders.size() < 2)
+    return 2;
+  report_memory("before");
+  for (unsigned pass = 0; pass < 2; ++pass) {
+    for (size_t i = 0; i < shaders.size(); ++i) {
+      D3D12_COMPUTE_PIPELINE_STATE_DESC pipeline = {};
+      pipeline.pRootSignature = root;
+      pipeline.CS = {shaders[i].data(), shaders[i].size()};
+      ID3D12PipelineState *state = nullptr;
+      HRESULT hr = device->CreateComputePipelineState(&pipeline, IID_PPV_ARGS(&state));
+      if (state)
+        state->Release();
+      if (FAILED(hr))
+        return 6;
+      std::cout << "CORPUS_PSO " << pass << " " << i << std::endl;
+    }
+    report_memory(pass ? "repeat" : "corpus");
+  }
+  std::cout << "MSC_CORPUS shaders=" << shaders.size() << " passes=2\n";
+  return 0;
 }
 
 int main(int argc, char **argv) {
@@ -36,8 +73,9 @@ int main(int argc, char **argv) {
     return 2;
   const bool expect_failure =
       argc == 3 && std::string(argv[2]) == "--fail-first";
+  const bool corpus = argc == 3 && std::string(argv[1]) == "--corpus";
   const bool two_shaders = argc == 4 && std::string(argv[2]) == "--second";
-  if ((argc == 3 && !expect_failure) || (argc == 4 && !two_shaders))
+  if ((argc == 3 && !expect_failure && !corpus) || (argc == 4 && !two_shaders))
     return 2;
   for (const auto &[module_name, symbol] :
        {std::pair{"d3d12.dll", "D3D12CreateDevice"},
@@ -54,11 +92,13 @@ int main(int argc, char **argv) {
       std::cout << hex[address[i] >> 4] << hex[address[i] & 15];
     std::cout << "\n";
   }
-  std::ifstream file(argv[1], std::ios::binary);
-  std::vector<char> shader((std::istreambuf_iterator<char>(file)),
-                           std::istreambuf_iterator<char>());
-  if (shader.empty())
-    return 2;
+  std::vector<char> shader;
+  if (!corpus) {
+    std::ifstream file(argv[1], std::ios::binary);
+    shader.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+    if (shader.empty())
+      return 2;
+  }
   std::vector<char> second_shader;
   if (two_shaders) {
     std::ifstream second_file(argv[3], std::ios::binary);
@@ -82,6 +122,12 @@ int main(int argc, char **argv) {
                                          IID_PPV_ARGS(&root))))
     return 5;
   blob->Release();
+  if (corpus) {
+    const int result = run_corpus(device, root, argv[2]);
+    root->Release();
+    device->Release();
+    return result;
+  }
   report_memory("before");
   constexpr unsigned thread_count = 8;
   std::atomic<unsigned> ready{0}, failures{0};
@@ -115,6 +161,7 @@ int main(int argc, char **argv) {
   report_memory("concurrent");
   for (unsigned i = 0; i < thread_count; ++i)
     std::cout << "PSO_CONCURRENT_NS " << i << " " << elapsed_ns[i] << "\n";
+  std::cout.flush();
   for (unsigned i = 0; i < thread_count; ++i) {
     D3D12_COMPUTE_PIPELINE_STATE_DESC pipeline = {};
     pipeline.pRootSignature = root;
