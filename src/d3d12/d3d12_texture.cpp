@@ -2198,33 +2198,33 @@ public:
           ))
         return DXGI_ERROR_DEVICE_REMOVED;
     }
-    // Cross-resource native submission must succeed before publishing its snapshot.
+    if (sparse_mapping_queue && source == this) {
+      // Metal's individual copy operations can observe earlier writes when
+      // regions overlap. Reapply the saved heap mappings instead, so every
+      // destination uses the original source snapshot required by D3D12.
+      for (size_t i = 0; i < mapping_operations.size(); ++i) {
+        const size_t index = i < destination_packed_start ? i : destination_packed_start;
+        const auto &saved = copied[index];
+        const auto &copy = mapping_operations[i];
+        WMTUpdateSparseTextureMappingOperation update = {};
+        update.mode = saved.heap ? WMTSparseTextureMappingModeMap : WMTSparseTextureMappingModeUnmap;
+        update.texture_region.origin = copy.destination_origin;
+        update.texture_region.size = copy.source_region.size;
+        update.texture_level = copy.destination_level;
+        update.texture_slice = copy.destination_slice;
+        update.heap_offset = saved.heap_tile;
+        if (!sparse_mapping_queue.tryUpdateTextureMappings(
+                texture->current()->texture(), saved.heap ? saved.heap->GetMetalHeap() : WMT::Heap{}, &update, 1
+            ))
+          return DXGI_ERROR_DEVICE_REMOVED;
+      }
+    }
+    // Publish only after all native operations succeed. A partial submission
+    // failure is terminal; do not continue or attempt to roll it back.
     {
       std::unique_lock<dxmt::mutex> destination_lock(tile_mapping_mutex_);
       for (size_t i = 0; i < destination_tiles.size(); i++)
         tile_mappings_[destination_tiles[i]] = copied[i];
-    }
-    if (sparse_mapping_queue) {
-      if (source == this) {
-        // Metal's individual copy operations can observe earlier writes when
-        // regions overlap. Reapply the saved heap mappings instead, so every
-        // destination uses the original source snapshot required by D3D12.
-        for (size_t i = 0; i < mapping_operations.size(); ++i) {
-          const size_t index = i < destination_packed_start ? i : destination_packed_start;
-          const auto &saved = copied[index];
-          const auto &copy = mapping_operations[i];
-          WMTUpdateSparseTextureMappingOperation update = {};
-          update.mode = saved.heap ? WMTSparseTextureMappingModeMap : WMTSparseTextureMappingModeUnmap;
-          update.texture_region.origin = copy.destination_origin;
-          update.texture_region.size = copy.source_region.size;
-          update.texture_level = copy.destination_level;
-          update.texture_slice = copy.destination_slice;
-          update.heap_offset = saved.heap_tile;
-          sparse_mapping_queue.updateTextureMappings(
-              texture->current()->texture(), saved.heap ? saved.heap->GetMetalHeap() : WMT::Heap{}, &update, 1
-          );
-        }
-      }
     }
     return S_OK;
   } catch (const std::bad_alloc &) {

@@ -4277,8 +4277,8 @@ _SparseMappingQueue_updateTextureMappings(void *obj) {
     const char *failure = sparse_texture_update_failure_for_testing();
     if (getenv("DXMT_TEST_SPARSE_TEXTURE_UPDATE_FAILURE"))
       fprintf(
-          stderr, "DXMT_TEST_SPARSE_TEXTURE_UPDATE operations=%llu heap_null=%u\n", (unsigned long long)params->count,
-          params->heap == 0
+          stderr, "DXMT_TEST_SPARSE_TEXTURE_UPDATE operations=%llu heap_null=%u heap=0x%llx\n",
+          (unsigned long long)params->count, params->heap == 0, (unsigned long long)params->heap
       );
     MTL4UpdateSparseTextureMappingOperation *operations =
         failure && !strcmp(failure, "allocation")

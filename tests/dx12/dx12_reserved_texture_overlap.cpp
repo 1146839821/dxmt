@@ -96,7 +96,7 @@ void CreateBuffer(ID3D12Device *device, Owned<ID3D12Resource> &resource,
 
 int Run(bool bad_oracle, bool cross_resource, bool bad_cross, bool cross_queue,
         bool reverse_queue, bool early_work, DXGI_FORMAT format, bool bad_edge,
-        bool bad_position) {
+        bool bad_position, bool multi_heap) {
   Owned<ID3D12Device> device;
   Check("device", D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
                                     IID_PPV_ARGS(&device.ptr)));
@@ -157,8 +157,10 @@ int Run(bool bad_oracle, bool cross_resource, bool bad_cross, bool cross_queue,
   hd.SizeInBytes = 3ull * kTileBytes;
   hd.Properties = Properties(D3D12_HEAP_TYPE_DEFAULT);
   hd.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_NON_RT_DS_TEXTURES;
-  Owned<ID3D12Heap> heap;
+  Owned<ID3D12Heap> heap, other_heap;
   Check("heap", device->CreateHeap(&hd, IID_PPV_ARGS(&heap.ptr)));
+  if (multi_heap)
+    Check("other heap", device->CreateHeap(&hd, IID_PPV_ARGS(&other_heap.ptr)));
   Owned<ID3D12Resource> upload, readback;
   CreateBuffer(device.ptr, upload, 3ull * kTileBytes, D3D12_HEAP_TYPE_UPLOAD,
                D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
@@ -180,9 +182,18 @@ int Run(bool bad_oracle, bool cross_resource, bool bad_cross, bool cross_queue,
   auto map_all = [&] {
     queue->UpdateTileMappings(texture.ptr, 1, &zero, &all, heap.ptr, 1, nullptr,
                               &offset, nullptr, D3D12_TILE_MAPPING_FLAG_NONE);
+    if (multi_heap) {
+      D3D12_TILED_RESOURCE_COORDINATE middle = {};
+      middle.X = 1;
+      D3D12_TILE_REGION_SIZE single = {};
+      single.NumTiles = 1;
+      queue->UpdateTileMappings(texture.ptr, 1, &middle, &single,
+                                other_heap.ptr, 1, nullptr, &offset, nullptr,
+                                D3D12_TILE_MAPPING_FLAG_NONE);
+    }
   };
   UINT64 serial = 0;
-  auto execute = [&](bool write) {
+  auto execute = [&](bool write, bool seed_edge = false) {
     Owned<ID3D12CommandAllocator> allocator;
     Owned<ID3D12GraphicsCommandList> list;
     Check("allocator",
@@ -200,8 +211,12 @@ int Run(bool bad_oracle, bool cross_resource, bool bad_cross, bool cross_queue,
     Transition(list.ptr, texture.ptr, D3D12_RESOURCE_STATE_COMMON,
                write ? D3D12_RESOURCE_STATE_COPY_DEST
                      : D3D12_RESOURCE_STATE_COPY_SOURCE);
+    D3D12_TILE_REGION_SIZE region = all;
+    if (seed_edge)
+      region.NumTiles = 1;
     list->CopyTiles(
-        texture.ptr, &zero, &all, write ? upload.ptr : readback.ptr, 0,
+        texture.ptr, &zero, &region, write ? upload.ptr : readback.ptr,
+        seed_edge ? 2ull * kTileBytes : 0,
         write ? D3D12_TILE_COPY_FLAG_LINEAR_BUFFER_TO_SWIZZLED_TILED_RESOURCE
               : D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER);
     Transition(list.ptr, texture.ptr,
@@ -231,6 +246,17 @@ int Run(bool bad_oracle, bool cross_resource, bool bad_cross, bool cross_queue,
                 << " expected=0x" << expected[i] << std::dec << "\n";
       ok &= actual == expected[i];
     }
+    for (UINT tile = 0; tile < 2 && ok; ++tile) {
+      for (UINT word = 0; word < kTileBytes / sizeof(UINT); ++word) {
+        const UINT wanted = expected[tile] ? TileWord(expected[tile], word) : 0;
+        if (data[tile * (kTileBytes / sizeof(UINT)) + word] != wanted) {
+          std::cerr << name << " full tile mismatch tile=" << tile
+                    << " word=" << word << "\n";
+          ok = false;
+          break;
+        }
+      }
+    }
     const UINT row_words = tile_width * bytes_per_texel / sizeof(UINT);
     for (UINT y = 0; y < tile_height; ++y) {
       for (UINT x = 0; x < row_words; ++x) {
@@ -255,12 +281,24 @@ int Run(bool bad_oracle, bool cross_resource, bool bad_cross, bool cross_queue,
       if (!ok)
         break;
     }
-    if (ok)
+    if (ok) {
       std::cout << name << " full edge and padding passed\n";
+      std::cout << "TEXTURE_FULL_READBACK phase=" << name
+                << " words=" << 3 * (kTileBytes / sizeof(UINT)) << "\n";
+    }
     readback->Unmap(0, nullptr);
     if (!ok)
       throw std::runtime_error(name);
   };
+  // Seed the entire backing page through a full virtual tile before exposing
+  // it at the half-width edge. Reverse overlap later exposes the whole page.
+  D3D12_TILE_REGION_SIZE seed_region = {};
+  seed_region.NumTiles = 1;
+  const UINT edge_heap_page = 2;
+  queue->UpdateTileMappings(texture.ptr, 1, &zero, &seed_region, heap.ptr, 1,
+                            nullptr, &edge_heap_page, nullptr,
+                            D3D12_TILE_MAPPING_FLAG_NONE);
+  execute(true, true);
   map_all();
   execute(true);
   D3D12_TILED_RESOURCE_COORDINATE src = {}, dst = {};
@@ -387,17 +425,19 @@ int main(int argc, char **argv) {
   const bool rgba32 = is("--rgba32");
   const bool format_case =
       rgba8 || rg16 || rgb10a2 || bgrx || r8 || r16 || rg32 || rgba32;
-  const bool bad = is("--bad-oracle");
+  const bool multi_heap =
+      is("--multiheap") || is("--bad-multiheap") || is("--multiheap-queue");
+  const bool bad = is("--bad-oracle") || is("--bad-multiheap");
   const bool cross = is("--cross-resource");
   const bool bad_cross = is("--bad-cross-oracle");
   const bool reverse_queue = is("--reverse-queue");
   const bool early_work =
       format_case || is("--early-work") || is("--bad-early-work");
   const bool cross_queue = early_work || reverse_queue || is("--cross-queue") ||
-                           is("--bad-queue-oracle");
+                           is("--multiheap-queue") || is("--bad-queue-oracle");
   const bool bad_queue = is("--bad-rgba8") || is("--bad-r8") ||
                          is("--bad-queue-oracle") || is("--bad-early-work");
-  if (argc == 2 && !bad && !cross && !bad_cross && !cross_queue)
+  if (argc == 2 && !bad && !cross && !bad_cross && !cross_queue && !multi_heap)
     return 2;
   const DXGI_FORMAT format = rgba8     ? DXGI_FORMAT_R8G8B8A8_UNORM
                              : rg16    ? DXGI_FORMAT_R16G16_UNORM
@@ -411,7 +451,7 @@ int main(int argc, char **argv) {
   try {
     return Run(bad, cross || bad_cross || cross_queue, bad_cross || bad_queue,
                cross_queue, reverse_queue, early_work, format, bad_edge,
-               bad_position);
+               bad_position, multi_heap);
   } catch (const std::exception &e) {
     std::cerr << e.what() << "\n";
     return 1;

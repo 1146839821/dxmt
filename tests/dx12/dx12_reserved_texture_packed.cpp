@@ -123,6 +123,23 @@ void CreateBuffer(ID3D12Device *device, Owned<ID3D12Resource> &resource, UINT64 
                             &properties, D3D12_HEAP_FLAG_NONE, &desc, state, nullptr, IID_PPV_ARGS(&resource.ptr)));
 }
 
+void PrintRuntimeIdentity(const char *symbol) {
+  for (const auto &entry : std::array<std::pair<const char *, const char *>, 2>{
+           {{"d3d12.dll", "D3D12CreateDevice"}, {"winemetal.dll", symbol}}}) {
+    const auto module = GetModuleHandleA(entry.first);
+    char path[2048] = {};
+    const auto code = reinterpret_cast<const unsigned char *>(
+        GetProcAddress(module, entry.second));
+    if (!module || !code || !GetModuleFileNameA(module, path, sizeof(path)))
+      throw std::runtime_error("missing runtime identity");
+    std::cout << "LOADED_MODULE " << entry.first << " " << path << "\n";
+    std::cout << "LOADED_CODE " << entry.first << " " << entry.second << " ";
+    for (UINT i = 0; i < 16; ++i)
+      std::printf("%02x", code[i]);
+    std::cout << "\n";
+  }
+}
+
 // Fault modes deliberately avoid shader access after a failed mapping. The
 // private native test event drains submitted work before terminal cleanup.
 int CheckMappingFailure(const char *layout, bool unmap, bool copy) {
@@ -140,23 +157,8 @@ int CheckMappingFailure(const char *layout, bool unmap, bool copy) {
     throw std::runtime_error(
         "fault mode requires an exact phase and FAIL_AT=1|2");
   const bool second = at && !std::strcmp(at, "2");
-  for (const auto &entry : std::array<std::pair<const char *, const char *>, 2>{
-           {{"d3d12.dll", "D3D12CreateDevice"},
-            {"winemetal.dll",
-             copy ? "SparseMappingQueue_tryCopyTextureMappings"
-                  : "SparseMappingQueue_tryUpdateTextureMappings"}}}) {
-    const auto module = GetModuleHandleA(entry.first);
-    char path[2048] = {};
-    const auto code = reinterpret_cast<const unsigned char *>(
-        GetProcAddress(module, entry.second));
-    if (!module || !code || !GetModuleFileNameA(module, path, sizeof(path)))
-      throw std::runtime_error("missing runtime identity");
-    std::cout << "LOADED_MODULE " << entry.first << " " << path << "\n";
-    std::cout << "LOADED_CODE " << entry.first << " " << entry.second << " ";
-    for (UINT i = 0; i < 16; ++i)
-      std::printf("%02x", code[i]);
-    std::cout << "\n";
-  }
+  PrintRuntimeIdentity(copy ? "SparseMappingQueue_tryCopyTextureMappings"
+                            : "SparseMappingQueue_tryUpdateTextureMappings");
   Owned<ID3D12Device> device;
   Owned<ID3D12CommandQueue> queue;
   Owned<ID3D12Fence> fence;
@@ -304,10 +306,145 @@ int CheckMappingFailure(const char *layout, bool unmap, bool copy) {
   return 0;
 }
 
+int CheckSelfCopyFailure(const char *layout, const char *state,
+                         UINT operation) {
+  const char *phase = std::getenv("DXMT_TEST_SPARSE_TEXTURE_UPDATE_FAILURE");
+  const char *at = std::getenv("DXMT_TEST_SPARSE_TEXTURE_UPDATE_FAIL_AT");
+  const bool standard =
+      !std::strcmp(layout, "standard") || !std::strcmp(layout, "reverse");
+  const bool reverse = !std::strcmp(layout, "reverse");
+  const bool packed_only = !std::strcmp(layout, "packed");
+  const bool null_source = !std::strcmp(state, "null");
+  const bool mixed = !std::strcmp(state, "mixed");
+  const bool multiheap = !std::strcmp(state, "multiheap");
+  const UINT operations = packed_only ? 1 : 2;
+  const UINT setup_calls = multiheap ? 2 : 1;
+  const UINT target = setup_calls + operation;
+  char expected_at[16] = {};
+  std::snprintf(expected_at, sizeof(expected_at), "%u", target);
+  if (!phase ||
+      (std::strcmp(phase, "allocation") && std::strcmp(phase, "submitted")) ||
+      !at || std::strcmp(at, expected_at) || !operation ||
+      operation > operations || (packed_only && (mixed || multiheap)))
+    throw std::runtime_error(
+        "self fault needs native phase and exact setup+operation FAIL_AT");
+  PrintRuntimeIdentity("SparseMappingQueue_tryUpdateTextureMappings");
+  Owned<ID3D12Device> device;
+  Owned<ID3D12CommandQueue> queue;
+  Owned<ID3D12Fence> fence;
+  Owned<ID3D12Resource> texture;
+  Owned<ID3D12Heap> heap_a, heap_b;
+  Check("self device", D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+                                         IID_PPV_ARGS(&device.ptr)));
+  D3D12_COMMAND_QUEUE_DESC qdesc = {};
+  Check("self queue",
+        device->CreateCommandQueue(&qdesc, IID_PPV_ARGS(&queue.ptr)));
+  Check("self fence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                          IID_PPV_ARGS(&fence.ptr)));
+  auto desc = PackedTextureDesc(packed_only || standard);
+  if (standard) {
+    desc.Width = desc.Height = 256;
+    desc.MipLevels = 1;
+  }
+  Check("self texture",
+        device->CreateReservedResource(&desc, D3D12_RESOURCE_STATE_COMMON,
+                                       nullptr, IID_PPV_ARGS(&texture.ptr)));
+  UINT total = 0;
+  D3D12_PACKED_MIP_INFO packed = {};
+  D3D12_TILE_SHAPE shape = {};
+  device->GetResourceTiling(texture.ptr, &total, &packed, &shape, nullptr, 0,
+                            nullptr);
+  if ((standard && (total < 3 || packed.NumPackedMips)) ||
+      (packed_only && (total != 1 || packed.NumStandardMips ||
+                       packed.NumTilesForPackedMips != 1)) ||
+      (!standard && !packed_only &&
+       (total != 2 || packed.NumStandardMips != 1 ||
+        packed.NumTilesForPackedMips != 1)))
+    throw std::runtime_error(
+        "self fixture needs actual standard/packed/mixed layout");
+  std::cout << "SELF_TILING layout=" << layout << " total=" << total
+            << " standard_mips=" << UINT(packed.NumStandardMips)
+            << " packed_mips=" << UINT(packed.NumPackedMips)
+            << " operations=" << operations << " setup_calls=" << setup_calls
+            << "\n";
+  D3D12_HEAP_DESC hdesc = {};
+  hdesc.SizeInBytes = UINT64(total) * TileBytes;
+  hdesc.Properties = Properties(D3D12_HEAP_TYPE_DEFAULT);
+  hdesc.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_NON_RT_DS_TEXTURES;
+  Check("self heap A", device->CreateHeap(&hdesc, IID_PPV_ARGS(&heap_a.ptr)));
+  Check("self heap B", device->CreateHeap(&hdesc, IID_PPV_ARGS(&heap_b.ptr)));
+  D3D12_TILED_RESOURCE_COORDINATE zero = {}, src = {}, dst = {};
+  D3D12_TILE_REGION_SIZE all = {}, region = {};
+  all.NumTiles = total;
+  region.NumTiles = standard ? 2 : total;
+  const UINT offset = 0;
+  if (standard)
+    (reverse ? src : dst).X = 1;
+  const D3D12_TILE_RANGE_FLAGS range =
+      null_source ? D3D12_TILE_RANGE_FLAG_NULL : D3D12_TILE_RANGE_FLAG_NONE;
+  if (mixed) {
+    const D3D12_TILE_RANGE_FLAGS flags[] = {D3D12_TILE_RANGE_FLAG_NONE,
+                                            D3D12_TILE_RANGE_FLAG_NULL,
+                                            D3D12_TILE_RANGE_FLAG_NONE};
+    const UINT counts[] = {1, 1, standard ? total - 2 : 0};
+    const UINT offsets[] = {0, 0, 2};
+    queue->UpdateTileMappings(texture.ptr, 1, &zero, &all, heap_a.ptr,
+                              standard ? 3 : 2, flags, offsets, counts,
+                              D3D12_TILE_MAPPING_FLAG_NONE);
+  } else {
+    queue->UpdateTileMappings(texture.ptr, 1, &zero, &all,
+                              null_source ? nullptr : heap_a.ptr, 1, &range,
+                              &offset, nullptr, D3D12_TILE_MAPPING_FLAG_NONE);
+  }
+  if (multiheap) {
+    D3D12_TILED_RESOURCE_COORDINATE other = {};
+    D3D12_TILE_REGION_SIZE one = {};
+    one.NumTiles = 1;
+    if (standard)
+      other.X = 1;
+    else
+      other.Subresource = packed.NumStandardMips;
+    queue->UpdateTileMappings(texture.ptr, 1, &other, &one, heap_b.ptr, 1,
+                              nullptr, &offset, nullptr,
+                              D3D12_TILE_MAPPING_FLAG_NONE);
+  }
+  Check("self setup healthy", device->GetDeviceRemovedReason());
+  Check("self setup Signal", queue->Signal(fence.ptr, 1));
+  Wait(fence.ptr, 1);
+  queue->CopyTileMappings(texture.ptr, &dst, texture.ptr, &src, &region,
+                          static_cast<D3D12_TILE_MAPPING_FLAGS>(0x80000000u));
+  Check("self invalid flag nonterminal", device->GetDeviceRemovedReason());
+  std::cout << "self preflight invalid flags passed\n";
+  HANDLE event = CreateEventA(nullptr, FALSE, FALSE, nullptr);
+  if (!event)
+    throw std::runtime_error("self CreateEvent");
+  Check("self pending fence", fence->SetEventOnCompletion(100, event));
+  queue->CopyTileMappings(texture.ptr, &dst, texture.ptr, &src, &region,
+                          D3D12_TILE_MAPPING_FLAG_NONE);
+  const HRESULT reason = device->GetDeviceRemovedReason();
+  if (SUCCEEDED(reason)) {
+    Check("self control drain", queue->Signal(fence.ptr, 2));
+    Wait(fence.ptr, 2);
+    CloseHandle(event);
+    throw std::runtime_error("missing terminal texture self-copy failure");
+  }
+  const DWORD wake = WaitForSingleObject(event, 30000);
+  CloseHandle(event);
+  const auto value = fence->GetCompletedValue();
+  const auto signal = queue->Signal(fence.ptr, 2);
+  if (reason != DXGI_ERROR_DEVICE_REMOVED || wake != WAIT_OBJECT_0 ||
+      value != UINT64_MAX || signal != DXGI_ERROR_DEVICE_REMOVED)
+    throw std::runtime_error("wrong self-copy removal/fence/Signal contract");
+  std::cout << "SELF_COPY_FAILURE layout=" << layout << " state=" << state
+            << " operation=" << operation << " native_call=" << target
+            << " removed=PASS fence=PASS signal_rejected=PASS\n";
+  return 0;
+}
+
 int Run(const char *read_path, const char *write_a_path,
         const char *write_b_path, bool copy_upload, bool full_mips,
         bool metadata_only, bool copy_mappings, bool bad_alias_oracle,
-        bool perf_update, bool perf_copy) {
+        bool perf_update, bool perf_copy, bool self_copy, bool perf_self) {
   const auto read_shader = ReadShader(read_path);
   const auto write_a_shader = ReadShader(write_a_path);
   const auto write_b_shader = ReadShader(write_b_path);
@@ -539,6 +676,10 @@ int Run(const char *read_path, const char *write_a_path,
     queue->UpdateTileMappings(texture.ptr, 1, &coordinate, &region, heap, 1,
                               &range_flag, &heap_tile, nullptr,
                               D3D12_TILE_MAPPING_FLAG_NONE);
+    if (self_copy)
+      queue->CopyTileMappings(texture.ptr, &coordinate, texture.ptr,
+                              &coordinate, &region,
+                              D3D12_TILE_MAPPING_FLAG_NONE);
   };
 
   if (perf_update) {
@@ -560,6 +701,36 @@ int Run(const char *read_path, const char *write_a_path,
       Check("timing Signal", queue->Signal(perf_fence.ptr, sample + 1));
       Wait(perf_fence.ptr, sample + 1);
       std::cout << "PERF_TEXTURE_UPDATE sample=" << sample << " calls=" << Calls
+                << " us_per_call="
+                << double(end.QuadPart - begin.QuadPart) * 1e6 /
+                       frequency.QuadPart / Calls
+                << "\n";
+    }
+  }
+
+  if (perf_self) {
+    Owned<ID3D12Fence> timing_fence;
+    Check("self timing fence",
+          device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                              IID_PPV_ARGS(&timing_fence.ptr)));
+    map_tail(heap_a.ptr);
+    Check("self timing setup Signal", queue->Signal(timing_fence.ptr, 1));
+    Wait(timing_fence.ptr, 1);
+    LARGE_INTEGER frequency = {};
+    QueryPerformanceFrequency(&frequency);
+    constexpr UINT Calls = 64;
+    for (UINT sample = 0; sample < 9; ++sample) {
+      LARGE_INTEGER begin = {}, end = {};
+      QueryPerformanceCounter(&begin);
+      for (UINT call = 0; call < Calls; ++call)
+        queue->CopyTileMappings(texture.ptr, &coordinate, texture.ptr,
+                                &coordinate, &region,
+                                D3D12_TILE_MAPPING_FLAG_NONE);
+      QueryPerformanceCounter(&end);
+      Check("self timing device", device->GetDeviceRemovedReason());
+      Check("self timing Signal", queue->Signal(timing_fence.ptr, sample + 2));
+      Wait(timing_fence.ptr, sample + 2);
+      std::cout << "PERF_TEXTURE_SELF sample=" << sample << " calls=" << Calls
                 << " us_per_call="
                 << double(end.QuadPart - begin.QuadPart) * 1e6 /
                        frequency.QuadPart / Calls
@@ -876,6 +1047,9 @@ int main(int argc, char **argv) {
   bool copy_upload = false, full_mips = false, metadata_only = false, copy_mappings = false, bad_alias_oracle = false;
   bool perf_update = false, perf_copy = false, fault_unmap = false,
        fault_copy = false;
+  bool self_copy = false, perf_self = false;
+  const char *self_layout = nullptr, *self_state = "mapped";
+  UINT self_operation = 1;
   const char *fault_layout = nullptr;
   for (int i = 4; i < argc; ++i) {
     if (std::strcmp(argv[i], "--copy-upload") == 0)
@@ -907,6 +1081,26 @@ int main(int argc, char **argv) {
       fault_copy = true;
     } else if (std::strcmp(argv[i], "--perf-copy") == 0)
       perf_copy = copy_mappings = true;
+    else if (std::strcmp(argv[i], "--self-copy") == 0)
+      self_copy = true;
+    else if (std::strcmp(argv[i], "--perf-self-copy") == 0)
+      perf_self = self_copy = true;
+    else if (std::strcmp(argv[i], "--self-fault-standard") == 0)
+      self_layout = "standard";
+    else if (std::strcmp(argv[i], "--self-fault-reverse") == 0)
+      self_layout = "reverse";
+    else if (std::strcmp(argv[i], "--self-fault-packed") == 0)
+      self_layout = "packed";
+    else if (std::strcmp(argv[i], "--self-fault-mixed") == 0)
+      self_layout = "mixed";
+    else if (std::strcmp(argv[i], "--self-null") == 0)
+      self_state = "null";
+    else if (std::strcmp(argv[i], "--self-mixed") == 0)
+      self_state = "mixed";
+    else if (std::strcmp(argv[i], "--self-multiheap") == 0)
+      self_state = "multiheap";
+    else if (std::strcmp(argv[i], "--self-op-2") == 0)
+      self_operation = 2;
     else if (std::strcmp(argv[i], "--unmap") == 0)
       fault_unmap = true;
     else {
@@ -916,6 +1110,9 @@ int main(int argc, char **argv) {
   }
   if (argc < 4 || (metadata_only && (!full_mips || copy_mappings)) ||
       (fault_unmap && !fault_layout) || (perf_update && perf_copy) ||
+      (perf_self && (perf_update || perf_copy)) ||
+      (self_layout && (fault_layout || perf_self || perf_update || perf_copy ||
+                       metadata_only)) ||
       (fault_layout &&
        (perf_update || perf_copy || metadata_only || copy_mappings))) {
     std::cerr << "usage: dx12_reserved_texture_packed <read.cso> <write_a.cso> "
@@ -925,14 +1122,20 @@ int main(int argc, char **argv) {
                  "[--update-fault-standard|--update-fault-packed|--update-"
                  "fault-mixed] "
                  "[--copy-fault-standard|--copy-fault-packed|--copy-fault-"
-                 "mixed] [--perf-copy] [--unmap]\n";
+                 "mixed] [--perf-copy] [--unmap]\n"
+                 "[--self-copy|--perf-self-copy|--self-fault-standard|--self-"
+                 "fault-reverse|--self-fault-packed|--self-fault-mixed] "
+                 "[--self-null|--self-mixed|--self-multiheap] [--self-op-2]\n";
     return 2;
   }
   try {
+    if (self_layout)
+      return CheckSelfCopyFailure(self_layout, self_state, self_operation);
     if (fault_layout)
       return CheckMappingFailure(fault_layout, fault_unmap, fault_copy);
     return Run(argv[1], argv[2], argv[3], copy_upload, full_mips, metadata_only,
-               copy_mappings, bad_alias_oracle, perf_update, perf_copy);
+               copy_mappings, bad_alias_oracle, perf_update, perf_copy,
+               self_copy, perf_self);
   } catch (const std::exception &e) {
     std::cerr << e.what() << "\n";
     return 1;
