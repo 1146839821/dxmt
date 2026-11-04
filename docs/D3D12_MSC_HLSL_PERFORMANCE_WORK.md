@@ -71,8 +71,8 @@ causes the explicit request to fail rather than silently misconfigure it. The
 existing cache key hashes both compile flags and compatibility flags. No D3D12
 caller enables the new flag. Two test shaders without texture LOD pass for both
 settings; this does not establish LOD equivalence or justify disabling MinLOD.
-The new TG memory coherence flag remains disabled without a relevant concurrent
-threadgroup-memory correctness test and a controlled performance comparison.
+The new TG memory coherence flag remains disabled; later threadgroup A/B
+controls are documented below and do not establish a general need or benefit.
 
 Environment: Apple M1 Max (Apple7), macOS 27.0.1, Wine 11.0, SDK API headers
 4.0.3, `/usr/local/lib/libmetalirconverter.dylib` SHA-256
@@ -115,24 +115,28 @@ avoid simultaneous incompatible Wine installations sharing a prefix.
 
 ## Apple performance recommendations and decisions
 
+Status refreshed through `a113a6cd`; the detailed sections below preserve the
+original dates, measurements and limitations.
+
 | Topic | Current evidence and decision | Further work |
 | --- | --- | --- |
-| Compatibility flags | Legacy MinLOD default retained; explicit zero opt-in tested only on non-LOD fragments. No speedup claim. | GPU LOD boundary A/B, metallib size, frame/GPU timing and repeated samples; do not enable TG coherence without proof. |
-| Linear versus root layout | Explicit root signature remains required by D3D12 (`metalirconverter.c:984-999`). No verified equivalent linear conversion. | Build resource-binding equivalence probe before comparing indirection and CPU binding cost. |
-| GPU and OS targets | Current detected Apple6–9 and OS mapped into compilation and key (`d3d12_msc_capabilities.cpp:35-60`, `d3d12_shader_converter.cpp:269-305`). Other GPUs/OS and A/B performance not verified. | Compare legal targets on each real device; do not promote minimum platform. |
+| Compatibility flags | Legacy MinLOD default retained. Controlled LOD and threadgroup A/B GPU checks passed on one device; no general equivalence or speedup was established. | Broaden LOD and synchronization cases; do not change defaults without semantic proof. |
+| Linear versus root layout | A native Metal control compared linear and explicit layouts with one SRV and one UAV, including reflection, readback and timing; D3D12 equivalence remains unproven. | Measure representative resource sets and D3D12 binding costs before any production change. |
+| GPU and OS targets | Apple6/Apple7 controlled conversion and GPU output were compared on M1 Max; target parameters are included in the conversion key. | Test OS targets and additional devices; do not promote minimum platform. |
 | Argument buffer/occupancy | Root and table residency is tracked in command list (`d3d12_command_list.cpp:949-975`). No register or occupancy counters captured. | Capture representative vertex/fragment/compute counters and CPU binding cost before changing ABI. |
 | Execution overlap | Compute and render resource use and residency are explicitly encoded (`d3d12_command_list.cpp:2250-2291`). No System Trace collected. | Compute-to-fragment timeline with state/barrier correctness before narrowing usage. |
-| Input DXIL | Existing app shader bytes go directly through the MSC conversion path; new fixtures use DXC default optimized compilation. Debug/optimized GPU comparisons not run. | Controlled DXC -Od versus optimized inputs; do not recompile game shaders. |
-| Root validation | Validation flags are passed through; D3D12 default is zero (`d3d12_shader_converter.cpp:262`, `metalirconverter.c:259`). SDK's implicit default and invalid-root comparison not measured. | Compare explicit zero/default/validation with invalid and valid roots; do not change checks. |
+| Input DXIL | Controlled `-Od` and `-O3` pixel tests passed; embedded debug exposed an LLVM metadata incompatibility addressed by a separately built patched toolchain. | Expand shader coverage and deployment verification; do not recompile game shaders. |
+| Root validation | Unset, zero, bound-resource and DXIL validation were compared on one valid/missing-resource pair; DXIL validation also passed controlled HLSL GPU pixels. | Validate broader inputs and runtime versions before changing production flags. |
 | In-process and persistent cache | Process cache plus single-flight exists, disk cache explicitly disabled (`d3d12_shader_converter.cpp:199-213,228-237,1812-1837`). Map has no evident capacity bound. Key includes stage, source, root, targets, spaces, configuration and flags, but loaded-dylib content identity is not trusted for persistent use. | Measure hits, waits and memory growth; validate content identity, corruption recovery and opt-in before disk cache. Function specializations require separate keys. |
-| Function constants | Two values produce distinct correct pixels through direct Metal PSOs. No D3D12 production switch or specialization PSO cache. | Compare equivalent cbuffer/branch/specialization across update rates, CPU/GPU/memory; prove cache identity. |
-| Framebuffer fetch / hybrid | Correct one-pass controlled hybrid readback on this device; no multipass reference or GPU time/bandwidth. | Compare equivalent multipass and fetch outputs, passes, CPU/GPU time and counters; gate formats, OS and device. |
+| Function constants | Two values produced distinct pixels; cbuffer, branch and specialization controls were measured at two update frequencies. No D3D12 production switch or specialization PSO cache. | Measure memory and representative workloads; prove cache identity and fallback. |
+| Framebuffer fetch / hybrid | Controlled one-pass hybrid and multipass reference passed pixel checks; whole-command-buffer GPU timing was recorded. Bandwidth remains unmeasured. | Test representative formats, devices, CPU costs and bandwidth before enabling. |
 | RT intrinsic masks | `IRObjectGatherRaytracingIntrinsics` is loaded but has no call site (`metalirconverter.c:47,425`); full masks retained in current paths. | Aggregate all pipeline shader requirements, validate SBT/hit groups/residency and A/B ray dispatch before narrowing. |
 | RT attribute/mode/PSO | General conversion uses 16 bytes; state-object path rejects attributes >16 and specialized conversions receive configured size (`d3d12_raytracing_pipeline.cpp:411-418,456-458`, `metalirconverter.c:949,1468,1595`). Visible-function approach unchanged. | Verify per-state-object semantics, compile and dispatch timings before binary functions, specialized raygen or intersection-table changes. |
 
 No public Feature Level, Shader Model or Tier is promoted. GPU counters,
 occupancy, bandwidth, GPU frame/overlap timings, resident memory, RT pipeline
-and dynamic-library-missing simulation are NOT_RUN. Neither a performance win
+and complete search-path absence are NOT_RUN. An incompatible-library simulation
+passed both native and Wine thunk checks. Neither a performance win
 nor full production readiness is claimed. P1/P2 changes are withheld until
 semantically equivalent benchmarks and error/fallback tests establish safety.
 
