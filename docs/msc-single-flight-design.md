@@ -545,3 +545,109 @@ devices, arbitrary layouts, persistence and performance remain **NOT_RUN**.
 The next recommended slice is ordinary VS/PS cache-hit PSO recreation with
 dynamic vertex strides. The wider MSC task remains active. Commit this slice
 locally, retaining the pre-existing `.gitignore` change and without pushing.
+
+## Ordinary vertex-fetch cache replay design — 2026-11-04
+
+- **Goal / baseline:** At `ce1f59ae`, verify real D3D12 VS/PS cache-hit PSO recreation together with dynamic vertex-fetch variants. Branch `feat/d3d12`; preserve the existing `.gitignore` edit. Previous GS stage-in evidence does not cover this path.
+- **Contract:** Microsoft defines VBV `StrideInBytes` as the byte size of an entry and `InstanceDataStepRate` as the number of instances sharing an element. References: https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ns-d3d12-d3d12_vertex_buffer_view and https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ns-d3d12-d3d12_input_element_desc . Apple MSC's ordinary Metal vertex-fetch path uses a Metal vertex descriptor; separate stage-in is unnecessary for this fixture.
+- **Source evidence:** `RunVertexStride` already verifies exact outputs for packed/padded/zero strides, slot 3, instance rates, indexed/indirect draws and released PSO references. `GetVertexStridePipeline` keys native variants by the active VB strides (`d3d12_pipeline_graphics.cpp:502-538`); ordinary conversion passes no stage-in layout (`:1118-1123`). This slice tests reuse of that existing architecture without modifying it.
+- **Scope / boundary:** Extend the existing graphics probe and graphics/stage-in runner. Recreate devices/roots/PSOs/resources for seven modes, then repeat: packed, vertex, instance, instance-zero, indexed, indirect and lifetime. The lifetime case creates two PSOs before each of two recordings. Verify every created PSO uses ordinary MSC vertex fetch.
+- **Expected evidence:** Two conversions/entries shared by all twenty D3D12 PSO creations; thirty-eight hits; zero stage-in bytes; forty-two readbacks of 4,096 exact bytes. Include closed-list replay, fenced reset, pending reset rejection and released pipeline references.
+- **Negative controls:** Corrupt the reference or bind an intentionally stale zero stride on the final warm lifetime case. Require all earlier cases to pass, then the exact intended pixel mismatch. This tests oracle sensitivity to wrong vertex fetch, not a mutation of the production cache.
+- **Non-scope:** New shader semantics, production diagnostics/policy, native Windows/Mullion execution, arbitrary layouts, cross-device persistence or performance claims. Mullion is not an MSC cache oracle. No capability declaration changes.
+- **Test plan / risks:** Use paired isolated Wine and Metal API/GPU validation, exact trace/creation counts, parser mutation controls, plus the existing GS cache regression. Tracing perturbs timings; no performance conclusion is authorized by this test.
+- **Rollback / done:** Remove the opt-in mode and checks independently; require build, exact GPU/cache results, intentional negative failures, regression and diff review before a local commit without pushing. Gate 0 and Gate 1 complete.
+
+## Ordinary vertex-fetch cache replay results — 2026-11-04
+
+**Gate 2 / changed files:** `dx12_graphics_sm6.cpp` adds
+`--vertex-cache-replay VS PS [--wrong-expected|--wrong-stride]`, reusing
+`RunVertexStride` and its independent pixel oracle. Every PSO creation checks
+MSC backend, ordinary vertex input enabled and GS/TS emulation disabled.
+The existing `run_msc_stage_in_retry.py` gains `--mode vertex-cache`, selects
+the two existing vertex-stride fixtures, and verifies per-case conversion,
+creation, readback and lifetime markers. No production runtime source,
+shader source, converter key or cache policy changed. The two reports record
+the design and evidence.
+
+**Gate 3 / LOCAL_PASS:** The probe/fixtures and complete existing candidate
+build passed on Apple M1 Max, macOS 27.2, Wine 11.0. Seven modes in two phases
+created twenty D3D12 PSOs: one per mode/case except lifetime, which created
+four. Two initial VS/PS conversions were followed by thirty-eight cache hits,
+including twenty in the second phase. Each case recreated its D3D12 device,
+root signature, PSOs and resources on the same physical Metal device. The
+cache retained two entries and zero stage-in bytes throughout; only the first
+case performed conversions.
+
+Forty-two readbacks each checked every byte of the 4,096-byte target. Tested
+strides were 12 (packed) and 16/32/16/0 (dynamic), all on sparse slot 3, with
+per-vertex and per-instance fetch, instance step rates 2/0, indexed and indirect
+draws. All cases exercised closed-list replay, fenced reset and rejection of
+pending allocator reset. The lifetime cases additionally released both public
+PSO references before execution/replay and recreated them before the final
+recording. These are D3D12 PSO creation counts, not counts of native Metal
+stride variants. Native variant-cache hit/miss counters were not measured.
+
+| Control | Completed cases / readbacks before failure | Final warm mismatch | Exit |
+| --- | --- | --- | ---: |
+| Correct input | 14 / 42 | None | 0 |
+| Wrong reference | 13 / 39 | lifetime pass 0, row 0, x 0: actual 1,2,3; expected 0,2,3 | 1 |
+| Wrong zero stride | 13 / 39 | lifetime pass 0, row 0, x 1: actual 1,2,3; expected 2,5,8 | 1 |
+
+Each negative process performed eighteen D3D12 PSO creations, two conversions
+and thirty-four hits; its final case stopped before the second recording.
+Zero stride remains a valid constant-fetch input. Selecting it intentionally
+with an unchanged oracle tests sensitivity to stale/wrong fetch, without
+invalid GPU access or a production-cache mutation.
+
+The final cache contained 10,728 bytes of metallib data/capacity, 18,192 bytes
+of mapped values, 14 entry-point characters (30 capacity), and 13 buckets.
+After the initial insertions every snapshot was stable. These fields exclude
+allocator/node overhead, native PSOs and GPU memory; no total-memory or
+performance conclusion follows from them.
+
+Metal API and shader validation, paired PE/Unix hashes, loaded export bytes
+and actual wrapper/MSC paths were checked. Sixteen parser mutations were
+rejected, covering missing/wrong cases, control selection, completion, PSO
+creation/backend, readbacks, lifetime, extra conversion, absent summary,
+nonzero stage-in storage, unexpected failure and missing-failure/false-success
+negative logs. Results are in `parser-controls.json`. The previous GS
+cache-replay mode also passed again, including both of its negative controls.
+
+Runtime WineMetal Unix SHA-256:
+`c9e20da27632144651fd744d01ddb26445800ea4baa1fbd36a0257188f1fbd8c`.
+Actual MSC `/usr/local/lib/libmetalirconverter.dylib` SHA-256:
+`cc487a757f431c83483346c06a3ae8558910ecc510ce59b1e4f905d5d6d72bd4`.
+Raw logs, fixture/binary identities and snapshots are under the external
+`dxmt-test/n95-capability-gate/` directory in
+`result-msc-vertex-cache-20261104/` and
+`result-msc-vertex-gs-regression-20261104/`.
+
+Reproduction from the repository root, after preparing the paired stage:
+
+```sh
+base=/Users/zhangbo/Documents/Vibe-Codeding/dxmt-test/n95-capability-gate
+WINEPREFIX="$base/prefix-dxc-build-cache-gpu-20261104" meson compile \
+  -C "$base/dxmt-current-patches-20261103" dx12_graphics_sm6 \
+  dx12_vertex_stride_vs dx12_vertex_stride_ps
+meson compile -C "$base/dxmt-current-patches-20261103"
+python3 tests/dx12/run_msc_stage_in_retry.py \
+  --stage "$base/stage-msc-vertex-cache-20261104" \
+  --prefix "$base/prefix-msc-space-fresh-20261104" \
+  --build "$base/dxmt-current-patches-20261103" \
+  --converter /usr/local/lib/libmetalirconverter.dylib \
+  --output "$base/NEW-vertex-cache-results" --mode vertex-cache
+```
+
+Refresh the stage's probe, two fixtures and paired runtime files from the
+build, without changing the user's Wine installation. Retain separate build
+and runtime Wine prefixes. Use another fresh output directory and
+`--mode cache-replay` with the three GS fixtures to run the adjacent regression.
+
+**Gate 4:** Scope and whitespace checks passed. Public features, shader models,
+tiers, production policies and dual backends are unchanged. Other shaders,
+layouts, physical GPUs, driver versions, persistence and representative
+performance remain **NOT_RUN**. The wider MSC task remains active. The next
+recommended slice is an audit/design of reliable loaded MSC image identity,
+which is a prerequisite for any opt-in persistent-cache experiment. Commit
+these tests and reports locally, preserve `.gitignore`, and do not push.

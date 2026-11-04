@@ -69,11 +69,59 @@ def validate_cache_replay(log, negative=None):
             'cache_snapshots': snapshots}
 
 
+def validate_vertex_cache(log, negative=None):
+    modes = ('packed', 'vertex', 'instance', 'instance-zero', 'indexed', 'indirect', 'lifetime')
+    expected = [(phase, mode) for phase in range(2) for mode in modes]
+    begins = [(int(a), b, int(c)) for a, b, c in re.findall(
+        r'^CACHE_VERTEX_BEGIN (\d+) (\S+) wrong_stride=(\d+)\s*$', log, re.M)]
+    ends = [(int(a), b) for a, b in re.findall(r'^CACHE_VERTEX_END (\d+) (\S+)\s*$', log, re.M)]
+    if begins != [(phase, mode, int(negative == 'stride' and (phase, mode) == (1, 'lifetime')))
+                  for phase, mode in expected]:
+        raise AssertionError('unexpected vertex cache cases/control selection')
+    if ends != (expected[:-1] if negative else expected):
+        raise AssertionError('vertex cache case completion mismatch')
+    snapshots = parse_cache_trace(log, entries=2, hits=34 if negative else 38, misses=2)
+    if any(row['stage_in_bytes'] or row['stage_in_capacity_bytes'] for row in snapshots):
+        raise AssertionError('ordinary vertex fetch unexpectedly retained stage-in')
+    segments = re.split(r'^CACHE_VERTEX_BEGIN [^\n]+\n', log, flags=re.M)[1:]
+    if len(segments) != len(expected):
+        raise AssertionError('unexpected vertex cache markers')
+    for segment, (phase, mode) in zip(segments, expected):
+        first = (phase, mode) == (0, 'packed')
+        wrong = bool(negative) and (phase, mode) == (1, 'lifetime')
+        psos = (2 if wrong else 4) if mode == 'lifetime' else 1
+        events = re.findall(r'MSC_CACHE event=(\w+)', segment)
+        if events != (['miss', 'insert'] * 2 if first else ['hit'] * (2 * psos)):
+            raise AssertionError('unexpected vertex conversion/cache events')
+        if (segment.count('DXMT_MSC_TRACE_BEGIN') != (2 if first else 0) or
+                segment.count('DXMT_MSC_TRACE_END ok') != (2 if first else 0)):
+            raise AssertionError('unexpected conversion during vertex replay')
+        creations = re.findall(r'^VERTEX_CACHE_PSO (\S+) (\d+) msc_vertex_fetch=1\s*$', segment, re.M)
+        if creations != [(mode, str(i)) for i in range(1, psos + 1)]:
+            raise AssertionError('ordinary MSC PSO creation/backend checks missing')
+        rows = re.findall(r'^Vertex stride mode=(\S+) pass=(\d) exact_bytes=4096 passed\s*$', segment, re.M)
+        if rows != ([] if wrong else [(mode, str(i)) for i in range(3)]):
+            raise AssertionError('missing vertex byte-exact readbacks')
+        if segment.count('Vertex stride replay/reset/released pipeline refs passed') != int(not wrong):
+            raise AssertionError('missing vertex submission-lifetime checks')
+        failures = re.findall(r'^FAIL stride [^\r\n]*', segment, re.M)
+        mismatch = ('FAIL stride mode=lifetime pass=0 row=0 x=1 actual=1,2,3 expected=2,5,8'
+                    if negative == 'stride' else
+                    'FAIL stride mode=lifetime pass=0 row=0 x=0 actual=1,2,3 expected=0,2,3')
+        if failures != ([mismatch] if wrong else []):
+            raise AssertionError('vertex negative control failed at the wrong readback')
+    if log.count('MSC_CACHE_VERTEX modes=7 phases=2 passed') != int(not negative):
+        raise AssertionError('vertex replay final status mismatch')
+    return {'modes': modes, 'negative_control': negative, 'completed_cases': len(ends),
+            'pso_creations': 18 if negative else 20, 'readbacks_per_case': 3,
+            'bytes_per_readback': 4096, 'cache_snapshots': snapshots}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("stage", "prefix", "build", "converter", "output"):
         parser.add_argument("--" + name, type=Path, required=True)
-    parser.add_argument("--mode", choices=("baseline", "grow", "metallib", "cache-replay"), required=True)
+    parser.add_argument("--mode", choices=("baseline", "grow", "metallib", "cache-replay", "vertex-cache"), required=True)
     parser.add_argument("--large-metallib", type=Path)
     args = parser.parse_args()
     if (args.mode == "metallib") != bool(args.large_metallib):
@@ -87,9 +135,10 @@ def main():
              ("src/winemetal/winemetal.dll", "winemetal.dll"),
              ("src/winemetal/unix/winemetal.so", "wine/lib/wine/x86_64-unix/winemetal.so"),
              ("tests/dx12/dx12_graphics_sm6.exe", "dx12_graphics_sm6.exe"))
-    pairs += tuple(("tests/dx12/geometry_differential_3." + stage_name + ".cso",
-                    "geometry_differential_3." + stage_name + ".cso")
-                   for stage_name in ("vs", "ps", "gs"))
+    vertex_cache = args.mode == 'vertex-cache'
+    fixtures = ([f'vertex_stride.{stage_name}.cso' for stage_name in ('vs', 'ps')] if vertex_cache else
+                [f'geometry_differential_3.{stage_name}.cso' for stage_name in ('vs', 'ps', 'gs')])
+    pairs += tuple(('tests/dx12/' + name, name) for name in fixtures)
     for relative, deployed in pairs:
         built = (build / relative).read_bytes()
         if relative in ("src/d3d12/d3d12.dll", "src/dxgi/dxgi.dll") and built[64:80] == b"Wine builtin DLL":
@@ -110,7 +159,7 @@ def main():
                WINEDLLOVERRIDES="d3d12=n;dxgi=n;winemetal=b", WINEDEBUG="+loaddll",
                DXMT_METALIRCONVERTER_PATH=str(wrapper), DXMT_TEST_PRINT_LOADED_CODE="1",
                DXMT_SHADER_CACHE_PATH=str(output / "cache"), DXMT_LOG_PATH=str(output),
-               DXMT_MSC_CACHE_TRACE="1" if args.mode == "cache-replay" else "0", DXMT_LOG_LEVEL="info",
+               DXMT_MSC_CACHE_TRACE="1" if args.mode in ("cache-replay", "vertex-cache") else "0", DXMT_LOG_LEVEL="info",
                MTL_DEBUG_LAYER="1", MTL_SHADER_VALIDATION="1", MTL_SHADER_VALIDATION_REPORT_TO_STDERR="1",
                DYLD_PRINT_LIBRARIES="1")
     env.pop("DXMT_TEST_TRACE_GROW_ENTRY", None)
@@ -137,10 +186,14 @@ def main():
     if args.mode == "cache-replay":
         command = command[:6]
         command[2] = '--gs-cache-replay'
+    elif vertex_cache:
+        command = command[:2] + ['--vertex-cache-replay', *fixtures]
     results = []
     cases = [("readback", [], 0), ("wrong", ["--wrong-expected"], 1)]
     if args.mode == 'cache-replay':
         cases.append(('wrong-layout', ['--wrong-layout'], 1))
+    elif vertex_cache:
+        cases.append(('wrong-stride', ['--wrong-stride'], 1))
     for label, option, expected_exit in cases:
         runenv = dict(env, DXMT_SHADER_CACHE_PATH=str(output / (label + '-cache')))
         result = subprocess.run(command + option, cwd=stage, env=runenv, stdout=subprocess.PIPE,
@@ -162,9 +215,11 @@ def main():
         replay = None
         if args.mode == 'cache-replay':
             replay = validate_cache_replay(log, None if label == 'readback' else 'layout' if label == 'wrong-layout' else 'reference')
+        elif vertex_cache:
+            replay = validate_vertex_cache(log, None if label == 'readback' else 'stride' if label == 'wrong-stride' else 'reference')
         elif label == "readback" and (log.count("exact_bytes=3072 passed") != 3 or "released refs passed" not in log):
             raise AssertionError("exact geometry readback did not pass")
-        if label == "wrong" and "FAIL GS kind=triangle index=none pass=0 byte=0 got=1 expected=0" not in log:
+        if label == "wrong" and not vertex_cache and "FAIL GS kind=triangle index=none pass=0 byte=0 got=1 expected=0" not in log:
             raise AssertionError("deliberately wrong readback was not rejected")
         injected = "DXMT_MSC_TRACE_LARGE_STAGE_IN" in log
         if injected != (args.mode == "grow"):
@@ -172,7 +227,7 @@ def main():
         small_injected = "DXMT_MSC_TRACE_LARGE_METALLIB" in log
         if small_injected != (args.mode == "metallib"):
             raise AssertionError(f"{label}: metallib size control was not observed")
-        if log.count("DXMT_MSC_TRACE_END ok") < (4 if injected or small_injected else 3):
+        if log.count("DXMT_MSC_TRACE_END ok") < (2 if vertex_cache else 4 if injected or small_injected else 3):
             raise AssertionError(f"{label}: expected compilation and retry count was not observed")
         results.append({"case": label, "exit": result.returncode, "stage_in_injected": injected,
                         "metallib_injected": small_injected,
@@ -180,12 +235,14 @@ def main():
                         "cache_replay": replay})
     (output / "summary.json").write_text(json.dumps({"mode": args.mode, "converter_sha256": sha(converter),
         "wrapper_sha256": sha(wrapper), "artifacts": {path: sha(stage / path) for _, path in pairs},
-        "fixtures": {name: sha(stage / name) for name in command[3:6]},
+        "fixtures": {name: sha(stage / name) for name in fixtures},
         "large_metallib_sha256": sha(small) if args.mode == "metallib" else None,
         "command": command, "prefix": str(prefix), "build": str(build),
         "hardware": subprocess.check_output(['sysctl', '-n', 'machdep.cpu.brand_string'], text=True).strip(),
         "macos": subprocess.check_output(['sw_vers', '-productVersion'], text=True).strip(),
-        "limitations": "Controlled GS input layouts; no TS/mesh/cross-device/persistent-cache coverage or performance claim",
+        "limitations": ("Controlled ordinary vertex-fetch modes; no native stride-variant cache hit counters, arbitrary shader/layout, "
+                        "cross-device, persistent-cache or performance coverage" if vertex_cache else
+                        "Controlled GS input layouts; no TS/mesh/cross-device/persistent-cache coverage or performance claim"),
         "results": results}, indent=2) + "\n")
     print("MSC stage-in", args.mode, "passed:", output)
 

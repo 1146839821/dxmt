@@ -709,8 +709,9 @@ bool RunGeometryCacheReplay(const char *vs_path, const char *ps_path,
   return true;
 }
 
-bool RunVertexStride(const char *vs_path, const char *ps_path,
-                     const char *mode) {
+bool RunVertexStride(const char *vs_path, const char *ps_path, const char *mode,
+                     bool cache_replay = false, bool wrong_expected = false,
+                     bool wrong_stride = false) {
   using dxmt::Com;
   const bool instanced =
       !strcmp(mode, "instance") || !strcmp(mode, "instance-zero");
@@ -720,7 +721,7 @@ bool RunVertexStride(const char *vs_path, const char *ps_path,
   const bool performance =
       !strcmp(mode, "perf-packed") || !strcmp(mode, "perf-vertex");
   const bool packed = !strcmp(mode, "packed") || !strcmp(mode, "perf-packed");
-  const bool wrong = !strcmp(mode, "wrong");
+  const bool wrong = wrong_expected || !strcmp(mode, "wrong");
   const bool lifetime = !strcmp(mode, "lifetime");
   if (!instanced && !packed && !wrong && !indexed && !indirect &&
       !performance && !lifetime && strcmp(mode, "vertex"))
@@ -799,17 +800,28 @@ bool RunVertexStride(const char *vs_path, const char *ps_path,
   desc.RasterizerState.DepthClipEnable = TRUE;
   desc.BlendState.RenderTarget[0].RenderTargetWriteMask =
       D3D12_COLOR_WRITE_ENABLE_ALL;
+  unsigned pso_count = 0;
+  auto create_pipeline = [&](Com<ID3D12PipelineState> &output) {
+    if (!CheckHR("Stride PSO", device->CreateGraphicsPipelineState(
+                                   &desc, IID_PPV_ARGS(&output))))
+      return false;
+    auto *pipeline =
+        static_cast<dxmt::MTLD3D12GraphicsPipelineState *>(output.ptr());
+    if (pipeline->shader_backend !=
+            dxmt::D3D12ShaderBackend::MetalShaderConverter ||
+        !pipeline->msc_vertex_input || pipeline->msc_geometry ||
+        pipeline->msc_tessellation)
+      return false;
+    ++pso_count;
+    if (cache_replay)
+      std::cout << "VERTEX_CACHE_PSO " << mode << " " << pso_count
+                << " msc_vertex_fetch=1" << std::endl;
+    return true;
+  };
   auto create_pipelines = [&] {
-    return CheckHR("Stride PSO", device->CreateGraphicsPipelineState(
-                                     &desc, IID_PPV_ARGS(&pso))) &&
-           (!lifetime || CheckHR("Stride second PSO",
-                                 device->CreateGraphicsPipelineState(
-                                     &desc, IID_PPV_ARGS(&second_pso))));
+    return create_pipeline(pso) && (!lifetime || create_pipeline(second_pso));
   };
   if (!create_pipelines())
-    return false;
-  if (static_cast<dxmt::MTLD3D12PipelineState *>(pso.ptr())->shader_backend !=
-      dxmt::D3D12ShaderBackend::MetalShaderConverter)
     return false;
   const UINT width = 256, height = 4, count = 32, instances = 4;
   UINT strides[] = {packed ? 12u : 16u, packed ? 12u : 32u, packed ? 12u : 16u,
@@ -941,6 +953,9 @@ bool RunVertexStride(const char *vs_path, const char *ps_path,
           list->SetPipelineState(row < 2 ? pso.ptr() : second_pso.ptr());
         D3D12_VERTEX_BUFFER_VIEW view = {
             vb->GetGPUVirtualAddress() + 32 + row * 2048, 1024, strides[row]};
+        // Safe stale-fetch control, with the oracle unchanged.
+        if (wrong_stride && pass == 0 && row == 0)
+          view.StrideInBytes = 0;
         list->IASetVertexBuffers(3, 1, &view);
         list->SetGraphicsRoot32BitConstant(0, row, 0);
         if (indexed) {
@@ -1071,6 +1086,29 @@ bool RunVertexStride(const char *vs_path, const char *ps_path,
   return true;
 }
 
+bool RunVertexCacheReplay(const char *vs_path, const char *ps_path,
+                          const char *option) {
+  const bool wrong_expected = option && !strcmp(option, "--wrong-expected");
+  const bool wrong_stride = option && !strcmp(option, "--wrong-stride");
+  if (option && !wrong_expected && !wrong_stride)
+    return false;
+  for (unsigned phase = 0; phase < 2; ++phase) {
+    for (const char *mode : {"packed", "vertex", "instance", "instance-zero",
+                             "indexed", "indirect", "lifetime"}) {
+      const bool last = phase == 1 && !strcmp(mode, "lifetime");
+      std::cout << "CACHE_VERTEX_BEGIN " << phase << " " << mode
+                << " wrong_stride=" << (last && wrong_stride ? 1 : 0)
+                << std::endl;
+      if (!RunVertexStride(vs_path, ps_path, mode, true, last && wrong_expected,
+                           last && wrong_stride))
+        return false;
+      std::cout << "CACHE_VERTEX_END " << phase << " " << mode << std::endl;
+    }
+  }
+  std::cout << "MSC_CACHE_VERTEX modes=7 phases=2 passed\n";
+  return true;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -1092,6 +1130,8 @@ int main(int argc, char **argv) {
       std::cout << "\n";
     }
   }
+  if ((argc == 4 || argc == 5) && !strcmp(argv[1], "--vertex-cache-replay"))
+    return RunVertexCacheReplay(argv[2], argv[3], argc == 5 ? argv[4] : nullptr) ? 0 : 1;
   if ((argc == 5 || argc == 6) && !strcmp(argv[1], "--gs-cache-replay"))
     return RunGeometryCacheReplay(argv[2], argv[3], argv[4], argc == 6 ? argv[5] : nullptr) ? 0 : 1;
   if (argc == 5 && !strcmp(argv[1], "--vertex-stride"))

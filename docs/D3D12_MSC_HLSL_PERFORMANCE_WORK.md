@@ -1587,3 +1587,14 @@ also passed under Metal validation. See [graphics stage-in cache evidence](msc-s
 for identities, byte counts, reproduction and scope. Ordinary VS/PS vertex-fetch,
 TS/mesh, cross-device replay and representative performance still require
 separate evidence; no production code or advertised capability changed.
+
+Ordinary VS/PS vertex-fetch cache replay now also passes seven modes in two
+phases on the same Metal device. Twenty D3D12 PSO creations performed two
+conversions and thirty-eight cache hits; forty-two 4,096-byte GPU readbacks
+passed across packed/dynamic/zero stride, slot 3, instance rates, indexed,
+indirect and released-PSO scenarios. Wrong reference and wrong zero-stride
+controls failed at their intended final warm pixels. The GS cache regression
+remained green. See [ordinary vertex-fetch cache evidence](msc-single-flight-design.md#ordinary-vertex-fetch-cache-replay-results--2026-11-04)
+for identities, counts and limitations. Native Metal variant-cache counters,
+different physical GPUs and representative performance remain unmeasured;
+this adds controlled correctness evidence without changing production policy.
