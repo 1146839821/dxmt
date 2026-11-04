@@ -878,6 +878,12 @@ dxmt_msc_compile(struct dxmt_msc_compile_dxil_params *params) {
     return DXMT_MSC_ERROR_INVALID_DXIL;
   }
 
+  if (params->function_constant_resource_space != DXMT_MSC_RESOURCE_SPACE_DISABLED &&
+      params->function_constant_resource_space == params->framebuffer_fetch_resource_space) {
+    dxmt_msc_set_error(params, DXMT_MSC_ERROR_INVALID_ARGUMENT, "MSC extension resource spaces must be distinct");
+    return DXMT_MSC_ERROR_INVALID_ARGUMENT;
+  }
+
   if ((params->reserved & DXMT_MSC_COMPILE_FLAG_EXPLICIT_COMPATIBILITY) &&
       !g_msc_api.IRCompilerSetCompatibilityFlags) {
     dxmt_msc_set_error(params, DXMT_MSC_ERROR_UNSUPPORTED_FEATURE, "MSC compatibility flags are unavailable");

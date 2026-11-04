@@ -9,7 +9,8 @@
 
 int main(int argc, char **argv) {
   if (argc != 3 || (std::strcmp(argv[1], "available") && std::strcmp(argv[1], "incompatible") &&
-                    std::strcmp(argv[1], "invalid") && std::strcmp(argv[1], "validated-invalid")))
+                    std::strcmp(argv[1], "invalid") && std::strcmp(argv[1], "validated-invalid") &&
+                    std::strcmp(argv[1], "collision")))
     return 2;
   auto module = GetModuleHandleA("winemetal.dll");
   auto address = module ? reinterpret_cast<const unsigned char *>(GetProcAddress(module, "DXMTMSCCompileDXIL")) : nullptr;
@@ -21,8 +22,9 @@ int main(int argc, char **argv) {
     std::cout << hex[address[i] >> 4] << hex[address[i] & 15];
   std::cout << '\n';
   const bool validated = !std::strcmp(argv[1], "validated-invalid");
+  const bool collision = !std::strcmp(argv[1], "collision");
   const bool invalid = validated || !std::strcmp(argv[1], "invalid");
-  const bool available = invalid || !std::strcmp(argv[1], "available");
+  const bool available = invalid || collision || !std::strcmp(argv[1], "available");
   dxmt_msc_capabilities capabilities{};
   const int query = DXMTMSCGetCapabilities(&capabilities);
   if (DXMTMSCIsAvailable() != int(available) || capabilities.core_converter != unsigned(available) ||
@@ -40,16 +42,19 @@ int main(int argc, char **argv) {
   params.stage = DXMT_MSC_STAGE_COMPUTE;
   params.function_constant_resource_space = DXMT_MSC_RESOURCE_SPACE_DISABLED;
   params.framebuffer_fetch_resource_space = DXMT_MSC_RESOURCE_SPACE_DISABLED;
+  if (collision)
+    params.function_constant_resource_space = params.framebuffer_fetch_resource_space = 0;
   if (validated)
     params.validation_flags = 4; // IRCompilerValidationFlagValidateDXIL
   params.error_message = error;
   params.error_message_capacity = sizeof(error);
   const int result = DXMTMSCCompileDXIL(&params);
-  const int expected = invalid ? DXMT_MSC_ERROR_INVALID_DXIL
+  const int expected = collision ? DXMT_MSC_ERROR_INVALID_ARGUMENT : invalid ? DXMT_MSC_ERROR_INVALID_DXIL
                        : available ? DXMT_MSC_SUCCESS : DXMT_MSC_ERROR_UNAVAILABLE;
   if (result != expected || params.error_code != unsigned(expected) ||
-      (available && !invalid && !params.metallib_size) ||
+      (available && !invalid && !collision && !params.metallib_size) ||
       (!available && !std::strstr(error, "runtime is unavailable")) ||
+      (collision && !std::strstr(error, "resource spaces must be distinct")) ||
       (invalid && !validated && !std::strstr(error, "DXIL input is truncated"))) {
     std::cerr << "compile=" << result << " error=" << params.error_code << " message=" << error << '\n';
     return 4;

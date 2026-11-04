@@ -284,6 +284,18 @@ validation flag would alter the caller's requested configuration, and
 rejecting all non-container input would require a proven API compatibility
 contract. No production configuration is changed by this experiment.
 
+The installed MSC manual requires distinct register spaces when function
+constants and framebuffer fetch are both enabled. The private bridge now
+returns `DXMT_MSC_ERROR_INVALID_ARGUMENT` for equal enabled spaces; the
+disabled sentinel remains valid for either or both features. Native tests
+cover collisions at zero and the test space, distinct spaces, disabled spaces
+and unavailable optional setters. Existing `build` and `build-X86` builds and
+native tests passed. A Wine test was prepared with a paired bridge, but its
+positive control remained stuck before completing and was terminated; Wine
+thunk and GPU verification for this change are NOT_RUN. This does not prove
+that special spaces cannot collide with ordinary application bindings; normal
+D3D12 conversion continues to disable both extension spaces.
+
 The root-validation comparison now includes `ValidateDXIL`, alongside unset,
 zero and bound-resource validation. Three processes per mode each compiled six
 valid and six missing-resource instances. All valid roots compiled and all

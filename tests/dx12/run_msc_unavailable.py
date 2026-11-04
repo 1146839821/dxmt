@@ -39,6 +39,7 @@ def main():
     identity = 'LOADED_CODE winemetal.dll DXMTMSCCompileDXIL ' + pe_export_bytes(stage / 'winemetal.dll', 'DXMTMSCCompileDXIL')
     path = ('Z:' + str(stage / 'winemetal.dll').replace('/', '\\')).replace('\\', '\\\\').lower()
     cases = [('available', 'available', converter, 'compute_sm6.cs.cso'),
+             ('collision', 'collision', converter, 'compute_sm6.cs.cso'),
              ('incompatible', 'incompatible', fake, 'compute_sm6.cs.cso')]
     for size in (1, 2, 3):
         fixture = output / f'truncated-{size}.dxil'

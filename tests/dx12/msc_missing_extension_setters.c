@@ -100,7 +100,9 @@ main(int argc, char **argv) {
   }
   g_msc_api.IRObjectCreateFromDXIL = reject_input;
   const uint32_t disabled = DXMT_MSC_RESOURCE_SPACE_DISABLED;
-  if (check(0, 0, DXMT_MSC_ERROR_INVALID_DXIL, "rejected the shader"))
+  if (check(0, 0, DXMT_MSC_ERROR_INVALID_ARGUMENT, "resource spaces must be distinct") ||
+      check(2147420894u, 2147420894u, DXMT_MSC_ERROR_INVALID_ARGUMENT, "resource spaces must be distinct") ||
+      check(0, 1, DXMT_MSC_ERROR_INVALID_DXIL, "rejected the shader"))
     return 1;
   void (*constant_setter)(IRCompiler *, uint32_t) = g_msc_api.IRCompilerSetFunctionConstantResourceSpace;
   g_msc_api.IRCompilerSetFunctionConstantResourceSpace = NULL;
