@@ -550,6 +550,83 @@ class MTLD3D12Texture : public MTLD3D12Pageable<MTLD3D12Resource> {
     // Controlled intent retains objects, never a final mutable source snapshot.
     Com<MTLD3D12Resource, false> destination_owner, source_owner;
     bool attempted = false;
+    bool finished = false;
+    size_t native_count = 0;
+    // Destruction drains native work before any operation/COM owners disappear.
+    D3D12SparseMappingPayload payload;
+
+    void
+    Publish() {
+      std::unique_lock<dxmt::mutex> lock(destination->tile_mapping_mutex_);
+      if (source) {
+        for (size_t i = 0; i < destination_tiles.size(); ++i)
+          std::swap(destination->tile_mappings_[destination_tiles[i]], copied[i]);
+      } else {
+        for (auto &update : updates) {
+          auto &mapping = destination->tile_mappings_[update.resource_tile];
+          std::swap(mapping.heap, update.heap);
+          std::swap(mapping.heap_tile, update.heap_tile);
+        }
+      }
+    }
+
+    HRESULT
+    PrepareNative(WMT::SparseMappingQueue queue) override try {
+      if (!queue || attempted)
+        return E_INVALIDARG;
+      attempted = true;
+      // Capture current overwritten heaps before issuing any native operation.
+      const size_t count = source ? destination_tiles.size() : updates.size();
+      payload.heaps.reserve(count);
+      {
+        std::unique_lock<dxmt::mutex> lock(destination->tile_mapping_mutex_);
+        for (size_t i = 0; i < count; ++i) {
+          const auto &old = destination->tile_mappings_[source ? destination_tiles[i] : updates[i].resource_tile];
+          if (old.heap)
+            payload.heaps.push_back(old.heap);
+        }
+      }
+      return source ? destination->IssueCopyPlan(*this, queue, true) : destination->IssueUpdatePlan(*this, queue, true);
+    } catch (const std::bad_alloc &) {
+      return E_OUTOFMEMORY;
+    }
+    bool
+    PrepareTerminal(UINT flags) override {
+      return !finished && payload.completion &&
+             SparseMappingCompletion_prepareTerminal(payload.completion.handle, flags);
+    }
+    bool
+    IssueNext() override {
+      return !finished && payload.completion && payload.completion.issueNext();
+    }
+    bool
+    Finish(WMTSparseMappingHostOutcome outcome) override {
+      if (finished || !payload.completion || !payload.completion.seal(outcome))
+        return false;
+      finished = true;
+      if (outcome == WMTSparseMappingHostAccepted)
+        Publish();
+      return true;
+    }
+    bool
+    Wait(uint64_t timeout, WMTSparseMappingResult &result) override {
+      return payload.completion && payload.completion.wait(timeout, result);
+    }
+    bool
+    Retire(WMTSparseMappingResult &result) override {
+      if (!payload.Retire(result))
+        return false;
+      updates.clear();
+      copied.clear();
+      source_owner = destination_owner = nullptr;
+      source = destination = nullptr;
+      update_heap = nullptr;
+      return true;
+    }
+    size_t
+    OperationCount() const override {
+      return native_count;
+    }
 
     HRESULT
     IssueLegacy(WMT::SparseMappingQueue queue) override {
@@ -2145,7 +2222,7 @@ private:
   }
 
   HRESULT
-  IssueUpdatePlan(MappingPlan &plan, WMT::SparseMappingQueue sparse_mapping_queue) try {
+  IssueUpdatePlan(MappingPlan &plan, WMT::SparseMappingQueue sparse_mapping_queue, bool prepare_native = false) try {
     auto &updates = plan.updates;
     if (sparse_mapping_queue) {
       if (!texture || !texture->current())
@@ -2178,6 +2255,28 @@ private:
         operation.texture_slice = 0;
         operation.heap_offset = mapped ? heap_tile_start : 0;
       }
+      if (prepare_native) {
+        plan.payload.heaps.reserve(plan.payload.heaps.size() + updates.size());
+        for (const auto &update : updates)
+          if (update.heap)
+            plan.payload.heaps.push_back(update.heap);
+        std::vector<WMTSparseTextureBatchOperation> operations;
+        operations.reserve(mapping_operations.size());
+        for (const auto &mapping : mapping_operations) {
+          WMTSparseTextureBatchOperation op = {};
+          op.mode = mapping.mode;
+          op.destination = texture->current()->texture().handle;
+          op.heap = mapping.mode == WMTSparseTextureMappingModeMap ? plan.update_heap->GetMetalHeap().handle : 0;
+          op.region = mapping.texture_region;
+          op.destination_level = mapping.texture_level;
+          op.destination_slice = mapping.texture_slice;
+          op.heap_offset = mapping.heap_offset;
+          operations.push_back(op);
+        }
+        plan.native_count = operations.size();
+        plan.payload.completion = sparse_mapping_queue.prepareTextureBatch(operations.data(), operations.size());
+        return plan.payload.completion ? S_OK : E_OUTOFMEMORY;
+      }
       if (!sparse_mapping_queue.tryUpdateTextureMappings(
               texture->current()->texture(), plan.update_heap ? plan.update_heap->GetMetalHeap() : WMT::Heap{},
               mapping_operations.data(), mapping_operations.size()
@@ -2185,22 +2284,14 @@ private:
         return DXGI_ERROR_DEVICE_REMOVED; // Do not publish a failed native update.
     }
 
-    {
-      std::unique_lock<dxmt::mutex> lock(tile_mapping_mutex_);
-      for (auto &update : updates) {
-        auto &mapping = tile_mappings_[update.resource_tile];
-        // Keep overwritten owners in the intent, released outside the lock.
-        std::swap(mapping.heap, update.heap);
-        std::swap(mapping.heap_tile, update.heap_tile);
-      }
-    }
+    plan.Publish(); // Overwritten owners stay in the intent, outside the lock.
     return S_OK;
   } catch (const std::bad_alloc &) {
     return E_OUTOFMEMORY;
   }
 
   HRESULT
-  IssueCopyPlan(MappingPlan &plan, WMT::SparseMappingQueue sparse_mapping_queue) try {
+  IssueCopyPlan(MappingPlan &plan, WMT::SparseMappingQueue sparse_mapping_queue, bool prepare_native = false) try {
     auto *source = plan.source;
     const auto &destination_tiles = plan.destination_tiles;
     const auto &source_tiles = plan.source_tiles;
@@ -2249,6 +2340,39 @@ private:
       for (UINT tile : source_tiles)
         copied.push_back(source->tile_mappings_[tile]);
     }
+    if (prepare_native) {
+      plan.payload.heaps.reserve(plan.payload.heaps.size() + copied.size());
+      for (const auto &mapping : copied)
+        if (mapping.heap)
+          plan.payload.heaps.push_back(mapping.heap);
+      std::vector<WMTSparseTextureBatchOperation> operations;
+      operations.reserve(mapping_operations.size());
+      for (size_t i = 0; i < mapping_operations.size(); ++i) {
+        const auto &mapping = mapping_operations[i];
+        WMTSparseTextureBatchOperation op = {};
+        op.destination = texture->current()->texture().handle;
+        op.region = mapping.source_region;
+        op.destination_level = mapping.destination_level;
+        op.destination_slice = mapping.destination_slice;
+        if (source != this) {
+          op.kind = 1;
+          op.source = source->texture->current()->texture().handle;
+          op.source_level = mapping.source_level;
+          op.source_slice = mapping.source_slice;
+          op.destination_origin = mapping.destination_origin;
+        } else {
+          const auto &saved = copied[i < destination_packed_start ? i : destination_packed_start];
+          op.mode = saved.heap ? WMTSparseTextureMappingModeMap : WMTSparseTextureMappingModeUnmap;
+          op.heap = saved.heap ? saved.heap->GetMetalHeap().handle : 0;
+          op.heap_offset = saved.heap_tile;
+          op.region.origin = mapping.destination_origin;
+        }
+        operations.push_back(op);
+      }
+      plan.native_count = operations.size();
+      plan.payload.completion = sparse_mapping_queue.prepareTextureBatch(operations.data(), operations.size());
+      return plan.payload.completion ? S_OK : E_OUTOFMEMORY;
+    }
     if (sparse_mapping_queue && source != this) {
       if (!sparse_mapping_queue.tryCopyTextureMappings(
               source->texture->current()->texture(), texture->current()->texture(), mapping_operations.data(),
@@ -2277,11 +2401,7 @@ private:
           return DXGI_ERROR_DEVICE_REMOVED;
       }
     }
-    {
-      std::unique_lock<dxmt::mutex> lock(tile_mapping_mutex_);
-      for (size_t i = 0; i < destination_tiles.size(); ++i)
-        std::swap(tile_mappings_[destination_tiles[i]], copied[i]);
-    }
+    plan.Publish();
     return S_OK;
   } catch (const std::bad_alloc &) {
     return E_OUTOFMEMORY;

@@ -1646,6 +1646,20 @@ SparseMappingCompletion_prepareTerminal(obj_handle_t completion, uint32_t test_f
   struct unixcall_sparsemappingcompletion_seal params = {completion, test_flags, 0};
   return WINE_UNIX_CALL(unix_sparsemappingcompletion_prepareterminal, &params) == 0;
 }
+WINEMETAL_API obj_handle_t
+SparseMappingQueue_prepareTextureBatch(
+    obj_handle_t queue, const struct WMTSparseTextureBatchOperation *operations, uint64_t count
+) {
+  if (!queue || (count && !operations))
+    return 0;
+  struct unixcall_sparsemappingcompletion_prepare params = {0};
+  params.queue = queue;
+  WMT_MEMPTR_SET(params.operations, operations);
+  params.count = count;
+  if (WINE_UNIX_CALL(unix_sparsemappingqueue_preparetexturebatch, &params))
+    return 0;
+  return params.ret;
+}
 WINEMETAL_API uint32_t
 SparseMappingCompletion_issueNext(obj_handle_t completion) {
   struct unixcall_generic_obj_noret params = {completion};

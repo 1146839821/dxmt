@@ -405,14 +405,24 @@ public:
   }
 };
 
-// Controlled preparation seam, not a queue submission/completion credential.
+// Controlled preparation seam, not a production queue submission credential.
 // IssueLegacy executes once at the caller's serialized mapping point and resolves
 // live copy mappings then. Native acceptance is not GPU completion: the caller
 // must retain the plan and establish actual completion before releasing inputs.
+// The native batch path instead owns completion/retirement; native preparation
+// is a single attempt at the serialized issue point, with no later remap before
+// its issue/publication. Failed/partial batches must be drained and discarded.
 class D3D12SparseTextureMappingPlan {
 public:
   virtual ~D3D12SparseTextureMappingPlan() = default;
   virtual HRESULT IssueLegacy(WMT::SparseMappingQueue queue) = 0;
+  virtual HRESULT PrepareNative(WMT::SparseMappingQueue queue) = 0;
+  virtual bool PrepareTerminal(UINT test_flags) = 0;
+  virtual bool IssueNext() = 0;
+  virtual bool Finish(WMTSparseMappingHostOutcome outcome) = 0;
+  virtual bool Wait(uint64_t timeout_ms, WMTSparseMappingResult &result) = 0;
+  virtual bool Retire(WMTSparseMappingResult &result) = 0;
+  virtual size_t OperationCount() const = 0;
 };
 
 // Transient submission input ownership, not another logical tile map. Declare

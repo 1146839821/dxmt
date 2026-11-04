@@ -2531,6 +2531,18 @@ struct WMTSparseBufferBatchOperation {
   uint64_t reserved; // must be zero
 };
 STATIC_ASSERT(sizeof(WMTSparseBufferBatchOperation) == 64);
+// Additive texture input ABI; buffer batches and mapping results are unchanged.
+struct WMTSparseTextureBatchOperation {
+  uint32_t kind; // 0 update, 1 copy. Self-overlap must use saved update mappings.
+  uint32_t mode;
+  obj_handle_t source, destination, heap;
+  struct WMTRegion region; // update destination or copy source, in sparse tiles
+  uint64_t source_level, source_slice;
+  struct WMTOrigin destination_origin;
+  uint64_t destination_level, destination_slice;
+  uint64_t heap_offset;
+};
+STATIC_ASSERT(sizeof(WMTSparseTextureBatchOperation) == 144);
 struct WMTSparseMappingResult {
   enum WMTSparseMappingState state;
   enum WMTSparseMappingHostOutcome host_outcome;
@@ -2549,6 +2561,11 @@ STATIC_ASSERT(sizeof(WMTSparseMappingResult) == 32);
 // callers retain this object across concurrent wait calls.
 WINEMETAL_API obj_handle_t SparseMappingQueue_prepareBufferBatch(
     obj_handle_t queue, const struct WMTSparseBufferBatchOperation *operations, uint64_t count
+);
+// Same completion/serialization/retirement contract, with owned native textures.
+// Caller supplies validated bounds/page compatibility and residency/COM owners.
+WINEMETAL_API obj_handle_t SparseMappingQueue_prepareTextureBatch(
+    obj_handle_t queue, const struct WMTSparseTextureBatchOperation *operations, uint64_t count
 );
 // Explicit controlled opt-in, before first issue. Prepares all post-work objects;
 // ordinary batch callers remain private-event-only. Flags 1/2 are test controls:

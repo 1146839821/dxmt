@@ -4383,18 +4383,23 @@ _SparseBarrierCompletion_wait(void *obj) {
 }
 
 _Static_assert(sizeof(struct WMTSparseBufferBatchOperation) == 64, "Sparse batch input ABI");
+_Static_assert(sizeof(struct WMTSparseTextureBatchOperation) == 144, "Sparse texture batch input ABI");
 _Static_assert(sizeof(struct WMTSparseMappingResult) == 32, "Sparse batch result ABI");
 _Static_assert(sizeof(struct unixcall_sparsemappingcompletion_prepare) == 32, "Sparse batch prepare ABI");
 _Static_assert(sizeof(struct unixcall_sparsemappingcompletion_seal) == 16, "Sparse batch seal ABI");
 _Static_assert(sizeof(struct unixcall_sparsemappingcompletion_wait) == 48, "Sparse batch wait ABI");
 
 #if __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000
-struct wmt_prepared_buffer_operation {
+struct wmt_prepared_mapping_operation {
   uint32_t kind;
-  id<MTLBuffer> source, destination;
+  id source, destination;
   id<MTLHeap> heap;
-  MTL4UpdateSparseBufferMappingOperation update;
-  MTL4CopySparseBufferMappingOperation copy;
+  union {
+    MTL4UpdateSparseBufferMappingOperation update;
+    MTL4CopySparseBufferMappingOperation copy;
+    MTL4UpdateSparseTextureMappingOperation texture_update;
+    MTL4CopySparseTextureMappingOperation texture_copy;
+  };
 };
 // A post-mapping callback owns only native evidence, never its batch/PE owner.
 API_AVAILABLE(macos(26.0))
@@ -4474,7 +4479,7 @@ API_AVAILABLE(macos(26.0))
   id<MTL4CommandQueue> queue_;
   id<MTLSharedEvent> event_;
   NSLock *lock_;
-  struct wmt_prepared_buffer_operation *operations_;
+  struct wmt_prepared_mapping_operation *operations_;
   uint64_t count_, next_;
   struct WMTSparseMappingResult result_;
   BOOL trace_;
@@ -4488,6 +4493,7 @@ API_AVAILABLE(macos(26.0))
 }
 - (id)initWithQueue:(id<MTL4CommandQueue>)queue
          operations:(const struct WMTSparseBufferBatchOperation *)ops
+           textures:(const struct WMTSparseTextureBatchOperation *)textures
               count:(uint64_t)count;
 - (BOOL)prepareTerminal:(uint32_t)flags;
 - (BOOL)issueNext;
@@ -4498,14 +4504,34 @@ API_AVAILABLE(macos(26.0))
 @implementation WMTSparseMappingCompletion
 - (id)initWithQueue:(id<MTL4CommandQueue>)queue
          operations:(const struct WMTSparseBufferBatchOperation *)ops
+           textures:(const struct WMTSparseTextureBatchOperation *)textures
               count:(uint64_t)count {
   if (!(self = [super init]))
     return nil;
-  if (!queue || (count && !ops) || count > SIZE_MAX / sizeof(*operations_)) {
+  if (!queue || (count && !ops && !textures) || (ops && textures) || count > SIZE_MAX / sizeof(*operations_) ||
+      (textures && count > SIZE_MAX / sizeof(*textures))) {
     [self release];
     return nil;
   }
   for (uint64_t i = 0; i < count; ++i) {
+    if (textures) {
+      const struct WMTSparseTextureBatchOperation *op = &textures[i];
+      if (op->kind > 1 || !op->destination || !op->region.size.width || !op->region.size.height ||
+          !op->region.size.depth || op->region.origin.x > UINT64_MAX - op->region.size.width ||
+          op->region.origin.y > UINT64_MAX - op->region.size.height ||
+          op->region.origin.z > UINT64_MAX - op->region.size.depth ||
+          (op->kind == 0 && (op->source || op->source_level || op->source_slice || op->destination_origin.x ||
+                             op->destination_origin.y || op->destination_origin.z || op->mode > 1 ||
+                             (op->mode == 0 ? !op->heap : (!!op->heap || op->heap_offset)))) ||
+          (op->kind == 1 && (!op->source || op->source == op->destination || op->heap || op->mode || op->heap_offset ||
+                             op->destination_origin.x > UINT64_MAX - op->region.size.width ||
+                             op->destination_origin.y > UINT64_MAX - op->region.size.height ||
+                             op->destination_origin.z > UINT64_MAX - op->region.size.depth))) {
+        [self release];
+        return nil;
+      }
+      continue;
+    }
     if (ops[i].kind > 1 || ops[i].reserved || !ops[i].destination || !ops[i].length ||
         ops[i].location > UINT64_MAX - ops[i].length ||
         (ops[i].kind == 0 && (ops[i].source || ops[i].mode > 1 ||
@@ -4527,7 +4553,35 @@ API_AVAILABLE(macos(26.0))
     return nil;
   }
   for (uint64_t i = 0; i < count; ++i) {
-    struct wmt_prepared_buffer_operation *op = &operations_[i];
+    struct wmt_prepared_mapping_operation *op = &operations_[i];
+    if (textures) {
+      const struct WMTSparseTextureBatchOperation *input = &textures[i];
+      op->kind = input->kind + 2;
+      op->source = [(id)input->source retain];
+      op->destination = [(id)input->destination retain];
+      op->heap = [(id)input->heap retain];
+      MTLRegion region = MTLRegionMake3D(
+          input->region.origin.x, input->region.origin.y, input->region.origin.z, input->region.size.width,
+          input->region.size.height, input->region.size.depth
+      );
+      if (input->kind == 0) {
+        op->texture_update.mode = input->mode;
+        op->texture_update.textureRegion = region;
+        op->texture_update.textureLevel = input->destination_level;
+        op->texture_update.textureSlice = input->destination_slice;
+        op->texture_update.heapOffset = input->heap_offset;
+      } else {
+        op->texture_copy.sourceRegion = region;
+        op->texture_copy.sourceLevel = input->source_level;
+        op->texture_copy.sourceSlice = input->source_slice;
+        op->texture_copy.destinationOrigin =
+            MTLOriginMake(input->destination_origin.x, input->destination_origin.y, input->destination_origin.z);
+        op->texture_copy.destinationLevel = input->destination_level;
+        op->texture_copy.destinationSlice = input->destination_slice;
+      }
+      ++count_;
+      continue;
+    }
     op->kind = ops[i].kind;
     op->source = [(id)ops[i].source retain];
     op->destination = [(id)ops[i].destination retain];
@@ -4617,13 +4671,17 @@ API_AVAILABLE(macos(26.0))
     [lock_ unlock];
     return NO;
   }
-  struct wmt_prepared_buffer_operation *op = &operations_[next_++];
+  struct wmt_prepared_mapping_operation *op = &operations_[next_++];
   result_.state = WMTSparseMappingIssuing;
   ++result_.possibly_issued_calls; // Before the void invocation: ambiguous issue is retained.
   if (op->kind == 0)
     [queue_ updateBufferMappings:op->destination heap:op->heap operations:&op->update count:1];
-  else
+  else if (op->kind == 1)
     [queue_ copyBufferMappingsFromBuffer:op->source toBuffer:op->destination operations:&op->copy count:1];
+  else if (op->kind == 2)
+    [queue_ updateTextureMappings:op->destination heap:op->heap operations:&op->texture_update count:1];
+  else
+    [queue_ copyTextureMappingsFromTexture:op->source toTexture:op->destination operations:&op->texture_copy count:1];
   [lock_ unlock];
   return YES;
 }
@@ -4684,7 +4742,7 @@ API_AVAILABLE(macos(26.0))
     return NO;
   }
   result_.inputs_retired = 1;
-  struct wmt_prepared_buffer_operation *ops = operations_;
+  struct wmt_prepared_mapping_operation *ops = operations_;
   uint64_t count = count_;
   operations_ = NULL;
   count_ = 0;
@@ -4746,8 +4804,21 @@ _SparseMappingQueue_prepareBufferBatch(void *obj) {
   p->ret = 0;
 #if __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000
   if (@available(macOS 26.0, *)) {
-    p->ret = (obj_handle_t)
-        [[WMTSparseMappingCompletion alloc] initWithQueue:(id)p->queue operations:p->operations.ptr count:p->count];
+    p->ret = (obj_handle_t)[[WMTSparseMappingCompletion
+        alloc] initWithQueue:(id)p->queue operations:p->operations.ptr textures:NULL count:p->count];
+    return p->ret ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+  }
+#endif
+  return STATUS_UNSUCCESSFUL;
+}
+static NTSTATUS
+_SparseMappingQueue_prepareTextureBatch(void *obj) {
+  struct unixcall_sparsemappingcompletion_prepare *p = obj;
+  p->ret = 0;
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000
+  if (@available(macOS 26.0, *)) {
+    p->ret = (obj_handle_t)[[WMTSparseMappingCompletion
+        alloc] initWithQueue:(id)p->queue operations:NULL textures:p->operations.ptr count:p->count];
     return p->ret ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
   }
 #endif
@@ -5494,10 +5565,11 @@ const void *__wine_unix_call_funcs[] = {
     &_SparseMappingCompletion_wait,
     &_SparseMappingCompletion_retireInputs,
     &_SparseMappingCompletion_prepareTerminal,
+    &_SparseMappingQueue_prepareTextureBatch,
 };
 _Static_assert(
     sizeof(__wine_unix_call_funcs) / sizeof(__wine_unix_call_funcs[0]) ==
-        unix_sparsemappingcompletion_prepareterminal + 1,
+        unix_sparsemappingqueue_preparetexturebatch + 1,
     "Sparse completion Unix-call ordinal mismatch"
 );
 
@@ -5712,10 +5784,11 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_SparseMappingCompletion_wait,
     &_SparseMappingCompletion_retireInputs,
     &_SparseMappingCompletion_prepareTerminal,
+    &_SparseMappingQueue_prepareTextureBatch,
 };
 _Static_assert(
     sizeof(__wine_unix_call_wow64_funcs) / sizeof(__wine_unix_call_wow64_funcs[0]) ==
-        unix_sparsemappingcompletion_prepareterminal + 1,
+        unix_sparsemappingqueue_preparetexturebatch + 1,
     "Sparse completion WOW64 ordinal mismatch"
 );
 #endif

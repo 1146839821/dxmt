@@ -130,7 +130,8 @@ public:
   }
 };
 
-bool CheckTextureIntentOwnership(ID3D12Device *device, bool packed = false) {
+bool CheckTextureIntentOwnership(ID3D12Device *device, bool packed = false,
+                                 bool credential = false) {
   using namespace dxmt;
   auto require = [](bool ok) {
     if (!ok)
@@ -187,6 +188,76 @@ bool CheckTextureIntentOwnership(ID3D12Device *device, bool packed = false) {
        dst = static_cast<MTLD3D12Resource *>(target.ptr);
   auto expected = static_cast<MTLD3D12Heap *>(heap.ptr)->GetTileBackingBuffer();
   std::unique_ptr<D3D12SparseTextureMappingPlan> update, copy;
+  std::atomic<UINT> old_deaths{0};
+  bool old_target_mapping = false;
+  WMT::Reference<WMT::SparseMappingQueue> native_queue;
+  if (credential) {
+    auto owner = static_cast<MTLD3D12Device *>(device);
+    native_queue = owner->GetMTLDevice().newSparseMappingQueue();
+    auto residency = owner->GetGlobalResidencySet();
+    residency.commit();
+    native_queue.addResidencySet(residency);
+    static_assert(sizeof(WMTSparseTextureBatchOperation) == 144);
+    static_assert(offsetof(WMTSparseTextureBatchOperation, region) == 32);
+    static_assert(offsetof(WMTSparseTextureBatchOperation, heap_offset) == 136);
+    WMTSparseTextureBatchOperation invalid = {};
+    require(!SparseMappingQueue_prepareTextureBatch(0, nullptr, 0) &&
+            !SparseMappingQueue_prepareTextureBatch(native_queue.handle,
+                                                    nullptr, 1) &&
+            !native_queue.prepareTextureBatch(&invalid, 1));
+    invalid.destination = src->texture->current()->texture().handle;
+    invalid.region.size = {1, 1, 1};
+    invalid.mode = WMTSparseTextureMappingModeMap;
+    require(!native_queue.prepareTextureBatch(&invalid, 1)); // map without heap
+    invalid.mode = WMTSparseTextureMappingModeUnmap;
+    invalid.heap_offset = 1;
+    require(!native_queue.prepareTextureBatch(&invalid, 1));
+    invalid.heap_offset = 0;
+    invalid.region.origin.x = UINT64_MAX;
+    require(!native_queue.prepareTextureBatch(&invalid, 1));
+    invalid.region.origin.x = 0;
+    invalid.kind = 1;
+    invalid.mode = 0;
+    invalid.source = invalid.destination;
+    require(!native_queue.prepareTextureBatch(&invalid, 1)); // unsafe self copy
+    std::printf("TEXTURE_CREDENTIAL_ABI invalid=7 calls=0 PASS\n");
+    char scenario[32] = {};
+    if (!GetEnvironmentVariableA("DXMT_TEST_TEXTURE_CREDENTIAL_CASE", scenario,
+                                 sizeof(scenario))) {
+      Owned<ID3D12Heap> previous_heap;
+      Check("previous target heap",
+            device->CreateHeap(&hd, IID_PPV_ARGS(&previous_heap.ptr)));
+      auto sentinel = new TextureIntentSentinel(old_deaths);
+      Check("previous heap sentinel",
+            previous_heap->SetPrivateDataInterface(key, sentinel));
+      sentinel->Release();
+      D3D12_TILED_RESOURCE_COORDINATE start = {};
+      D3D12_TILE_REGION_SIZE size = {};
+      size.NumTiles = total;
+      const UINT heap_offset = 0;
+      std::unique_ptr<D3D12SparseTextureMappingPlan> previous;
+      Check("previous map intent",
+            dst->PrepareTextureTileUpdate(
+                1, &start, &size, previous_heap.ptr, 1, nullptr, &heap_offset,
+                nullptr, D3D12_TILE_MAPPING_FLAG_NONE, previous));
+      residency.commit();
+      Check("previous map native", previous->PrepareNative(native_queue));
+      require(previous->PrepareTerminal(1));
+      auto before = native_queue.prepareBarrierBeforeResourceState();
+      require(bool(before) && before.submit());
+      for (size_t i = 0; i < previous->OperationCount(); ++i)
+        require(previous->IssueNext());
+      WMTSparseMappingResult result = {};
+      require(previous->Finish(WMTSparseMappingHostAccepted) &&
+              previous->Wait(10000, result) &&
+              result.state == WMTSparseMappingGPUComplete &&
+              previous->Retire(result));
+      previous_heap.ptr->Release();
+      previous_heap.ptr = nullptr;
+      require(old_deaths == 0);
+      old_target_mapping = true;
+    }
+  }
   auto check_failure = [&](HRESULT hr, const char *name) {
     char phase[16] = {};
     if (!GetEnvironmentVariableA(name, phase, sizeof(phase)) ||
@@ -230,7 +301,8 @@ bool CheckTextureIntentOwnership(ID3D12Device *device, bool packed = false) {
     counts[0] = 0;
   }
   for (UINT i = 0; i < total; ++i)
-    require(!src->IsTileMapped(i) && !dst->IsTileMapped(i));
+    require(!src->IsTileMapped(i) &&
+            dst->IsTileMapped(i) == old_target_mapping);
   std::printf(
       "TEXTURE_INTENT_PREPARE_END unchanged=1 caller_arrays_destroyed=1\n");
   source.ptr->Release();
@@ -240,6 +312,183 @@ bool CheckTextureIntentOwnership(ID3D12Device *device, bool packed = false) {
   heap.ptr->Release();
   heap.ptr = nullptr;
   require(deaths == 0);
+  if (credential) {
+    char failure[32] = {};
+    GetEnvironmentVariableA("DXMT_TEST_TEXTURE_CREDENTIAL_CASE", failure,
+                            sizeof(failure));
+    const bool reject = !std::strcmp(failure, "reject"),
+               partial = !std::strcmp(failure, "partial"),
+               abandon = !std::strcmp(failure, "abandon"),
+               terminal_failure = !std::strcmp(failure, "terminal"),
+               prepare_failure = !std::strcmp(failure, "prepare");
+    const HRESULT native_hr = update->PrepareNative(native_queue);
+    WMTSparseMappingResult result = {};
+    if (prepare_failure) {
+      require(native_hr == E_OUTOFMEMORY && !update->Wait(0, result));
+      update.reset();
+      require(deaths == 1);
+      copy.reset();
+      require(deaths == 3);
+      std::printf(
+          "TEXTURE_CREDENTIAL_FAILURE prepare=1 calls=0 destroyed=3 PASS\n");
+      return true;
+    }
+    Check("owned native update", native_hr);
+    if (reject || terminal_failure) {
+      if (terminal_failure)
+        require(!update->PrepareTerminal(1));
+      require(update->Finish(WMTSparseMappingHostRejected) &&
+              update->Wait(0, result) &&
+              result.state == WMTSparseMappingNotIssued &&
+              !result.possibly_issued_calls && !src->IsTileMapped(0) &&
+              update->Retire(result));
+      require(deaths == 1);
+      copy.reset();
+      require(deaths == 3);
+      std::printf("TEXTURE_CREDENTIAL_FAILURE rejected=1 terminal_failure=%u "
+                  "calls=0 destroyed=3 PASS\n",
+                  terminal_failure);
+      return true;
+    }
+    require(update->PrepareTerminal(3));
+    auto before = native_queue.prepareBarrierBeforeResourceState();
+    require(bool(before) && before.submit());
+    if (partial || abandon) {
+      require(update->IssueNext() && !src->IsTileMapped(0) &&
+              !update->Retire(result));
+      if (partial) {
+        require(!update->Finish(WMTSparseMappingHostAccepted) &&
+                update->Finish(WMTSparseMappingHostFailedAfterIssue));
+        require(update->Wait(0, result) &&
+                result.state == WMTSparseMappingSealedPending &&
+                !update->Retire(result) && deaths == 0);
+        require(update->Wait(10000, result) &&
+                result.state == WMTSparseMappingGPUComplete &&
+                result.host_outcome == WMTSparseMappingHostFailedAfterIssue &&
+                result.possibly_issued_calls == 1 && !result.event_value &&
+                !src->IsTileMapped(0) && update->Retire(result));
+      }
+      // Unsealed issued abandonment must drain actual completion.
+      update.reset();
+      require(deaths == 1);
+      WMTSparseBarrierResult feedback = {};
+      require(before.wait(10000, feedback) &&
+              feedback.state == WMTSparseBarrierCompleted);
+      copy.reset();
+      require(deaths == 3);
+      std::printf("TEXTURE_CREDENTIAL_FAILURE partial=%u abandon=%u calls=1 "
+                  "destroyed=3 drained=1 PASS\n",
+                  partial, abandon);
+      return true;
+    }
+    for (size_t i = 0; i < update->OperationCount(); ++i)
+      require(update->IssueNext());
+    require(update->Finish(WMTSparseMappingHostAccepted) &&
+            update->Wait(0, result) &&
+            result.state == WMTSparseMappingSealedPending &&
+            !update->Retire(result) && deaths == 0);
+    require(update->Wait(10000, result) &&
+            result.state == WMTSparseMappingGPUComplete && !result.event_value);
+    // Exercise real texel contents for both standard and packed native batches,
+    // separately from the logical ownership checks below.
+    Owned<ID3D12CommandQueue> io_queue;
+    D3D12_COMMAND_QUEUE_DESC io_desc = {};
+    Check("owned IO queue",
+          device->CreateCommandQueue(&io_desc, IID_PPV_ARGS(&io_queue.ptr)));
+    Owned<ID3D12Fence> io_fence;
+    Check("owned IO fence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                                IID_PPV_ARGS(&io_fence.ptr)));
+    const UINT row_pitch = UINT(desc.Width) * sizeof(UINT);
+    const UINT words = UINT(desc.Width) * desc.Height;
+    Owned<ID3D12Resource> upload, readback;
+    CreateBuffer(device, upload, UINT64(row_pitch) * desc.Height,
+                 D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE,
+                 D3D12_RESOURCE_STATE_GENERIC_READ);
+    CreateBuffer(device, readback, UINT64(row_pitch) * desc.Height,
+                 D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_FLAG_NONE,
+                 D3D12_RESOURCE_STATE_COPY_DEST);
+    UINT *data = nullptr;
+    Check("owned upload map",
+          upload->Map(0, nullptr, reinterpret_cast<void **>(&data)));
+    char seed_text[16] = {};
+    GetEnvironmentVariableA("DXMT_TEST_TEXTURE_INTENT_SEED", seed_text,
+                            sizeof(seed_text));
+    const UINT seed = UINT(std::strtoul(seed_text, nullptr, 0)) ^ 0x6a473921;
+    for (UINT i = 0; i < words; ++i)
+      data[i] = TileWord(seed, i);
+    upload->Unmap(0, nullptr);
+    auto transfer = [&](bool write) {
+      Owned<ID3D12CommandAllocator> allocator;
+      Owned<ID3D12GraphicsCommandList> list;
+      Check("owned IO allocator",
+            device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                           IID_PPV_ARGS(&allocator.ptr)));
+      Check("owned IO list",
+            device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                      allocator.ptr, nullptr,
+                                      IID_PPV_ARGS(&list.ptr)));
+      auto resource = write ? src : dst;
+      D3D12_RESOURCE_BARRIER alias = {};
+      alias.Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING;
+      list->ResourceBarrier(1, &alias);
+      const auto state = write ? D3D12_RESOURCE_STATE_COPY_DEST
+                               : D3D12_RESOURCE_STATE_COPY_SOURCE;
+      Transition(list.ptr, resource, D3D12_RESOURCE_STATE_COMMON, state);
+      D3D12_TEXTURE_COPY_LOCATION tex = {}, linear = {};
+      tex.pResource = resource;
+      tex.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+      linear.pResource = write ? upload.ptr : readback.ptr;
+      linear.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+      linear.PlacedFootprint.Footprint = {desc.Format, UINT(desc.Width),
+                                          desc.Height, 1, row_pitch};
+      if (write)
+        list->CopyTextureRegion(&tex, 0, 0, 0, &linear, nullptr);
+      else
+        list->CopyTextureRegion(&linear, 0, 0, 0, &tex, nullptr);
+      Transition(list.ptr, resource, state, D3D12_RESOURCE_STATE_COMMON);
+      Check("owned IO close", list->Close());
+      ID3D12CommandList *lists[] = {list.ptr};
+      io_queue->ExecuteCommandLists(1, lists);
+      Check("owned IO signal", io_queue->Signal(io_fence.ptr, write ? 1 : 2));
+      Wait(io_fence.ptr, write ? 1 : 2);
+    };
+    transfer(true);
+    Check("owned native copy", copy->PrepareNative(native_queue));
+    require(copy->PrepareTerminal(3));
+    for (size_t i = 0; i < copy->OperationCount(); ++i)
+      require(copy->IssueNext());
+    require(copy->Finish(WMTSparseMappingHostAccepted) && old_deaths == 0 &&
+            copy->Wait(10000, result) &&
+            result.state == WMTSparseMappingGPUComplete &&
+            !result.event_value && deaths == 0);
+    transfer(false);
+    Check("owned readback map",
+          readback->Map(0, nullptr, reinterpret_cast<void **>(&data)));
+    UINT bad_words = 0;
+    for (UINT i = 0; i < words; ++i)
+      bad_words += data[i] != TileWord(seed, i);
+    readback->Unmap(0, nullptr);
+    require(!bad_words);
+    std::printf(
+        "TEXTURE_CREDENTIAL_TEXELS packed=%u words=%u mismatches=0 PASS\n",
+        packed, words);
+    UINT mismatches = 0;
+    for (UINT i = 0; i < total; ++i) {
+      WMT::Buffer actual;
+      UINT64 offset = 0;
+      Check("owned native logical mapping",
+            dst->GetTileMapping(i, actual, offset));
+      mismatches +=
+          actual.handle != expected.handle || offset != UINT64(i) * kTileBytes;
+    }
+    require(!mismatches && update->Retire(result) && deaths == 0 &&
+            old_deaths == 0 && copy->Retire(result) && deaths == 3 &&
+            old_deaths == 1);
+    std::printf("TEXTURE_CREDENTIAL_OWNERSHIP packed=%u tiles=%u callbacks=2 "
+                "destroyed=3 PASS\n",
+                packed, total);
+    return false;
+  }
   Check("execute owned update", update->IssueLegacy({}));
   require(update->IssueLegacy({}) == E_INVALIDARG);
   Check("execute live copy", copy->IssueLegacy({}));
@@ -414,7 +663,8 @@ struct GateWatchdog {
 int Run(bool bad_oracle, bool cross_resource, bool bad_cross, bool cross_queue,
         bool reverse_queue, bool early_work, DXGI_FORMAT format, bool bad_edge,
         bool bad_position, bool multi_heap, bool retirement,
-        bool bad_retirement, bool bad_shader, bool intent, bool bad_intent) {
+        bool bad_retirement, bool bad_shader, bool intent, bool bad_intent,
+        bool credential) {
   Owned<ID3D12Device> device;
   Check("device", D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
                                     IID_PPV_ARGS(&device.ptr)));
@@ -754,9 +1004,9 @@ int Run(bool bad_oracle, bool cross_resource, bool bad_cross, bool cross_queue,
         std::printf("%02x", code[i]);
       std::printf("\n");
     }
-    if (CheckTextureIntentOwnership(device.ptr))
+    if (CheckTextureIntentOwnership(device.ptr, false, credential))
       return 0;
-    CheckTextureIntentOwnership(device.ptr, true);
+    CheckTextureIntentOwnership(device.ptr, true, credential);
     auto require = [](bool ok) {
       if (!ok)
         throw std::runtime_error("texture intent GPU contract");
@@ -776,6 +1026,38 @@ int Run(bool bad_oracle, bool cross_resource, bool bad_cross, bool cross_queue,
     // A real unmap of an unused buffer page supplies the existing terminal
     // observer. It carries no texture operation or texture ownership.
     auto execute_plan = [&](D3D12SparseTextureMappingPlan &plan) {
+      if (credential) {
+        Check("prepare native texture", plan.PrepareNative(sparse));
+        require(plan.PrepareTerminal(
+            3)); // actual delayed callback, no private signal
+        WMTSparseMappingResult result = {};
+        require(plan.Wait(0, result) &&
+                result.state == WMTSparseMappingPrepared &&
+                !plan.Retire(result));
+        auto barrier = sparse.prepareBarrierBeforeResourceState();
+        require(bool(barrier) && barrier.submit());
+        for (size_t i = 0; i < plan.OperationCount(); ++i)
+          require(plan.IssueNext());
+        require(!plan.IssueNext() &&
+                plan.Finish(WMTSparseMappingHostAccepted) &&
+                !plan.Finish(WMTSparseMappingHostAccepted));
+        require(plan.Wait(0, result) &&
+                result.state == WMTSparseMappingSealedPending &&
+                !plan.Retire(result));
+        require(plan.Wait(10000, result) &&
+                result.state == WMTSparseMappingGPUComplete &&
+                result.event_value == 0 &&
+                result.possibly_issued_calls == plan.OperationCount());
+        WMTSparseBarrierResult before = {};
+        require(barrier.wait(10000, before) &&
+                before.state == WMTSparseBarrierCompleted &&
+                before.native_feedback_received);
+        std::printf(
+            "TEXTURE_CREDENTIAL_COMPLETE operations=%zu event=%llu retired=0\n",
+            plan.OperationCount(), (unsigned long long)result.event_value);
+        require(plan.Retire(result) && !plan.Retire(result));
+        return;
+      }
       WMTSparseBufferBatchOperation op = {};
       op.mode = WMTSparseTextureMappingModeUnmap;
       op.destination =
@@ -885,6 +1167,34 @@ int Run(bool bad_oracle, bool cross_resource, bool bad_cross, bool cross_queue,
             !plan);
     std::cout << "TEXTURE_INTENT_RESULT gpu_readbacks=4 invalid=2 "
                  "repeat_rejected=4 PASS\n";
+    if (credential) {
+      map_all();
+      Check("partial setup drain", queue->Signal(fence.ptr, ++serial));
+      Wait(fence.ptr, serial);
+      Check("prepare partial null",
+            target->PrepareTextureTileUpdate(
+                1, &zero, &all, nullptr, 1, &null_range, nullptr, nullptr,
+                D3D12_TILE_MAPPING_FLAG_NONE, plan));
+      Check("native partial null", plan->PrepareNative(sparse));
+      require(plan->PrepareTerminal(3) && plan->OperationCount() == 3);
+      auto before = sparse.prepareBarrierBeforeResourceState();
+      require(bool(before) && before.submit() && plan->IssueNext() &&
+              !plan->Finish(WMTSparseMappingHostAccepted) &&
+              plan->Finish(WMTSparseMappingHostFailedAfterIssue));
+      WMTSparseMappingResult result = {};
+      require(plan->Wait(10000, result) &&
+              result.state == WMTSparseMappingGPUComplete &&
+              result.possibly_issued_calls == 1 && !result.event_value &&
+              target->IsTileMapped(0) && target->IsTileMapped(1) &&
+              target->IsTileMapped(2));
+      verify("credential partial prefix", {0, values[1], values[2]});
+      require(plan->Retire(result));
+      plan.reset();
+      std::cout << "TEXTURE_CREDENTIAL_RESULT gpu_readbacks=5 callbacks=5 "
+                   "partial_prefix=1 PASS\n";
+      // Failed batches leave a native prefix with unpublished logical state.
+      // Discard these resources; no normal submission follows this diagnostic.
+    }
     return 0;
   }
   D3D12_TILED_RESOURCE_COORDINATE src = {}, dst = {};
@@ -999,7 +1309,8 @@ int main(int argc, char **argv) {
     return 2;
   const char *arg = argc == 2 ? argv[1] : "";
   const auto is = [&](const char *name) { return std::strcmp(arg, name) == 0; };
-  const bool intent = is("--intent") || is("--bad-intent");
+  const bool credential = is("--credential") || is("--bad-credential");
+  const bool intent = is("--intent") || is("--bad-intent") || credential;
   if (intent)
     std::setvbuf(stdout, nullptr, _IONBF, 0);
   const bool rgba8 = is("--rgba8") || is("--bad-rgba8");
@@ -1046,7 +1357,8 @@ int main(int argc, char **argv) {
                cross_queue, reverse_queue, early_work, format, bad_edge,
                bad_position, multi_heap, retirement,
                is("--bad-handoff-retirement"), is("--bad-handoff-shader"),
-               intent, is("--bad-intent"));
+               intent, is("--bad-intent") || is("--bad-credential"),
+               credential);
   } catch (const std::exception &e) {
     std::cerr << e.what() << "\n";
     return 1;

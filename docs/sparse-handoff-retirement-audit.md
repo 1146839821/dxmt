@@ -2035,3 +2035,189 @@ DoD: genuine texture-owned native callbacks/retirement and negative controls,
 matched identity/build portability, unchanged capability declarations and a
 separate local commit. That later slice requires its own bounded Gate0/1 review;
 this delivery stops here.
+
+## Texture Native Completion — N15 Design Card, 2026-11-05
+
+Goal: replace the texture probe's unrelated buffer observer with texture-owned
+native batch completion and COM retirement. Baseline b1b622da, original
+.gitignore preserved; preceding turn is verified progress. Evidence: current
+WMTSparseMappingCompletion already owns buffer issue/seal/terminal/wait/retire,
+but accepts buffer operations only; Metal SDK MTL4CommandQueue.h requires
+ResourceState ordering and compatible placement page sizes for texture mappings.
+Mullion93de32b Map593–625 retains ordered mapping work, without a portable DXMT
+credential. Microsoft CopyTileMappings overlap requires temporary-source semantics.
+
+Scope/architecture: extend that same native owner via an additive texture input
+entry, preserving buffer input/result ABI and ordinals; extend the existing
+texture intent's controlled execution/retirement, not public queue routing.
+Required existing files span bridge declaration/thunk/native table/wrapper,
+texture owner/internal interface and existing overlap probe; this is one shared
+completion mechanism, not independent queue/resource rewrites. No new subsystem.
+Prepare validates/copies/retains native inputs; resolve current source and old
+target COM heaps before issue; native terminal prepared before first operation;
+publish logical state only on full acceptance; retain issued prefixes until
+actual completion. Packed/self-overlap use existing saved mapping semantics.
+Public synchronous wrappers stay on their existing path with no native batch
+allocation. No capability promotion, Metal3 replacement or common-owner migration.
+
+Test plan: two-seed full native readback with real texture batches, absent private
+signal/delayed callback, partial issue/reject/abandon, caller-array/public-reference
+release and sentinel retirement; invalid/prepare/terminal failures, buffer and
+legacy texture adjacent controls, x64 build and i686 compile. Compare ordinary
+public wrapper overhead only if those paths change materially. Controlled batch
+cost is one owned native array/event/lock plus optional terminal, proportional
+to operation count; no per-draw work. Risks: partial native prefixes, callback
+ownership, packed operation count and object destruction order. Rollback: one
+focused revert. DoD: actual texture-native completion/retirement evidence with
+matched PE/Unix identity, failure controls, unchanged public capabilities and
+local commit without push. Remaining mixed-owner cycle/consumer backing lifetime
+stay OPEN; stop if implementation requires a new issue scheduler.
+
+## Texture Native Completion — Delivery, 2026-11-05
+
+### Task Summary / Baseline Evidence / Gate Results
+
+The active goal continuation authorizes the preceding single N15 card. Gate0/1
+source/specification/design review, Gate2 implementation, Gate3 bounded validation
+and Gate4 scope/identity/error-path review are complete for controlled texture
+batch completion and retirement. Baseline feat/d3d12 b1b622da7d9d3fbddb96b037801110da335114bc,
+cached origin ahead17/behind0 before commit; the remote target ref was not fetched.
+Actual host remains Apple M1 Max, macOS27.2(26B123), Xcode27.2(27B52), Wine11.0.
+Real placement sparse and Metal4 predicates are required. SDK API4.0.3 is distinct
+from the runtime product version, which is not dynamically queried.
+
+E23 = ../dxmt-test/n95-capability-gate/result-sparse-texture-credential-20261105.
+Sources/commands/raw logs are retained externally; sources.json records fresh
+official Update/CopyTileMappings pages and pinned Mullion source. Fresh ls-remote
+confirms Mullion HEAD/main93de32b9145885ceb2e45be7d445e56d62499b3c. Its Map593–625
+common ordered owner is a reference, not a transplanted scheduler. SPEC_REQUIRED:
+CopyTileMappings overlaps use saved-source semantics. APPLE_SDK_SOURCE: installed
+MTL4CommandQueue.h:92,109–159,261–275,349–415 defines texture region/tail units,
+ResourceState ordering, event completion and compatible page size. No new hardware
+denial is inferred; M1 Max placement sparse remains available. Windows native
+and Mullion runtime observations are NOT_RUN.
+
+### Findings / Design Decisions / Changed Files
+
+The prior texture test used an unrelated buffer unmap only to observe completion.
+The new controlled texture path instead owns its actual native texture/heap
+operations in the existing WMTSparseMappingCompletion. No public mapping entry
+is redirected and no queue scheduler or second logical tile map is introduced.
+
+- src/winemetal/winemetal.h:2534–2569 adds144-byte texture batch input and one
+  prepare entry. Existing64-byte buffer input,32-byte result and states remain
+  unchanged; caller still validates device/bounds/page compatibility/residency.
+  Unsafe direct native self-copy is rejected; saved update mappings implement
+  D3D12 self-overlap semantics at the texture owner.
+- src/winemetal/winemetal_thunks.h:65 and winemetal_thunks.c:1650–1663 append
+  Unix ordinal209 using the existing32-byte prepare envelope; prior ordinals
+  remain fixed. Metal.hpp:949–952 exposes the same owned completion wrapper.
+  Native and WOW64 tables both append the new entry. This additive internal
+  bridge extension requires paired binaries; arbitrary old/new pairing is not
+  supported or tested.
+- src/winemetal/unix/winemetal_unix.c:4394–4404,4506–4598,4674–4686,4815–4826
+  validates/copies texture operations and retains native inputs in the same
+  owner. A union holds buffer/texture operation storage rather than allocating
+  separate owners. Existing prepareTerminal/seal/wait/retire/dealloc semantics
+  provide actual feedback, accepted/rejected/partial outcomes and issued-prefix
+  drain. All terminal objects are prepared before issue; no new callback owner
+  or destructor quarantine is added.
+- src/d3d12/d3d12_device.hpp:405–427 extends the existing opaque texture plan
+  with controlled PrepareNative/Issue/Finish/Wait/Retire. Preparation is a single
+  attempt at a serialized execution point; no subsequent remap may interleave
+  before issue/publication. A failed or partially issued batch must be drained
+  and discarded. The interface is not public queue activation.
+- src/d3d12/d3d12_texture.cpp:541–635,2225–2404 captures current old-target and
+  source/new/intermediate heap owners, prepares genuine native update/copy
+  batches, publishes only after full host acceptance and retires after native
+  completion. The completion member dies before private COM owners. Partial
+  prefixes do not publish logical success. Public legacy wrappers share the
+  existing publication helper and keep their synchronous native calls.
+- tests/dx12/dx12_reserved_texture_overlap.cpp:133–490,1007–1198 extends the
+  existing matched-build probe, including actual standard/packed texel copying,
+  old-target heap sentinel and prefix readback. No repository runner or new
+  fixture is added. This report and D3D12_RESOURCE_AUDIT_CHECKLIST.md record
+  completion and the remaining gate.
+
+### Validation Results
+
+| Check | Status / evidence and limits |
+| --- | --- |
+| Configured x64 release default build | LOCAL_PASS build-first/second/final/delivery logs, using the installed Metal toolchain and .github/build_dxmt.sh configuration. Subsequent probe fix compiles in build-offset-fixed.log. No shared install or AIR substitution. |
+| i686 texture, overlap probe and PE bridge | LOCAL_PASS portability.json plus delivery-portability.json; compile-only, full32-bit link/runtime NOT_RUN. Static ABI size/offset checks pass on x64/i686; both native table length assertions compile. |
+| Two final changing seeds | LOCAL_PASS delivery-credential-0x77321abc/0x11223344. Each has5 full49152-DWORD readbacks, standard49152-word and packed4096-word texel readbacks, and11 actual successful native terminal callbacks. |
+| Ownership / real completion | LOCAL_PASS standard/packed each releases public resource/heap refs before execution. Three object sentinels and a distinct overwritten-target heap remain alive until completion/retirement. Native callback reporting is delayed200ms and private event signal omitted: pending retirement rejects, later callback authorizes retirement with event_value0. |
+| Partial native prefix | LOCAL_PASS one of3 NULL operations issues; full acceptance rejects, FailedAfterIssue completes with calls1/event0. Full readback is0/B/C while logical state stays mapped. Deliberately inconsistent diagnostic resources are discarded; this is not recovery or public success. |
+| Wrong-word oracle | LOCAL_PASS expected exit1; delivery-credential-negative detects tile1 word16383 after successful ownership texel checks. Negative full-tile readback is excluded from success counts. |
+| Reject / issued abandonment / partial ownership | LOCAL_PASS delivery-credential-reject/partial/abandon. Rejected work has zero calls; unsealed final release drains actual terminal feedback; all3 sentinel objects are destroyed after safe release. |
+| Preparation / terminal failure | LOCAL_PASS event/operations allocation and6 terminal preparation failures(buffer/allocator/marker/residency/options/encoder). No native mapping calls or logical publication, no output completion on prepare failure. |
+| Input ABI negative checks | LOCAL_PASS7 rejected null/missing/invalid/overflow/self-copy inputs before issue. Caller-owned D3D12 resource bounds remain a separate contract, not an inferred bridge capability. |
+| Legacy texture paths | LOCAL_PASS intent, cross-queue, multiheap, packed mapping/copy/alias/NULL, update prepare/allocation and copy snapshot/submitted failures. No capability report or public queue routing change. |
+| Existing buffer completion | LOCAL_PASS mapping-normal, mapping-terminal-delay and mapping-terminal-partial;7 actual buffer readbacks each,21 total. Buffer result/input ABI and no-private-event terminal behavior remain exercised. |
+| Validation / identity | LOCAL_PASS all37 final functional/cost processes enable API/GPU validation and show no validation/device fault. Loaded PE paths/export bytes and native Unix UUID E683A9A6-6E7A-367D-8B6D-3ACB5D4BA01F verified; MSC path/hash recorded. |
+| Formatting / diff review | PASS scoped clang-format and git diff --check. No vendored dependency/source changes outside this mechanism. |
+| Windows / other devices / full32-bit runtime | NOT_RUN. No unsupported platform result is presented as PASS. |
+
+E23/audit.json separates25 final functional processes and12 cost processes from
+the earlier matrix/exploratory runs. Final functional evidence counts25 full
+tile readbacks(1,228,800 DWORDs),6 texel readbacks(159,744 DWORDs, including two
+successful reads before the expected wrong-word failure),21 buffer readbacks
+(688,128 DWORDs). Across the37 final processes49 successful real native callback
+reports are observed. Packed shader/cost readbacks and failed negative tile reads
+are not included in these totals.
+
+An added old-target test initially omitted required heap offsets; the existing
+validation correctly returned E_INVALIDARG before issue. The test input was
+fixed and the full final matrix rerun. Failed-offset logs are preserved and are
+not a native GPU failure. Initial pre-texel and pre-final-binary results remain
+separate evidence; final manifests identify exact build/stage bytes.
+
+### Cost / Regression Risks / Capability Impact
+
+Compiler layout: transient x64 texture intent232 bytes versus168 before this
+slice; native operation storage136 bytes, shared between buffer/texture kinds
+through a union. Controlled preparation adds bounded owner/event/array storage
+and private old/source/new heap captures proportional to tile count; no per-draw
+work. Public wrappers add no native completion object, lock or heap scan, but
+their stack intent is64 bytes larger. Residency/COM/native ownership remain
+separate responsibilities.
+
+Final ABBA comparison uses same packed probe/DXIL/MSC and build-paired WineMetal
+for each variant; baseline/candidate bridge bytes differ. Each mode has2
+processes/build,16 warm samples/build,64 calls/sample, sample0 discarded;
+validation enabled. Microseconds/call, median/P95/range:
+
+| Mode | Baseline | Candidate |
+| --- | --- | --- |
+| update |1191.745 /1225.560 /1070.680–1225.560 |1208.035 /1249.600 /1130.030–1249.600 |
+| copy |1196.620 /1318.700 /1170.050–1318.700 |1211.360 /1281.390 /1137.790–1281.390 |
+| self-copy |1224.485 /1244.970 /1133.930–1244.970 |1201.235 /1267.090 /1136.290–1267.090 |
+
+Changes+1.37%/+1.23%/-1.90% overlap: INCONCLUSIVE. Host admission timing includes
+backpressure, not pure CPU intent cost or GPU speed; no no-regression/speedup
+claim. Production performance acceptance remains OPEN.
+
+No FL/SM/Tier or feature exposure changes. Metal3 shadow backing, public Reserved
+Resource path and D3D11 architecture remain. Missing hardware is not the blocker
+on this M1 Max. Remaining BACKEND_NOT_IMPLEMENTED: one common issue owner across
+public legacy and controlled buffer/texture work; general consumer backing heap
+lifetime and production routing. Earlier E21 mixed-queue circular-dependency red
+evidence remains OPEN. MSC_SEMANTIC_GAP is not resolved by native texture lifetime.
+SPEC_UNVERIFIED and TARGET_DEVICE_NOT_AVAILABLE apply only to the separate
+unverified contracts/platform matrix, not this device's placement sparse support.
+
+### Git State / Next Recommended Slice
+
+One focused local commit, no push; user's original unstaged .gitignore hash
+764aac09922db4654ca6de63fd20cf014739d9292623eb979f448f38e609b759 is preserved.
+Final HEAD, staged/unstaged/untracked state, source/artifact hashes and audit
+identity are recorded in E23/delivery-manifest.json. No new repository files.
+
+Next single slice: common buffer/texture native issue ordering audit and concrete
+Design Card against the existing Submission FIFO. Include all eager native
+wait/map/signal entry points, deferred errors/partial-prefix cleanup, capacity
+wait admission and live descriptor/consumer lifetime. Reuse the E21 different-
+resource mixed-cycle diagnostic and final pure-controlled controls to prove
+the intended schedule before public routing changes. Do not partially activate
+only buffers or introduce a second scheduler. This delivery does not implement
+that independent queue migration, and the overall goal remains active.

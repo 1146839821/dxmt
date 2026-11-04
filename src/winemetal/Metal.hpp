@@ -946,6 +946,11 @@ public:
     return Reference<SparseMappingCompletion>(SparseMappingQueue_prepareBufferBatch(handle, operations, count));
   }
 
+  Reference<SparseMappingCompletion>
+  prepareTextureBatch(const WMTSparseTextureBatchOperation *operations, uint64_t count) {
+    return Reference<SparseMappingCompletion>(SparseMappingQueue_prepareTextureBatch(handle, operations, count));
+  }
+
   Reference<SparseBarrierCompletion>
   prepareBarrierBeforeResourceState() {
     return Reference<SparseBarrierCompletion>(SparseMappingQueue_prepareBarrierBeforeResourceState(handle));

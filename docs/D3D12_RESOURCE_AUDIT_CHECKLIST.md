@@ -86,11 +86,17 @@ and does not justify another unchanged local MS_LOAD or Submit timing matrix.
   source mappings at explicit serialized execution. Public wrappers remain
   synchronous. Two final seeds pass four full native tile readbacks each;
   standard/packed ownership, wrong-word, OOM and legacy failure controls pass.
-  Public activation and the mixed-owner cycle remain OPEN. Next prerequisite:
-  a texture-specific native terminal/retirement credential before one common
-  native issue owner and backing-lifetime validation. No hardware blocker or
-  Tier/FL promotion is inferred. See the
+  Public activation and the mixed-owner cycle remain OPEN. No hardware blocker
+  or Tier/FL promotion is inferred. The
   [texture intent delivery](sparse-handoff-retirement-audit.md#controlled-texture-owned-mapping-intent--delivery-2026-11-05)
+  now has a texture-native completion/retirement path through the same existing
+  native batch owner: real callbacks, issued-prefix drain, old/new heap ownership
+  and standard/packed texel data pass. Buffer input/result ABI remains intact;
+  the additive texture entry requires matched PE/Unix binaries. Final 37-process
+  evidence includes 25 full tile, 6 texel and 21 buffer readbacks. Public activation
+  and mixed eager/deferred native issue remain OPEN; the next gate is a common
+  buffer/texture native issue ordering design, not partial public activation.
+  See [native completion delivery](sparse-handoff-retirement-audit.md#texture-native-completion--delivery-2026-11-05)
   and the preceding
   [consumer audit and Design Card](sparse-handoff-retirement-audit.md#public-buffer-plan-activation-consumers--n15-audit-2026-11-05).
 

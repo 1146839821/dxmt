@@ -62,6 +62,7 @@ enum winemetal_unixcall {
   unix_sparsemappingcompletion_wait,
   unix_sparsemappingcompletion_retireinputs,
   unix_sparsemappingcompletion_prepareterminal,
+  unix_sparsemappingqueue_preparetexturebatch,
 };
 
 struct unixcall_sparsemappingcompletion_prepare {
