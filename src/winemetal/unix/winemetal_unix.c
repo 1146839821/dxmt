@@ -4182,6 +4182,7 @@ sparse_buffer_update_failure_for_testing(void) {
     return NULL;
   static atomic_uint_fast64_t calls = 0;
   uint64_t call = atomic_fetch_add_explicit(&calls, 1, memory_order_relaxed) + 1;
+  fprintf(stderr, "DXMT_TEST_SPARSE_BUFFER_UPDATE observed_call=%llu\n", (unsigned long long)call);
   if (call != target)
     return NULL;
   fprintf(stderr, "DXMT_TEST_SPARSE_BUFFER_UPDATE_FAILURE phase=%s call=%llu\n", phase, (unsigned long long)call);
@@ -4200,8 +4201,23 @@ _SparseMappingQueue_updateBufferMappings(void *obj) {
         failure && !strcmp(failure, "allocation")
             ? NULL
             : copy_sparse_buffer_mapping_operations(params->operations.ptr, params->count);
-    if (!operations)
+    if (!operations) {
+      // A self-copy probe may have already issued earlier tiles. Drain those
+      // before the injected allocation failure triggers terminal cleanup.
+      if (failure) {
+        id<MTL4CommandQueue> queue = (id<MTL4CommandQueue>)params->queue;
+        id<MTLSharedEvent> completion = [[queue device] newSharedEvent];
+        if (!completion)
+          abort();
+        [queue signalEvent:completion value:1];
+        BOOL completed = [completion waitUntilSignaledValue:1 timeoutMS:30000];
+        [completion release];
+        if (!completed)
+          abort();
+        fprintf(stderr, "DXMT_TEST_SPARSE_BUFFER_UPDATE prior_completed=1\n");
+      }
       return STATUS_UNSUCCESSFUL;
+    }
     // A submitted-failure probe must keep its resources alive until mapping
     // completion, even though device removal prevents a later public Signal.
     id<MTL4CommandQueue> queue = (id<MTL4CommandQueue>)params->queue;

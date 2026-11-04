@@ -93,7 +93,7 @@ void CreateBuffer(ID3D12Device *device, Owned<ID3D12Resource> &resource,
 }
 
 int Run(bool bad_oracle, bool cross_resource, bool bad_cross, bool cross_queue,
-        bool reverse_queue, bool early_work) {
+        bool reverse_queue, bool early_work, bool multiheap, bool perf) {
   Owned<ID3D12Device> device;
   Check("device", D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
                                     IID_PPV_ARGS(&device.ptr)));
@@ -132,8 +132,11 @@ int Run(bool bad_oracle, bool cross_resource, bool bad_cross, bool cross_queue,
   hd.SizeInBytes = 3ull * kTileBytes;
   hd.Properties = Properties(D3D12_HEAP_TYPE_DEFAULT);
   hd.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS;
-  Owned<ID3D12Heap> heap;
+  Owned<ID3D12Heap> heap, second_heap;
   Check("heap", device->CreateHeap(&hd, IID_PPV_ARGS(&heap.ptr)));
+  if (multiheap)
+    Check("second heap",
+          device->CreateHeap(&hd, IID_PPV_ARGS(&second_heap.ptr)));
   Owned<ID3D12Resource> upload, readback;
   CreateBuffer(device.ptr, upload, 3ull * kTileBytes, D3D12_HEAP_TYPE_UPLOAD,
                D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
@@ -146,7 +149,7 @@ int Run(bool bad_oracle, bool cross_resource, bool bad_cross, bool cross_queue,
   const std::array<UINT, 3> values{0x11112222, 0x33334444, 0x55556666};
   for (UINT i = 0; i < 3; i++)
     for (UINT j = 0; j < kTileBytes / 4; j++)
-      data[i * (kTileBytes / 4) + j] = values[i];
+      data[i * (kTileBytes / 4) + j] = values[i] ^ j;
   upload->Unmap(0, nullptr);
   D3D12_TILED_RESOURCE_COORDINATE zero = {};
   D3D12_TILE_REGION_SIZE all = {};
@@ -155,6 +158,15 @@ int Run(bool bad_oracle, bool cross_resource, bool bad_cross, bool cross_queue,
   auto map_all = [&] {
     queue->UpdateTileMappings(texture.ptr, 1, &zero, &all, heap.ptr, 1, nullptr,
                               &offset, nullptr, D3D12_TILE_MAPPING_FLAG_NONE);
+    if (multiheap) {
+      auto middle = zero;
+      middle.X = 1;
+      D3D12_TILE_REGION_SIZE single = {};
+      single.NumTiles = 1;
+      queue->UpdateTileMappings(texture.ptr, 1, &middle, &single,
+                                second_heap.ptr, 1, nullptr, &offset, nullptr,
+                                D3D12_TILE_MAPPING_FLAG_NONE);
+    }
   };
   UINT64 serial = 0;
   auto execute = [&](bool write) {
@@ -202,11 +214,20 @@ int Run(bool bad_oracle, bool cross_resource, bool bad_cross, bool cross_queue,
       UINT actual = data[i * (kTileBytes / 4)];
       std::cout << name << " tile " << i << " actual=0x" << std::hex << actual
                 << " expected=0x" << expected[i] << std::dec << "\n";
-      ok &= actual == expected[i];
+      for (UINT word = 0; word < kTileBytes / 4; ++word) {
+        const UINT wanted = expected[i] ? expected[i] ^ word : 0;
+        const UINT got = data[i * (kTileBytes / 4) + word];
+        if (got != wanted && ok)
+          std::cerr << name << " tile=" << i << " word=" << word
+                    << " actual=" << got << " expected=" << wanted << "\n";
+        ok &= got == wanted;
+      }
     }
     readback->Unmap(0, nullptr);
     if (!ok)
       throw std::runtime_error(name);
+    std::cout << "OVERLAP_FULL_READBACK " << name
+              << " words=" << 3 * kTileBytes / 4 << "\n";
   };
   map_all();
   execute(true);
@@ -214,6 +235,32 @@ int Run(bool bad_oracle, bool cross_resource, bool bad_cross, bool cross_queue,
   D3D12_TILE_REGION_SIZE pair = {};
   pair.NumTiles = 2;
   dst.X = 1;
+  if (perf) {
+    LARGE_INTEGER frequency;
+    if (!QueryPerformanceFrequency(&frequency))
+      throw std::runtime_error("timer frequency");
+    for (UINT sample = 0; sample < 9; ++sample) {
+      LARGE_INTEGER begin, end;
+      if (!QueryPerformanceCounter(&begin))
+        throw std::runtime_error("timer start");
+      for (UINT call = 0; call < 64; ++call)
+        queue->CopyTileMappings(texture.ptr, &dst, texture.ptr, &src, &pair,
+                                D3D12_TILE_MAPPING_FLAG_NONE);
+      if (!QueryPerformanceCounter(&end))
+        throw std::runtime_error("timer stop");
+      // Keep completion outside the API batch timer. Queue backpressure inside
+      // CopyTileMappings is still included; this is not pure CPU/GPU timing.
+      Check("performance signal", queue->Signal(fence.ptr, ++serial));
+      Wait(fence.ptr, serial);
+      Check("performance device status", device->GetDeviceRemovedReason());
+      std::cout << "SELF_COPY_TIMING sample=" << sample << " calls=64 api_us="
+                << double(end.QuadPart - begin.QuadPart) * 1000000.0 /
+                       frequency.QuadPart / 64
+                << "\n";
+    }
+    verify("performance-final", {values[0], values[0], values[0]});
+    return 0;
+  }
   queue->CopyTileMappings(texture.ptr, &dst, texture.ptr, &src, &pair,
                           D3D12_TILE_MAPPING_FLAG_NONE);
   verify("forward", {values[0], bad_oracle ? values[1] : values[0], values[1]});
@@ -320,6 +367,8 @@ int Run(bool bad_oracle, bool cross_resource, bool bad_cross, bool cross_queue,
 }
 } // namespace
 int main(int argc, char **argv) {
+  bool multiheap = argc == 2 && std::strcmp(argv[1], "--multiheap") == 0;
+  bool perf = argc == 2 && std::strcmp(argv[1], "--perf-self-copy") == 0;
   bool bad = argc == 2 && std::strcmp(argv[1], "--bad-oracle") == 0;
   bool cross = argc == 2 && std::strcmp(argv[1], "--cross-resource") == 0;
   bool bad_cross = argc == 2 && std::strcmp(argv[1], "--bad-cross-oracle") == 0;
@@ -337,11 +386,12 @@ int main(int argc, char **argv) {
   bool early_work =
       argc == 2 && (std::strcmp(argv[1], "--early-work") == 0 ||
                     std::strcmp(argv[1], "--bad-early-work") == 0);
-  if (argc > 2 || (argc == 2 && !bad && !cross && !bad_cross && !cross_queue))
+  if (argc > 2 || (argc == 2 && !bad && !cross && !bad_cross && !cross_queue &&
+                   !multiheap && !perf))
     return 2;
   try {
     return Run(bad, cross || bad_cross || cross_queue, bad_cross || bad_queue,
-               cross_queue, reverse_queue, early_work);
+               cross_queue, reverse_queue, early_work, multiheap, perf);
   } catch (const std::exception &e) {
     std::cerr << e.what() << "\n";
     return 1;

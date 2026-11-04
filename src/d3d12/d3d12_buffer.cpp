@@ -726,28 +726,27 @@ public:
           ))
         return DXGI_ERROR_DEVICE_REMOVED;
     }
+    if (sparse_mapping_queue && source == this) {
+      // Metal's sequential mapping copies can overwrite a later source.
+      // Apply the saved mappings so overlapping copies use a snapshot.
+      for (UINT tile = 0; tile < tile_count; ++tile) {
+        const auto &saved = copied[tile];
+        WMTUpdateSparseBufferMappingOperation update = {};
+        update.mode = saved.heap ? WMTSparseTextureMappingModeMap : WMTSparseTextureMappingModeUnmap;
+        update.buffer_range.location = dst_coordinate.X + tile;
+        update.buffer_range.length = 1;
+        update.heap_offset = saved.heap_tile;
+        if (!sparse_mapping_queue.tryUpdateBufferMappings(
+                buffer->current()->buffer(), saved.heap ? saved.heap->GetMetalHeap() : WMT::Heap{}, &update, 1
+            ))
+          return DXGI_ERROR_DEVICE_REMOVED;
+      }
+    }
+    // Publish only after all native operations succeed. A failure after an
+    // earlier tile was issued is terminal; do not continue or attempt rollback.
     {
       std::unique_lock<dxmt::mutex> destination_lock(tile_mapping_mutex_);
       std::copy(copied.begin(), copied.end(), tile_mappings_.begin() + dst_coordinate.X);
-    }
-
-    if (sparse_mapping_queue) {
-      if (source == this) {
-        // Metal's sequential mapping copies can overwrite a later source.
-        // Apply the saved mappings so overlapping copies use a snapshot.
-        for (UINT tile = 0; tile < tile_count; ++tile) {
-          const auto &saved = copied[tile];
-          WMTUpdateSparseBufferMappingOperation update = {};
-          update.mode = saved.heap ? WMTSparseTextureMappingModeMap : WMTSparseTextureMappingModeUnmap;
-          update.buffer_range.location = dst_coordinate.X + tile;
-          update.buffer_range.length = 1;
-          update.heap_offset = saved.heap_tile;
-          sparse_mapping_queue.updateBufferMappings(
-              buffer->current()->buffer(), saved.heap ? saved.heap->GetMetalHeap() : WMT::Heap{}, &update, 1
-          );
-        }
-        return S_OK;
-      }
     }
     return S_OK;
   } catch (const std::bad_alloc &) {
