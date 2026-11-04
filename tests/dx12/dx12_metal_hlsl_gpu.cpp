@@ -233,6 +233,8 @@ int main(int argc, char **argv) {
                                    std::strcmp(argv[3], "--gpu7") == 0 ||
                                    std::strcmp(argv[3], "--both-spaces") == 0 ||
                                    std::strcmp(argv[3], "--both-spaces-wrong") == 0 ||
+                                   std::strcmp(argv[3], "--combined") == 0 ||
+                                   std::strcmp(argv[3], "--combined-wrong") == 0 ||
                                    std::strcmp(argv[3], "--gpu9") == 0)))
     return 2;
   auto module = GetModuleHandleA("winemetal.dll");
@@ -246,8 +248,9 @@ int main(int argc, char **argv) {
   for (unsigned i = 0; i < 16; ++i)
     std::cout << hex[code[i] >> 4] << hex[code[i] & 15];
   std::cout << "\n";
-  const bool wrong = argc == 4 && (!std::strcmp(argv[3], "--wrong") || !std::strcmp(argv[3], "--both-spaces-wrong"));
-  const bool both_spaces = argc == 4 && (!std::strcmp(argv[3], "--both-spaces") || !std::strcmp(argv[3], "--both-spaces-wrong"));
+  const bool combined = argc == 4 && (!std::strcmp(argv[3], "--combined") || !std::strcmp(argv[3], "--combined-wrong"));
+  const bool wrong = argc == 4 && (!std::strcmp(argv[3], "--wrong") || !std::strcmp(argv[3], "--both-spaces-wrong") || !std::strcmp(argv[3], "--combined-wrong"));
+  const bool both_spaces = combined || (argc == 4 && (!std::strcmp(argv[3], "--both-spaces") || !std::strcmp(argv[3], "--both-spaces-wrong")));
   const bool explicit_zero =
       argc == 4 && std::strcmp(argv[3], "--zero-flags") == 0;
   const bool legacy_zero =
@@ -288,6 +291,9 @@ int main(int argc, char **argv) {
       fc.reflection.function_constants[0].type != 32 ||
       std::strcmp(fc.reflection.function_constants[0].name, "MSC_FC_0") != 0)
     return 4;
+  if (combined && (!fetch.reflection.needs_function_constants || fetch.reflection.function_constant_count != 1 ||
+                   fetch.reflection.function_constants[0].index != 0 || fetch.reflection.function_constants[0].type != 32))
+    return 4;
   WMT::Error error;
   const char *native = R"(
 #include <metal_stdlib>
@@ -309,7 +315,13 @@ fragment float4 sample_main(float4 pos [[position]], texture2d<float, access::re
   auto vs = native_lib.newFunction("vertex_main");
   auto base = native_lib.newFunction("base_main");
   auto sample = native_lib.newFunction("sample_main");
-  auto fetch_ps = fetch_lib.newFunction(fetch.entry.c_str());
+  const float combined_value[4] = {0.25f, 0, 0, 0};
+  WMTFunctionConstant combined_constant{};
+  combined_constant.data.set(combined_value);
+  combined_constant.type = WMTDataTypeUInt4;
+  combined_constant.index = 0;
+  auto fetch_ps = combined ? fetch_lib.newFunctionWithConstants(fetch.entry.c_str(), &combined_constant, 1, error)
+                           : fetch_lib.newFunction(fetch.entry.c_str());
   if (!vs || !base || !sample || !fetch_ps)
     return 7;
   auto base_pso = pipeline(device, vs, base);
@@ -332,12 +344,23 @@ fragment float4 sample_main(float4 pos [[position]], texture2d<float, access::re
       return 9;
     }
     auto pso = pipeline(device, vs, function);
-    if (!pso || !draw(device, queue, {}, pso, expected[i], wrong && i == 0))
+    if (!pso || !draw(device, queue, {}, pso, expected[i], wrong && !combined && i == 0))
       return 10;
   }
   const uint8_t fetch_expected[4] = {64, 64, 0, 128};
-  if (!draw(device, queue, base_pso, fetch_pso, fetch_expected, false))
-    return 11;
+  if (!draw(device, queue, base_pso, fetch_pso, fetch_expected, combined && wrong))
+    return combined && wrong ? 10 : 11;
+  if (combined) {
+    const float second_value[4] = {0, 0.25f, 0, 0};
+    const uint8_t second_expected[4] = {0, 128, 0, 128};
+    combined_constant.data.set(second_value);
+    auto second_function = fetch_lib.newFunctionWithConstants(fetch.entry.c_str(), &combined_constant, 1, error);
+    if (!second_function)
+      return 9;
+    auto second_pso = pipeline(device, vs, second_function);
+    if (!second_pso || !draw(device, queue, base_pso, second_pso, second_expected, false))
+      return 11;
+  }
   if (!draw_two_pass(device, queue, base_pso, sample_pso))
     return 12;
   if (gpu_family || (argc == 4 && std::strcmp(argv[3], "--benchmark") == 0)) {

@@ -23,17 +23,21 @@ def main():
     parser.add_argument('--trace-config', action='store_true', help='trace real compatibility flags through a forwarding dylib')
     parser.add_argument('--trace-dxil-validation', action='store_true', help='enable DXIL validation through a test wrapper')
     parser.add_argument('--both-spaces', action='store_true', help='enable both distinct extension spaces')
+    parser.add_argument('--combined', action='store_true', help='use one shader containing both extensions')
     args = parser.parse_args()
     if args.trace_config and args.trace_dxil_validation:
         parser.error('trace options are mutually exclusive')
+    if args.combined and args.both_spaces:
+        parser.error('--combined and --both-spaces are separate modes')
     if not 1 <= args.repeats <= 20:
         parser.error('--repeats must be in 1..20')
     stage, prefix, build, converter = (getattr(args, name).resolve(strict=True)
                                         for name in ('stage', 'prefix', 'build', 'converter'))
     pairs = [('src/winemetal/winemetal.dll', 'winemetal.dll'),
              ('src/winemetal/unix/winemetal.so', 'wine/lib/wine/x86_64-unix/winemetal.so')]
+    fragment = 'metal_hlsl_combined.ps.cso' if args.combined else 'metal_hlsl_framebuffer.ps.cso'
     pairs += [('tests/dx12/' + name, name) for name in
-              ('dx12_metal_hlsl_gpu.exe', 'metal_hlsl_constants.ps.cso', 'metal_hlsl_framebuffer.ps.cso')]
+              ('dx12_metal_hlsl_gpu.exe', 'metal_hlsl_constants.ps.cso', fragment)]
     for source, target in pairs:
         if (build / source).read_bytes() != (stage / target).read_bytes():
             raise SystemExit('stage/build mismatch: ' + target)
@@ -57,12 +61,13 @@ def main():
     if args.trace_dxil_validation:
         env['DXMT_TEST_VALIDATION_MODE'] = 'dxil'
     command = [str(stage / 'wine/bin/wine'), 'dx12_metal_hlsl_gpu.exe',
-               'metal_hlsl_constants.ps.cso', 'metal_hlsl_framebuffer.ps.cso']
+               'metal_hlsl_constants.ps.cso', fragment]
     results = []
     cases = []
-    if args.both_spaces:
-        cases = [(f'positive-{i}', ['--both-spaces'], 0) for i in range(args.repeats)]
-        cases += [('wrong-oracle', ['--both-spaces-wrong'], 10)]
+    if args.both_spaces or args.combined:
+        option = '--combined' if args.combined else '--both-spaces'
+        cases = [(f'positive-{i}', [option], 0) for i in range(args.repeats)]
+        cases += [('wrong-oracle', [option + '-wrong'], 10)]
     else:
         for i in range(args.repeats):
             cases += [(f'positive-{i}', [], 0), (f'explicit-zero-{i}', ['--zero-flags'], 0),
@@ -84,6 +89,8 @@ def main():
             checks += ['PIXEL 0,255,0,255' in log, 'PIXEL 64,64,0,128' in log,
                        'MULTIPASS_PIXEL 64,64,0,128' in log,
                        'Metal HLSL function constants and framebuffer fetch GPU passed' in log]
+            if args.combined:
+                checks += ['PIXEL 0,128,0,128' in log]
         if args.trace_config:
             flags = re.findall(r'^DXMT_TEST_COMPATIBILITY_FLAGS (\d+)\s*$', log, re.M)
             checks += [str(wrapper) in log, len(flags) == 4,
@@ -98,7 +105,7 @@ def main():
         results.append({'case': name, 'exit': result.returncode, 'timings': timings})
         print(name + ': passed', flush=True)
     summaries = {}
-    for case in (('positive',) if args.both_spaces else ('positive', 'explicit-zero', 'legacy-zero')):
+    for case in (('positive',) if args.both_spaces or args.combined else ('positive', 'explicit-zero', 'legacy-zero')):
         for stage_name in ('SIZING', 'OUTPUT'):
             for shader in ('constants', 'fetch'):
                 values = [float(value) for result in results if result['case'].startswith(case + '-')

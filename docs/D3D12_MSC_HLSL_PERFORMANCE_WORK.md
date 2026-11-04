@@ -308,7 +308,16 @@ the deliberately wrong oracle was rejected, with Metal API and GPU validation
 enabled. The runner verifies the staged bridge and fixtures against the build
 and records loaded runtime paths. Evidence is in
 `result-msc-both-spaces-20261104/` outside the repository. The two extensions
-were exercised by separate shaders; a single shader using both is not covered.
+were exercised by separate shaders; that run did not cover a single shader using both.
+
+A subsequent combined fixture uses both features in the same fragment shader,
+with distinct spaces. Reflection identified its function constant; two
+specializations read the same framebuffer and produced the expected distinct
+pixels in two isolated Wine processes. A deliberately wrong expected pixel was
+rejected, with Metal API/GPU validation enabled. Existing separate-shader
+controls also passed. Evidence is in `result-msc-combined-two-values-20261104/`
+and `result-msc-combined-normal-20261104/` outside the repository. This is a
+test-only hybrid path, not production D3D12 exposure or PSO-cache validation.
 
 The root-validation comparison now includes `ValidateDXIL`, alongside unset,
 zero and bound-resource validation. Three processes per mode each compiled six

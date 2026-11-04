@@ -307,6 +307,12 @@ if dxc_command.length() > 0
     command: dxc_command + [ '-E', 'main', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
+  custom_target('dx12_metal_hlsl_combined_fixture',
+    input: 'metal_hlsl_combined.hlsl', output: 'metal_hlsl_combined.ps.cso',
+    depend_files: files('../../include/metal_shader_converter/Metal_HLSL.inc'),
+    command: dxc_command + [ '-E', 'main', '-T', 'ps_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
   custom_target('dx12_debug_validation_sm6_fixture',
     input: 'debug_validation_sm6.hlsl',
     output: 'debug_validation_sm6.ps.cso',
