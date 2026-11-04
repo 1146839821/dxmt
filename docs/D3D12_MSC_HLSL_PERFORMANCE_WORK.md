@@ -342,6 +342,19 @@ bridge/runtime checks are recorded under
 and output for one explicit signature; it does not independently inspect the
 special resources' descriptor locations or establish general collision safety.
 
+An additional combined fixture binds an ordinary four-dword root constant at
+`b0, space0` alongside the two distinct special spaces. The probe queries the
+bridge root layout, writes the reflected ordinary-constant location and uses
+it with both extensions in one explicitly rooted shader. Two Wine processes
+and a further verification run passed two specialized pixel values with Metal
+API/GPU validation. Wrong expected pixels and an intentionally wrong ordinary
+constant were separately rejected; the latter produced the expected pixel for
+the wrong bound value. Evidence is in
+`result-msc-combined-resource-final-20261104/` and
+`result-msc-combined-resource-verified-20261104/`. This uses a test-built Metal
+argument buffer and ordinary space0; it does not validate production D3D12
+descriptor heaps or ordinary resources sharing a special space.
+
 An offline MSC CLI reflection control compared the combined fixture with and
 without the embedded root table. Both reported zero ordinary used resources
 and the expected function constant. The no-root result had an empty top-level

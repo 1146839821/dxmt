@@ -27,26 +27,28 @@ def main():
     parser.add_argument('--combined', action='store_true', help='use one shader containing both extensions')
     parser.add_argument('--combined-root', action='store_true', help='use combined shader with embedded root signature')
     parser.add_argument('--combined-explicit-root', action='store_true', help='pass the root-containing DXIL as explicit root blob')
+    parser.add_argument('--combined-resource', action='store_true', help='also bind an ordinary root constant')
     args = parser.parse_args()
     if args.trace_config and args.trace_dxil_validation:
         parser.error('trace options are mutually exclusive')
-    if sum((args.combined, args.combined_root, args.combined_explicit_root, args.both_spaces)) > 1:
+    if sum((args.combined, args.combined_root, args.combined_explicit_root, args.combined_resource, args.both_spaces)) > 1:
         parser.error('combined, combined-root and both-spaces are separate modes')
-    combined = args.combined or args.combined_root or args.combined_explicit_root
+    combined = args.combined or args.combined_root or args.combined_explicit_root or args.combined_resource
     if not 1 <= args.repeats <= 20:
         parser.error('--repeats must be in 1..20')
     stage, prefix, build, converter = (getattr(args, name).resolve(strict=True)
                                         for name in ('stage', 'prefix', 'build', 'converter'))
     pairs = [('src/winemetal/winemetal.dll', 'winemetal.dll'),
              ('src/winemetal/unix/winemetal.so', 'wine/lib/wine/x86_64-unix/winemetal.so')]
-    fragment = ('metal_hlsl_combined_root.ps.cso' if args.combined_root or args.combined_explicit_root else
+    fragment = ('metal_hlsl_combined_resource.ps.cso' if args.combined_resource else
+                'metal_hlsl_combined_root.ps.cso' if args.combined_root or args.combined_explicit_root else
                 'metal_hlsl_combined.ps.cso' if args.combined else 'metal_hlsl_framebuffer.ps.cso')
     pairs += [('tests/dx12/' + name, name) for name in
               ('dx12_metal_hlsl_gpu.exe', 'metal_hlsl_constants.ps.cso', fragment)]
     for source, target in pairs:
         if (build / source).read_bytes() != (stage / target).read_bytes():
             raise SystemExit('stage/build mismatch: ' + target)
-    if args.combined_root or args.combined_explicit_root:
+    if args.combined_root or args.combined_explicit_root or args.combined_resource:
         data = (stage / fragment).read_bytes()
         if len(data) < 32 or data[:4] != b'DXBC':
             raise SystemExit('combined-root fixture is not a DXBC container')
@@ -80,9 +82,12 @@ def main():
     results = []
     cases = []
     if args.both_spaces or combined:
-        option = '--combined-explicit-root' if args.combined_explicit_root else '--combined' if combined else '--both-spaces'
+        option = ('--combined-resource' if args.combined_resource else
+                  '--combined-explicit-root' if args.combined_explicit_root else '--combined' if combined else '--both-spaces')
         cases = [(f'positive-{i}', [option], 0) for i in range(args.repeats)]
         cases += [('wrong-oracle', [option + '-wrong'], 10)]
+        if args.combined_resource:
+            cases += [('wrong-root', ['--combined-resource-wrong-root'], 10)]
     else:
         for i in range(args.repeats):
             cases += [(f'positive-{i}', [], 0), (f'explicit-zero-{i}', ['--zero-flags'], 0),
@@ -100,12 +105,14 @@ def main():
                   str(converter) in log, 'Metal API Validation Enabled' in log,
                   'Metal GPU Validation Enabled' in log, 'PIXEL 255,0,0,255' in log,
                   not re.search(r'(?i)metal (?:api|gpu|shader) validation (?:error|warning)|failed assertion', log)]
-        if name != 'wrong-oracle':
-            checks += ['PIXEL 0,255,0,255' in log, 'PIXEL 64,64,0,128' in log,
+        if name not in ('wrong-oracle', 'wrong-root'):
+            checks += ['PIXEL 0,255,0,255' in log, ('PIXEL 96,64,0,128' if args.combined_resource else 'PIXEL 64,64,0,128') in log,
                        'MULTIPASS_PIXEL 64,64,0,128' in log,
                        'Metal HLSL function constants and framebuffer fetch GPU passed' in log]
             if combined:
-                checks += ['PIXEL 0,128,0,128' in log]
+                checks += [('PIXEL 32,128,0,128' if args.combined_resource else 'PIXEL 0,128,0,128') in log]
+        if name == 'wrong-root':
+            checks += ['PIXEL 64,64,0,128' in log]
         if args.trace_config:
             flags = re.findall(r'^DXMT_TEST_COMPATIBILITY_FLAGS (\d+)\s*$', log, re.M)
             checks += [str(wrapper) in log, len(flags) == 4,

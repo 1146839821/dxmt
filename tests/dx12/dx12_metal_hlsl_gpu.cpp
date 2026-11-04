@@ -100,7 +100,8 @@ pipeline(WMT::Device device, WMT::Function vs, WMT::Function ps) {
 static bool draw(WMT::Device device, WMT::CommandQueue queue,
                  WMT::RenderPipelineState initial,
                  WMT::RenderPipelineState tested, const uint8_t expected[4],
-                 bool wrong, uint64_t *gpu_time = nullptr) {
+                 bool wrong, uint64_t *gpu_time = nullptr,
+                 const std::vector<uint8_t> *root_arguments = nullptr) {
   WMTTextureInfo texture_info{};
   texture_info.pixel_format = WMTPixelFormatRGBA8Unorm;
   texture_info.width = 4;
@@ -130,6 +131,8 @@ static bool draw(WMT::Device device, WMT::CommandQueue queue,
     encoder.drawPrimitives(WMTPrimitiveTypeTriangle, 0, 3);
   }
   encoder.setRenderPipelineState(tested);
+  if (root_arguments)
+    encoder.setFragmentBytes(root_arguments->data(), root_arguments->size(), DXMT_MSC_ARGUMENT_BUFFER_BIND_POINT);
   encoder.drawPrimitives(WMTPrimitiveTypeTriangle, 0, 3);
   encoder.endEncoding();
   command.commit();
@@ -242,6 +245,9 @@ int main(int argc, char **argv) {
                                    std::strcmp(argv[3], "--combined-wrong") == 0 ||
                                    std::strcmp(argv[3], "--combined-explicit-root") == 0 ||
                                    std::strcmp(argv[3], "--combined-explicit-root-wrong") == 0 ||
+                                   std::strcmp(argv[3], "--combined-resource") == 0 ||
+                                   std::strcmp(argv[3], "--combined-resource-wrong") == 0 ||
+                                   std::strcmp(argv[3], "--combined-resource-wrong-root") == 0 ||
                                    std::strcmp(argv[3], "--gpu9") == 0)))
     return 2;
   auto module = GetModuleHandleA("winemetal.dll");
@@ -255,9 +261,11 @@ int main(int argc, char **argv) {
   for (unsigned i = 0; i < 16; ++i)
     std::cout << hex[code[i] >> 4] << hex[code[i] & 15];
   std::cout << "\n";
-  const bool explicit_root = argc == 4 && (!std::strcmp(argv[3], "--combined-explicit-root") || !std::strcmp(argv[3], "--combined-explicit-root-wrong"));
+  const bool wrong_root = argc == 4 && !std::strcmp(argv[3], "--combined-resource-wrong-root");
+  const bool resource = wrong_root || (argc == 4 && (!std::strcmp(argv[3], "--combined-resource") || !std::strcmp(argv[3], "--combined-resource-wrong")));
+  const bool explicit_root = resource || (argc == 4 && (!std::strcmp(argv[3], "--combined-explicit-root") || !std::strcmp(argv[3], "--combined-explicit-root-wrong")));
   const bool combined = explicit_root || (argc == 4 && (!std::strcmp(argv[3], "--combined") || !std::strcmp(argv[3], "--combined-wrong")));
-  const bool wrong = argc == 4 && (!std::strcmp(argv[3], "--wrong") || !std::strcmp(argv[3], "--both-spaces-wrong") || !std::strcmp(argv[3], "--combined-wrong") || !std::strcmp(argv[3], "--combined-explicit-root-wrong"));
+  const bool wrong = argc == 4 && (!std::strcmp(argv[3], "--wrong") || !std::strcmp(argv[3], "--both-spaces-wrong") || !std::strcmp(argv[3], "--combined-wrong") || !std::strcmp(argv[3], "--combined-explicit-root-wrong") || !std::strcmp(argv[3], "--combined-resource-wrong"));
   const bool both_spaces = combined || (argc == 4 && (!std::strcmp(argv[3], "--both-spaces") || !std::strcmp(argv[3], "--both-spaces-wrong")));
   const bool explicit_zero =
       argc == 4 && std::strcmp(argv[3], "--zero-flags") == 0;
@@ -302,6 +310,35 @@ int main(int argc, char **argv) {
   if (combined && (!fetch.reflection.needs_function_constants || fetch.reflection.function_constant_count != 1 ||
                    fetch.reflection.function_constants[0].index != 0 || fetch.reflection.function_constants[0].type != 32))
     return 4;
+  std::vector<uint8_t> root_arguments;
+  if (resource) {
+    std::ifstream file(argv[2], std::ios::binary);
+    std::vector<char> root_blob((std::istreambuf_iterator<char>(file)), {});
+    dxmt_msc_get_root_layout_params layout{};
+    layout.root_signature = root_blob.data();
+    layout.root_signature_size = root_blob.size();
+    if (DXMTMSCGetRootSignatureLayout(&layout) != DXMT_MSC_SUCCESS || !layout.layout_count ||
+        layout.layout_count > 16 || layout.argument_buffer_size > 4096)
+      return 4;
+    std::vector<dxmt_msc_root_parameter_layout> entries(layout.layout_count);
+    layout.layouts = entries.data();
+    layout.layout_capacity = entries.size();
+    if (DXMTMSCGetRootSignatureLayout(&layout) != DXMT_MSC_SUCCESS)
+      return 4;
+    root_arguments.resize(layout.argument_buffer_size);
+    bool found = false;
+    for (const auto &entry : entries) {
+      if (entry.parameter_index == 0 && entry.resource_type == DXMT_MSC_RESOURCE_CONSTANT &&
+          entry.size_bytes == 16 && entry.top_level_offset <= root_arguments.size() &&
+          root_arguments.size() - entry.top_level_offset >= 16) {
+        const float ordinary[4] = {wrong_root ? 0.0f : 0.125f, 0, 0, 0};
+        std::memcpy(root_arguments.data() + entry.top_level_offset, ordinary, sizeof(ordinary));
+        found = true;
+      }
+    }
+    if (!found)
+      return 4;
+  }
   WMT::Error error;
   const char *native = R"(
 #include <metal_stdlib>
@@ -355,18 +392,20 @@ fragment float4 sample_main(float4 pos [[position]], texture2d<float, access::re
     if (!pso || !draw(device, queue, {}, pso, expected[i], wrong && !combined && i == 0))
       return 10;
   }
-  const uint8_t fetch_expected[4] = {64, 64, 0, 128};
-  if (!draw(device, queue, base_pso, fetch_pso, fetch_expected, combined && wrong))
-    return combined && wrong ? 10 : 11;
+  const uint8_t fetch_expected[4] = {uint8_t(resource ? 96 : 64), 64, 0, 128};
+  if (!draw(device, queue, base_pso, fetch_pso, fetch_expected, combined && wrong, nullptr,
+            resource ? &root_arguments : nullptr))
+    return (combined && wrong) || wrong_root ? 10 : 11;
   if (combined) {
     const float second_value[4] = {0, 0.25f, 0, 0};
-    const uint8_t second_expected[4] = {0, 128, 0, 128};
+    const uint8_t second_expected[4] = {uint8_t(resource ? 32 : 0), 128, 0, 128};
     combined_constant.data.set(second_value);
     auto second_function = fetch_lib.newFunctionWithConstants(fetch.entry.c_str(), &combined_constant, 1, error);
     if (!second_function)
       return 9;
     auto second_pso = pipeline(device, vs, second_function);
-    if (!second_pso || !draw(device, queue, base_pso, second_pso, second_expected, false))
+    if (!second_pso || !draw(device, queue, base_pso, second_pso, second_expected, false, nullptr,
+                             resource ? &root_arguments : nullptr))
       return 11;
   }
   if (!draw_two_pass(device, queue, base_pso, sample_pso))
