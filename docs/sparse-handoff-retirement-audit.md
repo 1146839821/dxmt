@@ -1136,3 +1136,142 @@ Logical host acceptance does not mean GPU completion. Partial native failure del
 Commit this focused four-file slice with repository feat(d3d12) style; no push, no history rewrite, original .gitignore unchanged. E12/delivery-manifest.json records final SHA/status/hashes. Revert the focused commit to restore independent legacy methods; existing WineMetal completion ABI/payload remains intact.
 
 Next single slice: **audit and specify the bounded Submission attachment and no-event terminal ownership together against the existing queue owner**, with explicit device-loss/teardown evidence. Do not activate automatic production plan issue just because happy-path private events passed. Texture plans and capability promotion remain separate.
+
+
+## Submission attachment / terminal boundary — execution card, 2026-11-05
+
+GOAL: Resolve the next ownership boundary from current Submission/FIFO/removal code and real native post-mapping completion evidence.
+BASELINE:04687a53ecffc6795b965ac0b86da7d0546280ec; original .gitignore preserved.
+CURRENT PATH: BeginSparseMapping commits classic handoff + preceding Metal4 barrier; legacy resource issues; End signals cancellable sparse_event.
+EVIDENCE: Current source + installed SDK contracts; prior mapping-event prototype alone cannot establish device-loss retirement.
+SCOPE: Read-only production-source audit and external native GPU probe for an ordered post-mapping ResourceState barrier/commit feedback.
+NON-SCOPE: No production activation, new scheduler, private event mutation, forced GPU fault, capability or backend change.
+DESIGN: Reuse existing bounded Submission owner in the proposed integration; separate host acceptance, GPU completion, CPU report and cancellation.
+PROOF: Gate mapping, observe earlier callback, omit independent mapping signal, require later real callback/readback, partial issue and wrong-oracle controls.
+RISK: Successful later callback may prove ordered completion; error callback attribution/quiescence remains a separate contract to verify.
+ROLLBACK: Documentation-only commit; external probe does not modify runtime ABI/source or user Wine.
+DONE: Source/SDK/Mullion evidence, actual readback results, ownership/lock table, failure matrix and actionable next Design Card; commit/no push.
+
+
+## Submission attachment / terminal boundary — delivery and Design Card, 2026-11-05
+
+### 1. Task Summary / Baseline Evidence
+
+This round completes the E12-recommended read-only production-source audit and external native GPU experiment. It specifies one bounded admission owner and a candidate independent completion boundary; **it does not enable production attachment or establish fault-safe teardown**. Baseline is feat/d3d12 at 04687a53ecffc6795b965ac0b86da7d0546280ec. Local stored origin/feat/d3d12 is behind0/ahead7 before this documentation commit; not fetched. Original .gitignore SHA256764aac09922db4654ca6de63fd20cf014739d9292623eb979f448f38e609b759 is preserved/excluded.
+
+E13 = /Users/zhangbo/Documents/Vibe-Codeding/dxmt-test/n95-capability-gate/result-sparse-submission-terminal-20261105. Device is Apple M1 Max; macOS27.2/26B123, Xcode27.2/27B52, Metal32023.922. Real queries in every final process report Apple7=1, Apple8=0, Apple9=0, Metal4=1, PlacementSparse=1, sparse page65536 bytes. These are actual native results, not injected D3D12 capabilities. The probe uses classic native MSL, a Metal4 mapping queue and committed residency; Wine/MSC are not loaded. Prior E12 Wine/MSC results are historical, not rerun evidence for this round.
+
+### 2. Current Source Findings
+
+All following source anchors refer to baseline04687a53; no production source changes this round.
+
+| Evidence type | Current source / contract | Finding |
+|---|---|---|
+| SOURCE_AUDIT | src/d3d12/d3d12_command_queue.cpp:86–114,459–548 | Submission owns main command buffer and preceding sparse_barrier only. Completion moves a ring entry into a local owner but retains its capacity until retirement. No mapping plan/completion payload is attached. Main completion and preceding barrier feedback do not cover later standalone mapping calls. |
+| SOURCE_AUDIT | Same file:551–585,626–666 | commit_mutex_ serializes admission; WaitForSubmissionSpaceLocked checks bounded capacity. BeginSparseMapping submits/publishes the handoff record before the resource mapping call. Simply adding a late plan pointer would race completion and would not repair ownership. |
+| SOURCE_AUDIT | Same file:670–682,786–846 | EndSparseMapping schedules the shared mapping signal; Update/Copy still invoke legacy resource methods after Begin. The shared timeline orders subsequent classic work, but can also be CPU-signaled by removal. It is unsuitable as an independent retirement credential. |
+| SOURCE_AUDIT | Same file:125–144,615–623,688–692; src/d3d12/d3d12_device.cpp:1790–1822 | Removal sets sparse_event to UINT64_MAX and wakes host conditions; device records/remits the failure. Stop sets stopping and joins the completion thread. None of these operations establishes mapping GPU quiescence or interrupts an infinite native credential drain. |
+| SOURCE_AUDIT | src/d3d12/d3d12_fence.cpp:131–143 | Removal wakes public fence waits with MAX. This reports failure, not successful mapping completion or permission to free mapped heaps. |
+| SOURCE_AUDIT | src/winemetal/unix/winemetal_unix.c:4140–4343 | Existing SparseBarrierCompletion retains its actual commit callback state; it describes the preceding All→ResourceState barrier. Its synthetic-error/delayed-report controls do not widen actual GPU coverage. |
+| SOURCE_AUDIT | Same file:4380–4580, especially4486–4550 | Mapping credential prepares/retains native operations, tracks possibly-issued before each void invocation, seals once and only permits retirement after no issue or the private event. dealloc drains indefinitely if the private event never signals. This is a real availability limitation. |
+| SOURCE_AUDIT | src/d3d12/d3d12_buffer.cpp:133–298,750–940; src/d3d12/d3d12_device.hpp:362–371,409 onward | E12 plans capture old/source/new/intermediate owners and reuse the existing tile parser. Host acceptance publishes the logical map, not GPU completion. They are controlled-caller groundwork; neither texture plans nor automatic queue integration exists. |
+| SPEC_REQUIRED | Installed MTL4CommandQueue.h:261–275; E13/apple-signal | A GPU signal is ordered after all prior queue GPU work. A CPU write to a different/cancellable event has no such meaning. Private-event observation remains valid when actually signaled by this queue. |
+| SPEC_REQUIRED / INFERENCE | Installed MTL4CommandEncoder.h:49–72; E13/apple-afterqueue-resolved | A consumer barrier delays its beforeStages until prior afterQueueStages work completes. Therefore a real Blit marker after ResourceState→Blit + ResourceAlias is a candidate observable completion boundary for earlier mapping work. This inference is corroborated only on the tested successful path. |
+| SPEC_REQUIRED / UNVERIFIED | Installed MTL4CommitFeedback.h:19–40; E13/apple-feedback and apple-commit-resolved | Callback describes completed committed workload; NSError describes an issue running committed command buffers. No retrieved contract explicitly establishes fault quiescence or error attribution for standalone void mapping calls preceding that command buffer. A callback with error must not be promoted to safe heap release without more evidence. |
+| SPEC_REQUIRED | Installed MTL4CommandQueue.h:26–45; E13/ms-fence | Physical DeviceRemoved Metal4 error is deprecated as impossible on Apple Silicon in SDK27; timeout, access-revoked, OOM and internal errors remain relevant. Microsoft public GetCompletedValue=MAX on device removal is API failure notification. Neither observation proves native work drained. |
+
+CodeGraph was used before targeted source reads; outputs are retained beside E13 as codegraph-sparse-submission-terminal-20261105.txt and codegraph-sparse-removal-20261105.txt. Official Apple JSON and Microsoft HTML plus installed SDK snapshots have URL/hashes in E13/sources.json. Guessed documentation endpoints returning404 and an initial Mullion SSL failure are retained; Apple parent references resolved the actual endpoints and the Mullion retry succeeded. No result depends on those failed downloads.
+
+### 3. Mullion Comparison
+
+REFERENCE_SOURCE only: pinned Mullion93de32b9145885ceb2e45be7d445e56d62499b3c, freshly retrieved src/d3d12/d3d12_command_queue.cpp SHA256641a21ad8fce6aa6f3f6f0cb02e0b0e3ae162a97a0eb7740d738c5f70ece6492 (E13/mullion-queue). This is not a latest-upstream claim or MULLION_OBSERVED runtime result.
+
+- Lines593–625: Map closure owns captured inputs; settle previous work, check removal, commit residency, issue mappings, GPU-signal a dedicated mapped event, CPU-wait that event, then make subsequent work wait it. This is a stronger lifetime boundary than a preceding callback alone, but still depends on its mapped event arriving.
+- Lines1338–1353: Update closure captures resource, heap, operations and settle owner. Lines1392–1404 capture both Copy resources/operations. These owners and ordering are useful semantic references.
+- Lines1380–1392: self-overlap and unmap/settle handling have independent semantics; do not replace DXMT's validated E12 snapshot plan with an unrelated transplant.
+- The referenced path does not supply a verified missing-event/error-quiescence solution for DXMT's bounded FIFO. No Mullion Gate/Hold scheduler, resource backend or code is copied. Existing source attribution/license files remain unchanged.
+
+### 4. Native Validation Design and Results
+
+E13/terminal_boundary.mm is an external ARC Objective-C++ prototype, not repository code. It prepares two sparse buffers and two2page placement heaps, populates seeded data through resident producer buffers, then performs6 mapping steps: map source A; copy to destination; partially issue one of two intended remap tiles B; fully remap destination B; unmap destination; copy A after unmap. Each process compares10 whole2page buffer readbacks,327680DWORDs plus canaries. During unmap it only reads the still-mapped source; no assertion about reading a native unmapped destination is made.
+
+Before each step, the corrected probe waits for the actual preceding barrier callback, enqueues a closed gate, issues actual mapping, deliberately omits the independent mapping event signal, and commits a ResourceState→Blit/ResourceAlias barrier followed by a256byte marker. A separate cancellation event is CPU-signaled to MAX. While gated, preceding callback count is1, post callback0, marker unchanged and omitted event0. After opening the gate, the real post callback succeeds once, marker becomes0x3c, then classic compute reads the mapped data. The omitted event remains0. Marker allocation is committed resident and retained through actual completion; no allocator reset or removal precedes completion. The callback owns native/shared state, not a PE queue pointer.
+
+| Test | Result / meaning |
+|---|---|
+| Final native probe compile | PASS, xcrun clang++ ARC/O2 C++20 against installed Metal/Foundation; E13/build-corrected.log. This is not a full DXMT build. |
+| Three changing-seed ordinary processes | LOCAL_PASS18 actual mapping steps,30 readbacks,983040DWORDs. Successful post callback remains usable while independent mapping event stays0. |
+| Two delayed-report processes | LOCAL_PASS12 steps,20 readbacks,655360DWORDs. On all12 steps native callback count1 precedes deliberately delayed CPU report0; then report1. Transport delay does not create earlier completion evidence. |
+| Wrong preceding-boundary oracle | LOCAL_PASS as negative control: expected exit1,6 actual steps,10 readbacks. Substituting the already-received preceding callback is rejected while mapping/post work remains pending. No native result is fabricated. |
+| One-word wrong oracle | LOCAL_PASS as negative control: expected exit1,6 steps,10 readbacks, exactly one data mismatch, guards clean. |
+| Combined final matrix | PASS7 processes:5 exit0 +2 expected exit1;42 mapping steps,70 readbacks,2293760DWORDs. API and GPU validation enabled notices in each; no unexpected Metal validation failure. E13/matrix.json/log and per-process logs retain arguments/actual identities/hashes. |
+| Host partial issue | LOCAL_PASS in every process: native first tile changes and unissued second tile retains A. This is a deliberate host prefix, not a synthetic NSError, rollback, or native atomicity claim. |
+| Runtime identity | Actual executable path/UUID63B9FC2A-AC00-3954-8528-D94D7CB25C49 and Metal/driver image identities logged. Binary SHA256c371a8ca2c5ab22d0572549f9e7ac11bcc99e80284b4b1b9549627a792f39ba7. msc_loaded=false in every process; no Wine DLL pairing claim. |
+| Full DXMT/x86 build; Windows/Mullion runtime; D3D11/MSC/Metal3 regressions; ASan; real fault/missing callback | NOT_RUN this documentation-only round. No production binary changed. Prior E12 tests do not substitute for future queue integration regression. |
+
+Initial prototype FAIL is retained, not counted as a final pass: terminal_boundary-first.mm and first-native.log. It committed the preceding command buffer and immediately queued the later gate/mapping/post before waiting for preceding feedback. The post callback arrived after about4seconds and changed the marker before the intended gate observation; the pending oracle failed, and consuming that notification caused the later wait to fail (exit3). Root cause of this scheduling-sensitive observation remains UNVERIFIED; no driver bug or mapping contract violation is asserted. The corrected probe settles preceding feedback before enqueueing the gate and adds host-phase timestamps. This narrows the final experiment to that setup; it is not evidence that unsynchronized production submission has already been validated. Production must retain explicit event/stage ordering, not copy this host serialization as an optimization.
+
+### 5. Design Card — Bounded Submission Attachment
+
+**Goal.** Attach one fully-owned buffer mapping plan to the existing bounded queue Submission; maintain owners from before the first native dependency through a proven terminal boundary. Separate host acceptance, actual completion, CPU report and public cancellation. This card is a future integration design, not permission to activate it in this round.
+
+**Scope / Non-Scope.** One buffer Update/Copy mapping envelope owned by the existing queue and E12 buffer plan. No texture/packed plan, alternate scheduler, parallel state map, global quarantine, capability promotion, MSC flag change or D3D11/backend replacement. No destructive GPU fault injection.
+
+**Architecture / Proposed sequence.**
+
+1. While commit_mutex_ serializes admission, validate and prepare the buffer plan, native operation storage, private owners/event and both pre/post native completion objects before any queue operation. Prepare the actual post-work/feedback options too; allocating a fallback after partial issue is unsafe. Empty/rejected plans remain not-issued and need no native wait.
+2. Wait for existing ring capacity before the first native call. Since all producers share commit_mutex_ and the completion thread can only decrease count, count<K reserves one local in-admission record: committed records plus that record remain <=K. Keep it owned on this existing admission stack until publication; no second FIFO record or registry. This invariant requires auditing every admission caller before implementation.
+3. Split current submit-and-publish helper only as necessary: submit classic/pre handoff while retaining the complete local record, issue the prepared mapping prefix, seal its host outcome exactly once, and submit the already-prepared terminal sequence. Only then move the complete record into the ring. Native callbacks may arrive before publication because they only mutate retained native state. No completion thread can retire an unsealed plan.
+4. After any possibly-issued call, admission must publish its cleanup record even if removal races the normal success check. Do not reuse CommitSubmissionLocked's current early rejection to drop such a record. Hold the original capacity reservation and preserve FIFO/serial order. Failures before any issue may release locally; a prepared-but-not-committed terminal object must be distinguishable from submitted work.
+5. Keep existing shared event ordering for subsequent classic consumers. The independent mapping event is never CPU-signaled. A successful ordered post callback is a controlled secondary candidate if that event is omitted; it must belong to this envelope and cover this prefix. An error callback, missing callback, timeout or device notification is not safe completion by itself. Do not allow a consumer waiting on an omitted event to precede the post callback needed to recover it.
+6. Completion thread drains main/pre and this mapping credential outside queue locks. Host success is published only if all required statuses permit it; terminal failure is visible before later FIFO success. Partial issue never publishes the logical tile map. If private completion is absent and no proven terminal boundary exists, retain the record/owners and mark public device failure; bounded retained capacity does not imply bounded shutdown time.
+7. Release native inputs and then E12 old/source/new/transient COM owners outside tile/commit/submission/residency locks. The callback does not release PE owners or call queue/device APIs. Preserve exact-once seal/retire, including zero issue and immediate callback.
+
+A two-record pre/terminal scheme is rejected: reserving a second slot after issue can deadlock when the first record occupies the last capacity. Attaching a plan after BeginSparseMapping has published is rejected because the completion thread can already own/retire that record. Releasing on cancelled shared event, pre-feedback, elapsed timeout or device-removed reason is rejected because none proves native mapping access ended. Unbounded quarantine, synthetic success and disabling validation are rejected.
+
+**Ownership / Lock table.**
+
+| Owner / lock | Allowed responsibility | Prohibited operation |
+|---|---|---|
+| commit_mutex_ admission owner | Serialize input preparation, reserved local record, native issue/seal and FIFO publication | Waiting for GPU feedback or destroying a possibly-issued final owner while holding it |
+| Buffer tile mutex | Existing parser/snapshot and logical publish; same serialized mapping owner spans prepare→issue | GPU waits, callback acquisition, a duplicate tile-state map |
+| submission_state_->mutex | Count/head/tail/publication, move record to completion local, notify conditions | Native wait, COM final release, device callback recursion |
+| Native credential lock / callback | Actual feedback/error and exact-once state/report transitions | PE queue pointer, MarkDeviceRemoved or COM/resource-unregister calls |
+| Completion local owner | Observe sealed actual terminal result, fail/publicly retire FIFO in order, release owners unlocked | Treating cancellation as success, skipping an unresolved prefix |
+| Residency owner | Keep old/source/new/intermediate native allocations resident through terminal proof | Inferring residency from a live COM pointer alone, unregistering before native completion |
+
+Stop/removal must close admission and preserve/drain already-issued records. Current StopCompletionThread only wakes conditions; adding an indefinite mapping wait without resolving the terminal contract would worsen shutdown availability. No bounded-teardown claim is made.
+
+**Failure matrix.**
+
+| Boundary | Public outcome / logical map | Retirement evidence |
+|---|---|---|
+| Validation/allocation failure before native work | Reject; map unchanged | Not-issued state; local release |
+| Handoff submitted, zero mappings issued | Failure if handoff fails; map unchanged | Actual handoff completion plus no-issued mapping state; preserve committed pre objects |
+| All calls host-accepted | Publish logical map once, pending GPU | Actual private event; secondary successful post boundary remains controlled until bridge verified |
+| Partial/ambiguous void issue | Fail device; no logical publication or rollback claim | Retain all prefix/native/COM owners until actual proven boundary |
+| CPU report delayed after actual success | FIFO stays pending until report policy settles | Native result retained independently of transport; delay does not reverse completion |
+| Public cancellation/removal | Fail/wake public waits | No native-release permission; private proof unchanged |
+| Post callback NSError / callback absent / event absent | Fail public work; no later successful FIFO retirement | SPEC_UNVERIFIED for safe error quiescence; keep owners, shutdown may remain blocked |
+| Queue destruction with pending mappings | Stop admission, retain/drain issued work | Same proof as normal retirement; no timeout-based early free |
+
+**Test Plan / Definition of Done.** Before automatic queue activation, a controlled WineMetal credential must reproduce this external post-boundary result with the existing retained owner, real delayed/omitted-event controls, partial prefix and immediate callbacks. Then integrate one bounded record and verify full-capacity admission, no second-slot deadlock, removal races, FIFO signal ordering, public wait failure, pending final COM release and residency-unregister identities. Build the paired x64 DXMT/WineMetal using .github/build_dxmt.sh configuration; validate actual PE/Unix identities in an isolated stage/prefix. Run E12 buffer plan, sparse barrier/fault and reserved buffer/texture regressions, D3D11 smoke and MSC fixture with Metal API/GPU validation. Windows/other GPU results remain separately NOT_RUN until available. Genuine error quiescence needs explicit Apple contract or safe actual evidence; injecting an NSError into a report does not meet it.
+
+**Risks / rollback.** Extra post command buffer/allocator/marker/residency and callback costs are unmeasured; do not call this a performance improvement. Native callback ordering/errors outside committed buffers remain uncertain, including the retained initial probe anomaly. Cross-queue generation hazards and textures remain outside scope. This round rolls back by reverting its single documentation commit; external evidence is retained. Future implementation must remain a separate focused commit and keep legacy behavior available until gates pass.
+
+### 6. Remaining Blockers / Capability Impact
+
+| Class | Current status |
+|---|---|
+| BACKEND_NOT_IMPLEMENTED | Post-mapping credential in WineMetal, reservation/publication changes and buffer plan attachment to Submission; texture/packed plans; corresponding integration regressions. Successful external prototype does not implement these. |
+| SPEC_UNVERIFIED | Error feedback attribution/quiescence for standalone void mappings, missing-event/missing-callback teardown, initial probe gate anomaly; no safe general fault release proven. |
+| MSC_SEMANTIC_GAP | None newly established by this native ownership test. Broader sparse sampling/NULL and DXIL semantics are not covered by the native MSL oracle. |
+| TARGET_DEVICE_NOT_AVAILABLE | Windows reference and other GPUs only. M1 Max Metal4 PlacementSparse is available and passed real64KiB buffer operations; no Apple7 hardware block. |
+
+No public Tiled Resources Tier, Feature Level or Shader Model changes. Metal3 shadow backing, existing Reserved Resource tests, D3D11 and MSC runtime compatibility remain unchanged because production sources are untouched. Gate0/1 audit/design and external validation complete; automatic integration Gate2 is **not passed** by this evidence.
+
+### 7. Changed Files / Git State / Next Recommended Slice
+
+Only docs/sparse-handoff-retirement-audit.md changes this round: execution card, source/SDK/Mullion evidence, native outcomes, bounded ownership design and unresolved fault gate. No repository source/test/build files, dependencies or runtime ABI changes. Commit using docs(d3d12) style, no push; original .gitignore remains dirty/excluded. E13/delivery-manifest.json records committed SHA/status/source and evidence hashes.
+
+Next single slice: **extend the existing WineMetal mapping credential with a controlled post-ResourceState completion path**, prepared before issue and validated through its existing controlled caller with actual omitted-event, delayed-report and partial-prefix readbacks. Reuse the current native owner/state machine; keep ordinary production callers and error-quiescence retirement disabled. This tests the bridge boundary before changing queue admission. Do not automatically combine buffer Submission activation or texture mapping plans into it.
