@@ -207,6 +207,11 @@ class MTLD3D12Buffer : public MTLD3D12Pageable<MTLD3D12Resource> {
     }
 
     bool
+    PrepareTerminal(UINT flags) override {
+      return !finished && payload.completion &&
+             SparseMappingCompletion_prepareTerminal(payload.completion.handle, flags);
+    }
+    bool
     IssueNext() override {
       return !finished && payload.completion && payload.completion.issueNext();
     }

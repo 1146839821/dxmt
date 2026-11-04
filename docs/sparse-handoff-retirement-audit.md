@@ -1346,3 +1346,74 @@ SPEC_UNVERIFIED remains real error quiescence and standalone mapping NSError att
 Commit this focused six-file change as feat(winemetal), no push; original .gitignore is excluded/preserved. No staged/untracked leftovers expected; final SHA/status/hashes in E14/delivery-manifest.json. Reverting the focused commit removes the additive controlled API/probe while restoring the prior native credential; paired PE/Unix rebuild required when switching.
 
 Next single slice: **attach a prepared buffer plan to one bounded Submission envelope through a controlled queue test entry**, using E13's existing admission owner and E14's prepared post completion, with capacity reservation, publish-after-seal, partial/removal race and FIFO retirement tests. Keep ordinary production activation disabled until ownership and error/teardown gates are met; do not combine texture plans or capability promotion.
+
+
+## Controlled bounded sparse Submission — execution card, 2026-11-05
+
+GOAL: Carry an owned buffer plan through one existing bounded FIFO record until real completion.
+BASELINE:6bacfbef436a6e28e420c1f7ce26be5b0dc16e6c; .gitignore preserved.
+PATH: Explicit internal test entry -> existing commit owner/capacity -> prepared plan + pre/post credentials -> sealed record -> completion.
+EVIDENCE: E13 admission design; E14 real bridge readbacks; current FIFO publishes before legacy mapping and has no plan owner.
+SCOPE: Existing buffer plan and queue; opt-in controlled entry only, no ordinary Update/Copy activation.
+DESIGN: Prepare before native issue; reserve one local admission slot; publish even after issued removal race; drain/release outside locks.
+FILES: Existing queue/device/buffer headers and implementations, existing reserved-buffer probe/report; no new source module.
+PERF: One nullable plan pointer per FIFO record and completion branch; extra work only controlled entry, no heap scan/new scheduler.
+PROOF: Seeded readback, partial logical nonpublication, omitted private event/delayed report, public-ref drop, capacity32/33 and removal race.
+RISKS: Real fault quiescence remains unverified; actual terminal proof required, no timeout/cancellation release.
+ROLLBACK: Revert focused commit; preserve ordinary legacy calls and paired bridge ABI.
+DONE: Build/identities/API+GPU validation/nearby regressions/audit; commit/no push; capability unchanged.
+
+## Controlled bounded sparse Submission — delivery audit, 2026-11-05
+
+### Task Summary / Baseline Evidence
+
+One N15/N13 ownership slice is complete: an explicitly enabled, matched-build internal probe can transfer a prepared buffer mapping plan into one existing bounded queue Submission. Ordinary public UpdateTileMappings/CopyTileMappings still use their established legacy path. Baseline6bacfbef436a6e28e420c1f7ce26be5b0dc16e6c on feat/d3d12; no remote refresh or latest-upstream claim. E15 = /Users/zhangbo/Documents/Vibe-Codeding/dxmt-test/n95-capability-gate/result-sparse-submission-owner-20261105. Apple M1 Max, macOS27.2/26B123, Xcode27.2/27B52, Wine11.0; actual probes report Apple7/Metal4/PlacementSparse true and Apple8/9 false. Original .gitignore hash764aac09922db4654ca6de63fd20cf014739d9292623eb979f448f38e609b759 is preserved. Overall sparse/MSC work remains active.
+
+### Findings / Specification / Mullion Evidence
+
+- SOURCE_AUDIT: src/d3d12/d3d12_command_queue.cpp:650–705 previously published the preceding handoff before calling the legacy resource mapping operation; no mapping-plan owner belonged to that record. Attaching an owner afterwards would race completion. All current ring producers serialize through commit_mutex_ and wait for count<32; completion alone reduces count. A local record reserved under that owner therefore needs no second queue slot.
+- SPEC_REQUIRED: installed MTL4CommandEncoder.h:49–72 orders prior ResourceState work before the terminal Blit stage; MTL4CommitFeedback.h:19–40 describes actual committed-work completion. Fresh Apple JSON and Microsoft GetCompletedValue HTML match the retained E13/E14 hashes; E15/sources.json records URLs, installed SDK snapshots and hashes. Microsoft's UINT64_MAX fence value on removal is public failure notification, not proof that native sparse accesses stopped. Genuine error quiescence and standalone mapping NSError attribution remain SPEC_UNVERIFIED.
+- REFERENCE_SOURCE: retained Mullion93de32b9145885ceb2e45be7d445e56d62499b3c, src/d3d12/d3d12_command_queue.cpp:593–625 owns the mapping closure, commits residency, submits mappings, waits on its dedicated mapped event, and orders later consumers. Its Update/Copy captures at1338–1353/1392–1404 retain inputs. Source SHA256641a21ad8fce6aa6f3f6f0cb02e0b0e3ae162a97a0eb7740d738c5f70ece6492. No transplant, Mullion runtime observation or latest-HEAD claim.
+- LOCAL_PASS: omitted private mapping events complete through actual successful post callbacks; gated native work holds FIFO ownership through partial-prefix failure, simulated public removal and final queue release. Native per-prefix results remain distinct from logical acceptance. These controlled native blit readbacks do not prove all D3D12 consumers or MSC sparse semantics.
+
+### Design Decisions / Changed Files
+
+- src/d3d12/d3d12_command_queue.cpp:90 adds one unique plan owner to Submission. Completion at517–529 waits for a sealed actual native result, retires native inputs then COM owners outside queue locks, and only then permits later FIFO signal records to retire.
+- src/d3d12/d3d12_command_queue.cpp:578 factors the existing ring publication without changing ordinary commit order. The controlled entry at719–795 waits for capacity, prepares all fallible native objects before issue, holds one admission record, submits pre/mapping/post work, seals once, and publishes the complete record. Already-issued cleanup publication survives removal. A failed prefix closes device admission before releasing commit_mutex_, so a later Signal cannot publish success through that interval. The optional host-race wait checks its result; timeout rejects host acceptance but never grants native release permission.
+- src/d3d12/d3d12_device.hpp:197 appends an internal controlled virtual, gated by DXMT_TEST_SPARSE_SUBMISSION=1; public COM methods/exports and WineMetal ABI are unchanged. Caller retains the queue and serializes mapping preparation through submission; this is not a safe general concurrent public API. The plan interface at424 adds terminal preparation. src/d3d12/d3d12_buffer.cpp:210 adapts it to E14's existing native credential without changing the logical tile-map authority or legacy mapping path.
+- tests/dx12/dx12_reserved_buffer.cpp:267 extends its existing retained fixture with plan-queue modes: seeded map/copy, partial prefix, zero-issue rejection, empty accepted plan, missing private event, delayed report, private-event comparison, public-ref release,32/33 admission and full-capacity removal, preparation failures, and wrong-word control. Existing main dispatch at2613 routes these modes. Three real plans use one FIFO record each; no alternate scheduler or registry is added.
+- docs/sparse-handoff-retirement-audit.md records the card, evidence, costs and remaining gates. No new repository files/runners, D3D12 modules, shader changes or vendored changes.
+
+A two-slot pre/post design is rejected because it can deadlock at full capacity. Cancellation/shared timeline/pre-feedback/timeouts are rejected as native retirement proofs. Callback code retains no PE queue pointer. The only plan user is this controlled entry; no production opt-in or automatic public mapping activation is introduced.
+
+### Validation Results
+
+| Check | Result / evidence |
+|---|---|
+| Full x64 default build | PASS using .github/build_dxmt.sh release configuration with repository LLVM-MinGW, external patched LLVM15, D3D12/tests/NVAPI/NVNGX enabled. E15/build-formatted.log. Incremental full build, not a clean/warning-free build; pre-existing override/sentinel warnings remain. No shared install. |
+| i686 source/probe compile | PASS queue, buffer and existing probe with repository LLVM-MinGW; E15/sources-i686.json, probe-i686.json. Compile-only, no32bit runtime or full32bit link claim. |
+| Controlled final queue matrix | LOCAL_PASS20 processes:13 normal/partial/removal/release/capacity/empty/delay/rejected/event/negative cases, one full-capacity removal, six terminal-preparation failures. Two changing seeds each for normal, partial and removal. Exactly one expected wrong-word exit1. Every emitted record is sealed before publication; maximum count32,33rd call blocks with its plan retained; removal wakes it without issue. E15/matrix-final.log. |
+| Additional lifecycle/error paths | LOCAL_PASS6 processes: pending public-ref release with resource/heap unregister identities, two native mapping-preparation failures and three pre-barrier preparation failures. All five sentinel identities are destroyed exactly once per process. Zero-issue failures publish no sparse plan record/callback and leave the caller's plan retained. One heap's existing shadow-backing allocation adds a sixth unregister log; identity matching distinguishes it from the five required COM owners. E15/extra-final.log. |
+| Queue-only totals | LOCAL_PASS26 processes,43 FIFO plan completions,41 actual successful native callbacks,130 sentinel destructions. Twelve whole source/destination readback oracles compare1179648DWORDs plus guards; wrong-word control finds exactly one expected mismatch. Two release cases intentionally omit readback after public COM destruction. No unmapped reads are asserted. |
+| Nearby behavior | LOCAL_PASS15 processes: existing public reserved-buffer DXIL/MSC fixture311296DWORD oracle, expected wrong-oracle exit1, feedback and submitted-barrier removal, ordinary native mapping normal/partial, texture handoff retirement, packed full-mips/copy, D3D11 actual256DWORD copy, four buffer-plan modes and two private-event terminal comparisons. E15/regressions-final.log. Shader blobs contain DXIL (no SHDR/SHEX); actual MSC library log reports compiled SDK API4.0.3 and unknown runtime product version. |
+| Final functional audit | PASS41 selected processes,2 expected exit1 controls; API/GPU validation enabled in all. No unexpected assertion/validation/address fault. Actual loaded PE paths/export bytes and Unix path/UUID8963C1DC-2CEA-3397-AEC6-0AC846C82683 verified, matching build/stage WineMetal pair. Log/artifact hashes and exact labels retained in delivery-audit.json, selected-labels.json, artifacts.json. Supplemental first/pre-format runs excluded from totals. |
+| Formatting / diff | PASS scoped clang-format on modified code hunks, git diff --check. Original .gitignore unchanged. Device capabilities, texture/heap implementation, WineMetal source/ABI verified byte-identical to baseline. |
+| Other platforms / fault proof | NOT_RUN Windows/Mullion runtime, forced Metal3, other GPU,32bit runtime,ASan,genuine GPU fault/missing callback and GPU trace. Current M1 Max is not BLOCKED_BY_HARDWARE. |
+
+Retained non-GPU tooling issue: the first external residency collector expected exactly five unregister logs, but the existing heap shadow backing generates an additional allocation unregister. The GPU/lifetime test itself passed; collector now matches each explicit resource/heap identity exactly once after the pending boundary. Initial and final collector logs are retained. No GPU failure is hidden by that correction.
+
+### Cost / Capability Impact / Regression Risks
+
+Compiler-measured x64 layout (E15/record-sizes.json): Submission264→272bytes; queue9120→9376bytes, +256bytes for32nullable plan pointers. The external baseline layout probe supplies a stub for the newly appended pure virtual test method when compiling baseline queue source against current headers; no fields are added by that stub. Ordinary completion adds one nullable branch; no new ordinary allocation, lock, heap scan, scheduler or terminal command buffer. Controlled plans retain the pre-existing E14 post-work allocation/commit cost. No speedup is claimed.
+
+Coarse A/B reuses unchanged fifo-perf:128 ordinary public mappings plus16384DWORD readback per process. Twelve ABBA processes, six per build, identical final test/DXGI/D3D11/WineMetal/MSC bytes, only D3D12 baseline/candidate differs; API/GPU validation disabled for these timing samples. Baseline median300.667969us/mapping, nearest-rankP95308.153125, range287.378125–308.153125; candidate median291.859766, P95298.083594, range270.357813–298.083594. This small overlapping coarse sample is INCONCLUSIVE, not proof of improvement or no regression. E15/performance-runs.json and performance-summary.json retain identities/commands/environment; controlled post-path performance and GPU timeline NOT_RUN.
+
+No Feature Level, Tiled Resources Tier, Shader Model, MSC compatibility flag or D3D11/Metal3 behavior changes. BACKEND_NOT_IMPLEMENTED: automatic public buffer mapping activation, texture/packed owned plans, general cross-queue/concurrent preparation coverage. SPEC_UNVERIFIED: genuine native error quiescence and void-call error attribution; final release may still wait indefinitely without a proven boundary. MSC_SEMANTIC_GAP: none newly demonstrated; owned-plan→actual D3D12 shader-consumer ordering has not yet been exercised. TARGET_DEVICE_NOT_AVAILABLE applies to Windows/other GPU comparisons only. The E13 scheduling-sensitive prototype anomaly remains recorded and unresolved; successful controlled tests do not erase it.
+
+### Git State / Rollback / Next Recommended Slice
+
+Commit the five intended files as feat(d3d12), no push. Original .gitignore stays unstaged/excluded; no new repository files. Final committed SHA, Git state and source/evidence hashes are recorded externally in E15/delivery-manifest.json. Reverting the focused commit removes the controlled adapter/owner/tests, preserving E14's bridge and ordinary legacy behavior; use matched-build internal tests after rebuild.
+
+Next single slice: **verify controlled owned buffer plans followed immediately by actual D3D12 ExecuteCommandLists/MSC shader consumers**, without a CPU mapping-completion wait, including same-queue ordering and one explicit cross-queue fence handoff. Reuse existing reserved-buffer DXIL fixture/runner and current admission owner; keep public mapping activation disabled and do not combine texture plans or capability promotion. Gate0/1 for that slice remains necessary; this round stops at delivery.
+
+Gate conclusions: Gate0 evidence refreshed; Gate1 controlled card satisfied; Gate2 scoped implementation complete; Gate3 stated build/functional checks PASS with explicit NOT_RUN limits; Gate4 diff/identity/ownership/capability audit PASS. These gates approve delivery of this controlled slice, not automatic public activation or genuine-error retirement.

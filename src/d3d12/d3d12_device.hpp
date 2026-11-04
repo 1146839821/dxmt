@@ -192,6 +192,12 @@ public:
 class MTLD3D12CommandQueue : public ID3D12CommandQueue {
 public:
   virtual HRESULT Present(Presenter *presenter, ID3D12Resource *backbuffer, HANDLE hLantecyWaitable, double after) = 0;
+  // Matched-build controlled probe only; no public COM ABI or ordinary caller.
+  // Caller serializes resource preparation and retains the queue for this call.
+  virtual HRESULT SubmitSparsePlanForTesting(
+      std::unique_ptr<D3D12SparseBufferMappingPlan> &plan, WMT::Event gate, UINT terminal_flags, UINT issue_limit,
+      HANDLE issued, HANDLE resume
+  ) = 0;
 };
 
 class MTLD3D12Resource : public ID3D12Resource {
@@ -415,6 +421,7 @@ public:
   virtual bool Wait(uint64_t timeout_ms, WMTSparseMappingResult &result) = 0;
   virtual bool Retire(WMTSparseMappingResult &result) = 0;
   virtual size_t OperationCount() const = 0;
+  virtual bool PrepareTerminal(UINT test_flags) = 0;
 };
 
 inline bool

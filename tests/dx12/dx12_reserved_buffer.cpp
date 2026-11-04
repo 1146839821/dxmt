@@ -264,6 +264,262 @@ int CheckSparseMappingPayload(const char *mode, uint32_t seed) {
   MTLCommandBuffer_waitUntilCompleted(init);
   require(MTLCommandBuffer_status(init) == WMTCommandBufferStatusCompleted,
           "init failed");
+  if (!std::strncmp(mode, "plan-queue", 10)) {
+    const bool partial = !std::strcmp(mode, "plan-queue-partial"),
+               rejected = !std::strcmp(mode, "plan-queue-rejected"),
+               capacity_removal =
+                   !std::strcmp(mode, "plan-queue-capacity-removal"),
+               removal = !std::strcmp(mode, "plan-queue-removal"),
+               release = !std::strcmp(mode, "plan-queue-release"),
+               capacity = !std::strcmp(mode, "plan-queue-capacity"),
+               empty = !std::strcmp(mode, "plan-queue-empty"),
+               negative = !std::strcmp(mode, "plan-queue-wrong-word"),
+               prepare_fail = !std::strcmp(mode, "plan-queue-prepare-failure");
+    const UINT terminal = !std::strcmp(mode, "plan-queue-event")   ? 0
+                          : !std::strcmp(mode, "plan-queue-delay") ? 3
+                                                                   : 1;
+    ID3D12CommandQueue *public_queue = nullptr;
+    D3D12_COMMAND_QUEUE_DESC qd = {};
+    require(SUCCEEDED(public_device->CreateCommandQueue(
+                &qd, IID_PPV_ARGS(&public_queue))),
+            "owned queue");
+    auto queue = static_cast<MTLD3D12CommandQueue *>(public_queue);
+    Owned<ID3D12Fence> fence, unblock;
+    require(SUCCEEDED(public_device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                                 IID_PPV_ARGS(&fence.ptr))) &&
+                SUCCEEDED(public_device->CreateFence(
+                    0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&unblock.ptr))),
+            "queue fences");
+    auto gate = metal.newSharedEvent();
+    require(gate != nullptr, "queue gate");
+    std::array<std::unique_ptr<D3D12SparseBufferMappingPlan>, 3> plans;
+    for (unsigned i = 0; i < 2; ++i)
+      require(SUCCEEDED(resources[i]->PrepareBufferTileUpdate(
+                  1, &start, &region, public_heaps[i ? 2 : 0], 1, nullptr,
+                  &offset, &count, D3D12_TILE_MAPPING_FLAG_NONE, plans[i])),
+              "queue update plan");
+    auto copy_size = region;
+    copy_size.NumTiles = 2;
+    require(SUCCEEDED(resources[1]->PrepareBufferTileCopy(
+                resources[0], &start, &start, &copy_size,
+                D3D12_TILE_MAPPING_FLAG_NONE, plans[2])),
+            "queue copy plan");
+    SetEnvironmentVariableA("DXMT_TEST_SPARSE_SUBMISSION", nullptr);
+    require(queue->SubmitSparsePlanForTesting(plans[0], gate, terminal,
+                                              UINT_MAX, nullptr,
+                                              nullptr) == E_ACCESSDENIED &&
+                plans[0],
+            "queue opt-in");
+    SetEnvironmentVariableA("DXMT_TEST_SPARSE_SUBMISSION", "1");
+    if (prepare_fail) {
+      require(queue->SubmitSparsePlanForTesting(plans[0], gate, terminal,
+                                                UINT_MAX, nullptr,
+                                                nullptr) == E_OUTOFMEMORY &&
+                  plans[0] &&
+                  SUCCEEDED(public_device->GetDeviceRemovedReason()),
+              "queue prepare failure");
+      plans = {};
+      public_queue->Release();
+      for (auto r : public_resources)
+        r->Release();
+      for (auto h : public_heaps)
+        h->Release();
+      require(deaths() == 5, "queue prepare cleanup");
+      std::printf("QUEUE_PLAN_PREPARE_FAILURE calls=0 destroyed=5 removed=0\n");
+      public_device->Release();
+      return 0;
+    }
+    if (capacity || capacity_removal) {
+      require(SUCCEEDED(queue->Wait(unblock.ptr, 1)), "capacity wait");
+      for (unsigned i = 0; i < 31; ++i)
+        require(SUCCEEDED(queue->Signal(fence.ptr, i + 1)), "capacity fill");
+      std::promise<void> entered;
+      auto started = entered.get_future();
+      auto next = std::async(std::launch::async, [&] {
+        entered.set_value();
+        return queue->SubmitSparsePlanForTesting(plans[0], gate, terminal,
+                                                 UINT_MAX, nullptr, nullptr);
+      });
+      require(started.wait_for(std::chrono::seconds(10)) ==
+                      std::future_status::ready &&
+                  next.wait_for(std::chrono::milliseconds(40)) ==
+                      std::future_status::timeout &&
+                  plans[0] && fence->GetCompletedValue() == 0,
+              "capacity 33 admitted early");
+      std::printf(
+          "QUEUE_PLAN_CAPACITY pending=32 next=blocked plan_retained=1\n");
+      if (capacity_removal) {
+        device->MarkDeviceRemoved(DXGI_ERROR_DEVICE_REMOVED);
+        require(next.wait_for(std::chrono::seconds(10)) ==
+                        std::future_status::ready &&
+                    next.get() == DXGI_ERROR_DEVICE_REMOVED && plans[0],
+                "capacity removal admitted work");
+        public_queue->Release();
+        plans = {};
+        for (auto r : public_resources)
+          r->Release();
+        for (auto h : public_heaps)
+          h->Release();
+        require(deaths() == 5 && fence->GetCompletedValue() == UINT64_MAX,
+                "capacity removal cleanup");
+        std::printf("QUEUE_PLAN_CAPACITY_REMOVAL calls=0 plan_retained=1 "
+                    "destroyed=5 drained=1\n");
+        public_device->Release();
+        return 0;
+      }
+      require(SUCCEEDED(unblock->Signal(1)), "capacity unblock");
+      require(next.wait_for(std::chrono::seconds(10)) ==
+                      std::future_status::ready &&
+                  SUCCEEDED(next.get()) && !plans[0],
+              "capacity admission");
+    } else {
+      require(SUCCEEDED(queue->SubmitSparsePlanForTesting(
+                  plans[0], gate, terminal, UINT_MAX, nullptr, nullptr)) &&
+                  !plans[0],
+              "queue source submit");
+    }
+    require(SUCCEEDED(queue->SubmitSparsePlanForTesting(
+                plans[1], gate, terminal, UINT_MAX, nullptr, nullptr)) &&
+                !plans[1],
+            "queue destination submit");
+    HRESULT last = S_OK;
+    HANDLE issued = nullptr, resume = nullptr;
+    if (removal) {
+      issued = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+      resume = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+      require(issued && resume, "removal events");
+      auto next = std::async(std::launch::async, [&] {
+        return queue->SubmitSparsePlanForTesting(plans[2], gate, terminal, 1,
+                                                 issued, resume);
+      });
+      require(WaitForSingleObject(issued, 10000) == WAIT_OBJECT_0 && !deaths(),
+              "removal issue boundary");
+      device->MarkDeviceRemoved(DXGI_ERROR_DEVICE_REMOVED);
+      require(fence->GetCompletedValue() == UINT64_MAX, "removed fence");
+      SetEvent(resume);
+      require(next.wait_for(std::chrono::seconds(10)) ==
+                  std::future_status::ready,
+              "removal publication");
+      last = next.get();
+      CloseHandle(issued);
+      CloseHandle(resume);
+    } else {
+      last = queue->SubmitSparsePlanForTesting(plans[2], gate, terminal,
+                                               rejected  ? 0
+                                               : partial ? 1
+                                                         : UINT_MAX,
+                                               nullptr, nullptr);
+    }
+    require(!plans[2] && (partial || removal || rejected
+                              ? last == DXGI_ERROR_DEVICE_REMOVED
+                              : SUCCEEDED(last)),
+            "sealed record transfer");
+    WMT::Buffer backing;
+    UINT64 at = UINT64_MAX;
+    require(SUCCEEDED(resources[1]->GetTileMapping(0, backing, at)) &&
+                at == 0 &&
+                backing.handle == heaps[partial || removal || rejected ? 2 : 0]
+                                      ->GetTileBackingBuffer()
+                                      .handle,
+            "logical prefix publication");
+    if (empty) {
+      std::unique_ptr<D3D12SparseBufferMappingPlan> skip;
+      D3D12_TILE_RANGE_FLAGS flag = D3D12_TILE_RANGE_FLAG_SKIP;
+      require(SUCCEEDED(resources[0]->PrepareBufferTileUpdate(
+                  1, &start, &region, nullptr, 1, &flag, nullptr, &count,
+                  D3D12_TILE_MAPPING_FLAG_NONE, skip)) &&
+                  skip->OperationCount() == 0 &&
+                  SUCCEEDED(queue->SubmitSparsePlanForTesting(
+                      skip, gate, terminal, UINT_MAX, nullptr, nullptr)) &&
+                  !skip,
+              "empty queue record");
+    }
+    if (partial || removal || rejected) {
+      require(queue->Signal(fence.ptr, 77) == DXGI_ERROR_DEVICE_REMOVED,
+              "failure admitted success");
+    } else {
+      require(SUCCEEDED(queue->Signal(fence.ptr, 77)) &&
+                  fence->GetCompletedValue() < 77,
+              "FIFO signal premature");
+    }
+    if (release) {
+      for (auto r : public_resources)
+        r->Release();
+      for (auto h : public_heaps)
+        h->Release();
+      require(!deaths(), "pending public-ref release");
+    }
+    std::promise<void> entered;
+    auto started = entered.get_future();
+    auto drain = std::async(std::launch::async, [&] {
+      entered.set_value();
+      public_queue->Release();
+    });
+    require(started.wait_for(std::chrono::seconds(10)) ==
+                    std::future_status::ready &&
+                drain.wait_for(std::chrono::milliseconds(40)) ==
+                    std::future_status::timeout &&
+                !deaths(),
+            "queue teardown freed pending prefix");
+    std::printf("QUEUE_PLAN_PENDING partial=%u removal=%u release=%u "
+                "logical=%s destroyed=0 drain=blocked\n",
+                partial, removal, release,
+                partial || removal || rejected ? "prefix-unpublished"
+                                               : "accepted");
+    std::fflush(stdout);
+    gate.signalValue(1);
+    if (terminal == 3)
+      require(drain.wait_for(std::chrono::milliseconds(40)) ==
+                      std::future_status::timeout &&
+                  fence->GetCompletedValue() < 77,
+              "delayed report retired FIFO early");
+    require(drain.wait_for(std::chrono::seconds(10)) ==
+                std::future_status::ready,
+            "queue terminal drain");
+    drain.get();
+    require(fence->GetCompletedValue() ==
+                (partial || removal || rejected ? UINT64_MAX : 77),
+            "queue FIFO final fence");
+    unsigned bad = 0, guard = 0;
+    if (!release) {
+      std::fill(out, out + 2 * words + guards, 0xa5a55a5au);
+      auto read = MTLCommandQueue_commandBuffer(classic.handle);
+      enc = MTLCommandBuffer_blitCommandEncoder(read);
+      require(read && enc, "queue read objects");
+      blit(enc, source.handle, output.handle, 0);
+      blit(enc, dest.handle, output.handle, bytes);
+      MTLCommandEncoder_endEncoding(enc);
+      MTLCommandBuffer_commit(read);
+      MTLCommandBuffer_waitUntilCompleted(read);
+      require(MTLCommandBuffer_status(read) == WMTCommandBufferStatusCompleted,
+              "queue read completion");
+      for (unsigned n = 0; n < 2; ++n)
+        for (uint64_t w = 0; w < words; ++w) {
+          unsigned heap = n && w / page_words >= (rejected             ? 0u
+                                                  : partial || removal ? 1u
+                                                                       : 2u);
+          auto want = pattern(heap, w);
+          if (negative && !n && w + 1 == words)
+            want ^= 1;
+          bad += out[n * words + w] != want;
+        }
+      for (uint64_t w = 2 * words; w < 2 * words + guards; ++w)
+        guard += out[w] != 0xa5a55a5au;
+      require(bad == unsigned(negative) && !guard, "queue GPU oracle");
+      std::printf("QUEUE_PLAN_READBACK words=%llu bad=%u guard=%u\n",
+                  (unsigned long long)(2 * words), bad, guard);
+      for (auto r : public_resources)
+        r->Release();
+      for (auto h : public_heaps)
+        h->Release();
+    }
+    require(deaths() == 5, "queue COM final destruction");
+    std::printf("QUEUE_PLAN_RESULT seed=%u mode=%s terminal=%u destroyed=5 "
+                "failures=%u drained=1\n",
+                seed, mode, terminal, negative);
+    public_device->Release();
+    return negative ? 1 : 0;
+  }
   if (plan_mode) {
     const bool partial = !std::strcmp(mode, "plan-partial"),
                self = !std::strcmp(mode, "plan-self"),
@@ -2354,7 +2610,8 @@ int Run(const char *read_path, const char *write_path, UINT seed,
 }
 } // namespace
 int main(int argc, char **argv) {
-  if (argc == 3 && (!std::strcmp(argv[1], "plan-cost") ||
+  if (argc == 3 && (!std::strncmp(argv[1], "plan-queue", 10) ||
+                    !std::strcmp(argv[1], "plan-cost") ||
                     !std::strcmp(argv[1], "plan-normal") ||
                     !std::strcmp(argv[1], "plan-partial") ||
                     !std::strcmp(argv[1], "plan-self") ||
