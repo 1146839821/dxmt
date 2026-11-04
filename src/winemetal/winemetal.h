@@ -2496,6 +2496,11 @@ WINEMETAL_API void SparseMappingQueue_copyBufferMappings(
     const struct WMTCopySparseBufferMappingOperation *operations, uint64_t count
 );
 
+WINEMETAL_API uint32_t SparseMappingQueue_tryCopyBufferMappings(
+    obj_handle_t queue, obj_handle_t source, obj_handle_t destination,
+    const struct WMTCopySparseBufferMappingOperation *operations, uint64_t count
+);
+
 WINEMETAL_API void SparseMappingQueue_copyTextureMappings(
     obj_handle_t queue, obj_handle_t source, obj_handle_t destination,
     const struct WMTCopySparseTextureMappingOperation *operations, uint64_t count

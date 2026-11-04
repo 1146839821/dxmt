@@ -768,6 +768,8 @@ public:
     // sparse queue handoff established by BeginSparseMapping.
     if (sparse_mapping_queue_)
       EndSparseMapping(main_queue_signal);
+    if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == E_OUTOFMEMORY)
+      device_->MarkDeviceRemoved(hr);
     if (FAILED(hr))
       WARN("D3D12 CopyTileMappings failed with HRESULT 0x", std::hex, hr, std::dec);
   };

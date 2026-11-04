@@ -4256,6 +4256,24 @@ _SparseMappingQueue_updateTextureMappings(void *obj) {
   return STATUS_UNSUCCESSFUL;
 }
 
+static const char *
+sparse_buffer_copy_failure_for_testing(void) {
+  const char *phase = getenv("DXMT_TEST_SPARSE_BUFFER_COPY_FAILURE");
+  if (!phase || (strcmp(phase, "allocation") && strcmp(phase, "submitted")))
+    return NULL;
+  const char *at = getenv("DXMT_TEST_SPARSE_BUFFER_COPY_FAIL_AT");
+  char *end = NULL;
+  unsigned long long target = at ? strtoull(at, &end, 10) : 1;
+  if (!target || (at && (!end || *end)))
+    return NULL;
+  static atomic_uint_fast64_t calls = 0;
+  uint64_t call = atomic_fetch_add_explicit(&calls, 1, memory_order_relaxed) + 1;
+  if (call != target)
+    return NULL;
+  fprintf(stderr, "DXMT_TEST_SPARSE_BUFFER_COPY_FAILURE phase=%s call=%llu\n", phase, (unsigned long long)call);
+  return phase;
+}
+
 static NTSTATUS
 _SparseMappingQueue_copyBufferMappings(void *obj) {
   struct unixcall_sparsemappingqueue_copy_mappings *params = obj;
@@ -4263,18 +4281,36 @@ _SparseMappingQueue_copyBufferMappings(void *obj) {
   if (@available(macOS 26.0, *)) {
     if (!params->count)
       return STATUS_SUCCESS;
-    MTL4CopySparseBufferMappingOperation *operations = copy_sparse_buffer_mapping_copy_operations(
-        params->operations.ptr, params->count
-    );
+    const char *failure = sparse_buffer_copy_failure_for_testing();
+    MTL4CopySparseBufferMappingOperation *operations =
+        failure && !strcmp(failure, "allocation")
+            ? NULL
+            : copy_sparse_buffer_mapping_copy_operations(params->operations.ptr, params->count);
     if (!operations)
       return STATUS_UNSUCCESSFUL;
-    [(id<MTL4CommandQueue>)params->queue
-        copyBufferMappingsFromBuffer:(id<MTLBuffer>)params->source
-                             toBuffer:(id<MTLBuffer>)params->destination
-                           operations:operations
-                                count:(NSUInteger)params->count];
+    id<MTL4CommandQueue> queue = (id<MTL4CommandQueue>)params->queue;
+    id<MTLSharedEvent> test_completion =
+        failure && !strcmp(failure, "submitted") ? [[queue device] newSharedEvent] : nil;
+    if (failure && !strcmp(failure, "submitted") && !test_completion) {
+      free(operations);
+      return STATUS_UNSUCCESSFUL;
+    }
+    [queue copyBufferMappingsFromBuffer:(id<MTLBuffer>)params->source
+                               toBuffer:(id<MTLBuffer>)params->destination
+                             operations:operations
+                                  count:(NSUInteger)params->count];
     free(operations);
-    return STATUS_SUCCESS;
+    if (test_completion) {
+      [queue signalEvent:test_completion value:1];
+      BOOL completed = [test_completion waitUntilSignaledValue:1 timeoutMS:30000];
+      [test_completion release];
+      if (!completed) {
+        fprintf(stderr, "DXMT_TEST_SPARSE_BUFFER_COPY completion timeout\n");
+        abort();
+      }
+      fprintf(stderr, "DXMT_TEST_SPARSE_BUFFER_COPY submitted_completed=1\n");
+    }
+    return failure && !strcmp(failure, "submitted") ? STATUS_UNSUCCESSFUL : STATUS_SUCCESS;
   }
 #endif
   return STATUS_UNSUCCESSFUL;

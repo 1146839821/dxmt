@@ -150,7 +150,9 @@ void LogRuntimeIdentity() {
         std::pair{"winemetal.dll",
                   "SparseMappingQueue_tryBarrierBeforeResourceState"},
         std::pair{"winemetal.dll",
-                  "SparseMappingQueue_tryUpdateBufferMappings"}}) {
+                  "SparseMappingQueue_tryUpdateBufferMappings"},
+        std::pair{"winemetal.dll",
+                  "SparseMappingQueue_tryCopyBufferMappings"}}) {
     auto module = GetModuleHandleA(dll);
     auto code =
         module
@@ -171,9 +173,13 @@ void LogRuntimeIdentity() {
   }
 }
 int CheckSparseMappingFailure(const char *mode) {
-  const bool buffer_update = !std::strcmp(mode, "buffer-update") || !std::strcmp(mode, "buffer-unmap");
+  const bool buffer_update =
+      !std::strcmp(mode, "buffer-update") || !std::strcmp(mode, "buffer-unmap");
+  const bool buffer_copy = !std::strcmp(mode, "buffer-copy") ||
+                           !std::strcmp(mode, "buffer-copy-null");
+  const bool copy_null = !std::strcmp(mode, "buffer-copy-null");
   const bool unmap = !std::strcmp(mode, "buffer-unmap");
-  const bool copy = !std::strcmp(mode, "barrier-copy");
+  const bool copy = !std::strcmp(mode, "barrier-copy") || buffer_copy;
   Owned<ID3D12Device> device;
   Check("device", D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
                                     IID_PPV_ARGS(&device.ptr)));
@@ -182,8 +188,9 @@ int CheckSparseMappingFailure(const char *mode) {
     throw std::runtime_error("barrier fault requires DXMT");
   char at[16] = {};
   DWORD length = GetEnvironmentVariableA(
-      buffer_update ? "DXMT_TEST_SPARSE_BUFFER_UPDATE_FAIL_AT"
-                    : "DXMT_TEST_SPARSE_BARRIER_FAIL_AT",
+      buffer_copy     ? "DXMT_TEST_SPARSE_BUFFER_COPY_FAIL_AT"
+      : buffer_update ? "DXMT_TEST_SPARSE_BUFFER_UPDATE_FAIL_AT"
+                      : "DXMT_TEST_SPARSE_BARRIER_FAIL_AT",
       at, sizeof(at));
   if (length >= sizeof(at) ||
       (length && std::strcmp(at, "1") && std::strcmp(at, "2")))
@@ -195,7 +202,7 @@ int CheckSparseMappingFailure(const char *mode) {
         device->CreateCommandQueue(&q, IID_PPV_ARGS(&queue.ptr)));
   Owned<ID3D12Heap> heap;
   D3D12_HEAP_DESC hd = {};
-  hd.SizeInBytes = 2 * TileBytes;
+  hd.SizeInBytes = (buffer_copy ? 4 : 2) * TileBytes;
   hd.Properties = Properties(D3D12_HEAP_TYPE_DEFAULT);
   hd.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS;
   Check("fault heap", device->CreateHeap(&hd, IID_PPV_ARGS(&heap.ptr)));
@@ -216,7 +223,7 @@ int CheckSparseMappingFailure(const char *mode) {
   D3D12_TILE_REGION_SIZE region = {};
   region.NumTiles = 1;
   UINT offset = 0;
-  const UINT64 base_value = buffer_update ? 1 : 0;
+  const UINT64 base_value = buffer_update || buffer_copy ? 1 : 0;
   if (buffer_update) {
     // Neither a rejected flag nor an all-SKIP request may consume the first
     // nonempty update failure or remove an otherwise healthy device.
@@ -234,10 +241,36 @@ int CheckSparseMappingFailure(const char *mode) {
     std::cout << "BUFFER_UPDATE_PREFLIGHT invalid=healthy skip=healthy\n";
     region.NumTiles = 2;
   }
+  if (buffer_copy) {
+    region.NumTiles = 2;
+    queue->CopyTileMappings(destination.ptr, &coordinate, source.ptr,
+                            &coordinate, &region,
+                            static_cast<D3D12_TILE_MAPPING_FLAGS>(0x80000000u));
+    Check("invalid copy stayed healthy", device->GetDeviceRemovedReason());
+    if (!copy_null) {
+      queue->UpdateTileMappings(source.ptr, 1, &coordinate, &region, heap.ptr,
+                                1, nullptr, &offset, nullptr,
+                                D3D12_TILE_MAPPING_FLAG_NONE);
+    }
+    UINT destination_offset = 2;
+    queue->UpdateTileMappings(destination.ptr, 1, &coordinate, &region,
+                              heap.ptr, 1, nullptr, &destination_offset,
+                              nullptr, D3D12_TILE_MAPPING_FLAG_NONE);
+    Check("copy setup stayed healthy", device->GetDeviceRemovedReason());
+    Check("copy preflight signal", queue->Signal(fence.ptr, base_value));
+    Wait(fence.ptr, base_value);
+    std::cout << "BUFFER_COPY_PREFLIGHT invalid=healthy source="
+              << (copy_null ? "NULL" : "mapped") << "\n";
+  }
   if (prior) {
-    queue->UpdateTileMappings(source.ptr, 1, &coordinate, &region, heap.ptr, 1,
-                              nullptr, &offset, nullptr,
+    if (buffer_copy)
+      queue->CopyTileMappings(destination.ptr, &coordinate, source.ptr,
+                              &coordinate, &region,
                               D3D12_TILE_MAPPING_FLAG_NONE);
+    else
+      queue->UpdateTileMappings(source.ptr, 1, &coordinate, &region, heap.ptr,
+                                1, nullptr, &offset, nullptr,
+                                D3D12_TILE_MAPPING_FLAG_NONE);
     Check("healthy prior mapping", device->GetDeviceRemovedReason());
     Check("prior signal", queue->Signal(fence.ptr, base_value + 1));
     Wait(fence.ptr, base_value + 1);
@@ -267,11 +300,14 @@ int CheckSparseMappingFailure(const char *mode) {
                               nullptr, D3D12_TILE_MAPPING_FLAG_NONE);
   }
   char phase[16] = {};
-  if (buffer_update)
-    GetEnvironmentVariableA("DXMT_TEST_SPARSE_BUFFER_UPDATE_FAILURE", phase,
-                            sizeof(phase));
+  if (buffer_copy || buffer_update)
+    GetEnvironmentVariableA(buffer_copy
+                                ? "DXMT_TEST_SPARSE_BUFFER_COPY_FAILURE"
+                                : "DXMT_TEST_SPARSE_BUFFER_UPDATE_FAILURE",
+                            phase, sizeof(phase));
   const HRESULT expected_reason =
-      buffer_update && !std::strcmp(phase, "prepare")
+      (buffer_copy || buffer_update) && (!std::strcmp(phase, "prepare") ||
+                                         !std::strcmp(phase, "snapshot"))
           ? E_OUTOFMEMORY
           : DXGI_ERROR_DEVICE_REMOVED;
   if (device->GetDeviceRemovedReason() != expected_reason) {
@@ -290,11 +326,13 @@ int CheckSparseMappingFailure(const char *mode) {
     throw std::runtime_error("barrier failure stranded pending fence");
   if (queue->Signal(fence.ptr, base_value + 2) != DXGI_ERROR_DEVICE_REMOVED)
     throw std::runtime_error("barrier failure allowed later submission");
-  std::cout << (buffer_update ? "SPARSE_BUFFER_UPDATE_FAILURE api="
-                              : "SPARSE_BARRIER_FAILURE api=")
-            << (unmap  ? "unmap"
-                : copy ? "copy"
-                       : "update")
+  std::cout << (buffer_copy     ? "SPARSE_BUFFER_COPY_FAILURE api="
+                : buffer_update ? "SPARSE_BUFFER_UPDATE_FAILURE api="
+                                : "SPARSE_BARRIER_FAILURE api=")
+            << (copy_null ? "null"
+                : unmap   ? "unmap"
+                : copy    ? "copy"
+                          : "update")
             << " call=" << (prior ? 2 : 1)
             << " removed=PASS fence=PASS signal_rejected=PASS\n";
   return 0;
@@ -573,7 +611,9 @@ int Run(const char *read_path, const char *write_path, UINT seed,
 int main(int argc, char **argv) {
   if (argc != 3 && argc != 5 && argc != 6) {
     std::cerr << "usage: dx12_reserved_buffer <probe_read.cso> "
-                 "<probe_write.cso> [seed rounds [wrong-oracle|queue-init-failure|barrier-update|barrier-copy|buffer-update|buffer-unmap]]\n";
+                 "<probe_write.cso> [seed rounds "
+                 "[wrong-oracle|queue-init-failure|barrier-update|barrier-copy|"
+                 "buffer-update|buffer-unmap|buffer-copy|buffer-copy-null]]\n";
     return 2;
   }
   try {
@@ -585,12 +625,16 @@ int main(int argc, char **argv) {
          std::strcmp(argv[5], "barrier-update") &&
          std::strcmp(argv[5], "barrier-copy") &&
          std::strcmp(argv[5], "buffer-update") &&
-         std::strcmp(argv[5], "buffer-unmap")))
+         std::strcmp(argv[5], "buffer-unmap") &&
+         std::strcmp(argv[5], "buffer-copy") &&
+         std::strcmp(argv[5], "buffer-copy-null")))
       return 2;
     if (argc == 6 && (!std::strcmp(argv[5], "barrier-update") ||
                       !std::strcmp(argv[5], "barrier-copy") ||
                       !std::strcmp(argv[5], "buffer-update") ||
-                      !std::strcmp(argv[5], "buffer-unmap"))) {
+                      !std::strcmp(argv[5], "buffer-unmap") ||
+                      !std::strcmp(argv[5], "buffer-copy") ||
+                      !std::strcmp(argv[5], "buffer-copy-null"))) {
       if (rounds != 1)
         return 2; // Fault counters and removal are process-local.
       return CheckSparseMappingFailure(argv[5]);

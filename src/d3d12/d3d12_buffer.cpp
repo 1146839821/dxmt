@@ -33,6 +33,24 @@ namespace {
 constexpr uint64_t kD3D12TileSize = 64ull * 1024;
 
 static void
+FailBufferCopyPreparationForTesting(const char *point) {
+  char phase[16] = {}, at[16] = {};
+  const DWORD length = GetEnvironmentVariableA("DXMT_TEST_SPARSE_BUFFER_COPY_FAILURE", phase, sizeof(phase));
+  if (!length || length >= sizeof(phase) || std::strcmp(phase, point))
+    return;
+  const DWORD at_length = GetEnvironmentVariableA("DXMT_TEST_SPARSE_BUFFER_COPY_FAIL_AT", at, sizeof(at));
+  if (at_length >= sizeof(at) || (at_length && std::strcmp(at, "1") && std::strcmp(at, "2")))
+    return;
+  const uint64_t target = at_length && !std::strcmp(at, "2") ? 2 : 1;
+  static std::atomic<uint64_t> calls{0};
+  const auto call = calls.fetch_add(1, std::memory_order_relaxed) + 1;
+  if (call == target) {
+    ERR("DXMT_TEST_SPARSE_BUFFER_COPY_FAILURE phase=", point, " call=", call);
+    throw std::bad_alloc();
+  }
+}
+
+static void
 FailBufferUpdatePreparationForTesting() {
   char phase[16] = {}, at[16] = {};
   const DWORD length = GetEnvironmentVariableA("DXMT_TEST_SPARSE_BUFFER_UPDATE_FAILURE", phase, sizeof(phase));
@@ -654,20 +672,19 @@ public:
       MTLD3D12Resource *pSourceResource, const D3D12_TILED_RESOURCE_COORDINATE *pDstRegionStartCoordinate,
       const D3D12_TILED_RESOURCE_COORDINATE *pSrcRegionStartCoordinate, const D3D12_TILE_REGION_SIZE *pRegionSize,
       D3D12_TILE_MAPPING_FLAGS Flags, WMT::SparseMappingQueue sparse_mapping_queue
-  ) override {
+  ) override try {
     if (!reserved_ || !pSourceResource || !pDstRegionStartCoordinate || !pSrcRegionStartCoordinate || !pRegionSize ||
-        !pSourceResource->IsReservedResource() ||
-        !IsSameDevice(device_, pSourceResource) ||
+        !pSourceResource->IsReservedResource() || !IsSameDevice(device_, pSourceResource) ||
         pSourceResource->IsReservedTexture() || (Flags & ~D3D12_TILE_MAPPING_FLAG_NO_HAZARD))
       return E_INVALIDARG;
 
     auto *source = static_cast<MTLD3D12Buffer *>(pSourceResource);
-    const auto dst_coordinate = pDstRegionStartCoordinate ? *pDstRegionStartCoordinate
-                                                            : D3D12_TILED_RESOURCE_COORDINATE{};
-    const auto src_coordinate = pSrcRegionStartCoordinate ? *pSrcRegionStartCoordinate
-                                                            : D3D12_TILED_RESOURCE_COORDINATE{};
-    if (dst_coordinate.Y || dst_coordinate.Z || dst_coordinate.Subresource >= 1 || src_coordinate.Y || src_coordinate.Z ||
-        src_coordinate.Subresource >= 1)
+    const auto dst_coordinate =
+        pDstRegionStartCoordinate ? *pDstRegionStartCoordinate : D3D12_TILED_RESOURCE_COORDINATE{};
+    const auto src_coordinate =
+        pSrcRegionStartCoordinate ? *pSrcRegionStartCoordinate : D3D12_TILED_RESOURCE_COORDINATE{};
+    if (dst_coordinate.Y || dst_coordinate.Z || dst_coordinate.Subresource >= 1 || src_coordinate.Y ||
+        src_coordinate.Z || src_coordinate.Subresource >= 1)
       return E_INVALIDARG;
 
     UINT tile_count = pRegionSize ? pRegionSize->NumTiles : tile_count_;
@@ -678,13 +695,13 @@ public:
       tile_count = pRegionSize->Width;
     }
     if (!tile_count || dst_coordinate.X > tile_count_ || tile_count > tile_count_ - dst_coordinate.X ||
-        src_coordinate.X > source->tile_count_ || tile_count > source->tile_count_ - src_coordinate.X ||
-        !pRegionSize)
+        src_coordinate.X > source->tile_count_ || tile_count > source->tile_count_ - src_coordinate.X || !pRegionSize)
       return E_INVALIDARG;
-    if (sparse_mapping_queue &&
-        (!buffer || !buffer->current() || !source->buffer || !source->buffer->current()))
+    if (sparse_mapping_queue && (!buffer || !buffer->current() || !source->buffer || !source->buffer->current()))
       return E_OUTOFMEMORY;
 
+    if (source != this)
+      FailBufferCopyPreparationForTesting("snapshot");
     std::vector<TileMapping> copied;
     {
       std::unique_lock<dxmt::mutex> source_lock(source->tile_mapping_mutex_);
@@ -692,6 +709,22 @@ public:
           source->tile_mappings_.begin() + src_coordinate.X,
           source->tile_mappings_.begin() + src_coordinate.X + tile_count
       );
+    }
+    if (sparse_mapping_queue && source != this) {
+      FailBufferCopyPreparationForTesting("prepare");
+      std::vector<WMTCopySparseBufferMappingOperation> mapping_operations;
+      mapping_operations.reserve(tile_count);
+      for (UINT tile = 0; tile < tile_count; tile++) {
+        auto &operation = mapping_operations.emplace_back();
+        operation.source_range.location = src_coordinate.X + tile;
+        operation.source_range.length = 1;
+        operation.destination_offset = dst_coordinate.X + tile;
+      }
+      if (!sparse_mapping_queue.tryCopyBufferMappings(
+              source->buffer->current()->buffer(), buffer->current()->buffer(), mapping_operations.data(),
+              mapping_operations.size()
+          ))
+        return DXGI_ERROR_DEVICE_REMOVED;
     }
     {
       std::unique_lock<dxmt::mutex> destination_lock(tile_mapping_mutex_);
@@ -715,20 +748,10 @@ public:
         }
         return S_OK;
       }
-      std::vector<WMTCopySparseBufferMappingOperation> mapping_operations;
-      mapping_operations.reserve(tile_count);
-      for (UINT tile = 0; tile < tile_count; tile++) {
-        auto &operation = mapping_operations.emplace_back();
-        operation.source_range.location = src_coordinate.X + tile;
-        operation.source_range.length = 1;
-        operation.destination_offset = dst_coordinate.X + tile;
-      }
-      sparse_mapping_queue.copyBufferMappings(
-          source->buffer->current()->buffer(), buffer->current()->buffer(), mapping_operations.data(),
-          mapping_operations.size()
-      );
     }
     return S_OK;
+  } catch (const std::bad_alloc &) {
+    return E_OUTOFMEMORY;
   }
 };
 

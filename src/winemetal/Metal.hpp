@@ -961,6 +961,13 @@ public:
     SparseMappingQueue_copyBufferMappings(handle, source.handle, destination.handle, operations, count);
   }
 
+  bool
+  tryCopyBufferMappings(
+      Buffer source, Buffer destination, const WMTCopySparseBufferMappingOperation *operations, uint64_t count
+  ) {
+    return SparseMappingQueue_tryCopyBufferMappings(handle, source.handle, destination.handle, operations, count) != 0;
+  }
+
   void
   copyTextureMappings(
       Texture source, Texture destination, const WMTCopySparseTextureMappingOperation *operations, uint64_t count

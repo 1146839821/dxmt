@@ -1,7 +1,7 @@
 ByteAddressBuffer input_buffer : register(t0);
 RWByteAddressBuffer output_buffer : register(u0);
 
-[numthreads(1, 1, 1)]
-void main() {
-  output_buffer.Store(0, input_buffer.Load(0));
+[numthreads(64, 1, 1)]
+void main(uint3 id : SV_DispatchThreadID) {
+  output_buffer.Store(id.x * 4, input_buffer.Load(id.x * 4));
 }
