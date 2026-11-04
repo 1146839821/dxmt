@@ -21,8 +21,16 @@ check_dxil_program_bounds(void) {
   memcpy(bytes + 52, "DXIL", 4);
   value = 16; memcpy(bytes + 60, &value, 4);
   value = 4; memcpy(bytes + 64, &value, 4);
+  memcpy(bytes + 68, "BC\xc0\xde", 4);
   if (!dxmt_msc_dxbc_bounds_valid(bytes, sizeof(bytes)))
     return 1;
+  memcpy(bytes + 68, "\xde\xc0\x17\x0b", 4);
+  if (!dxmt_msc_dxbc_bounds_valid(bytes, sizeof(bytes)))
+    return 1;
+  memset(bytes + 68, 0, 4);
+  if (dxmt_msc_dxbc_bounds_valid(bytes, sizeof(bytes)))
+    return 1;
+  memcpy(bytes + 68, "BC\xc0\xde", 4);
   value = UINT32_MAX; memcpy(bytes + 60, &value, 4);
   if (dxmt_msc_dxbc_bounds_valid(bytes, sizeof(bytes)))
     return 1;

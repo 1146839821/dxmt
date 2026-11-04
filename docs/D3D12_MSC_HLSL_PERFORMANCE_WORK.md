@@ -253,6 +253,18 @@ existing behavior; in particular the four-zero-byte Wine fault remains an
 open issue. No general malformed-bitcode safety claim or validation-default
 change follows from these checks.
 
+The bounded container check previously accepted a zero bitcode length and an
+invalid bitcode magic; both caused access faults during Wine conversion on the
+installed MSC. It now requires at least four bytes and recognizes the raw and
+wrapper magic values used by LLVM's `BitcodeReader.h`. A native test covers
+both signatures and an invalid signature; the staged valid Shader corpus, the
+two Wine failure reproductions and a valid Wine DXIL sizing request passed.
+Function-constant and framebuffer-fetch GPU pixels and the wrong-oracle control
+also passed with both Metal validation layers. Results are in
+`result-magic-*-20261104.log` and `result-msc-bitcode-magic-hlsl-20261104/`
+outside the repository. This checks only the bitcode signature and bounds; it
+does not validate LLVM records, shader semantics or non-container bytecode.
+
 On the installed MSC runtime, the compute fixture's extracted raw LLVM bitcode
 and its unwrapped DXIL program section both faulted through Wine with explicit
 zero validation flags, like a four-zero-byte input. With the explicit

@@ -277,7 +277,12 @@ dxmt_msc_dxbc_bounds_valid(const uint8_t *bytes, size_t size) {
       memcpy(&bitcode_offset, bytes + offset + 24, sizeof(bitcode_offset));
       memcpy(&bitcode_size, bytes + offset + 28, sizeof(bitcode_size));
       if (bitcode_offset < 16 || bitcode_offset > length - 8 ||
-          bitcode_size > length - 8 - bitcode_offset)
+          bitcode_size < 4 || bitcode_size > length - 8 - bitcode_offset)
+        return false;
+      const uint8_t *bitcode = bytes + offset + 16 + bitcode_offset;
+      static const uint8_t raw_magic[] = {'B', 'C', 0xc0, 0xde};
+      static const uint8_t wrapper_magic[] = {0xde, 0xc0, 0x17, 0x0b};
+      if (memcmp(bitcode, raw_magic, 4) && memcmp(bitcode, wrapper_magic, 4))
         return false;
       has_dxil = true;
     }

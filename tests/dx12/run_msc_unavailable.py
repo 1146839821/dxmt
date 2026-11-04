@@ -69,6 +69,12 @@ def main():
     dxil = next(offset for offset in offsets if shader[offset:offset + 4] == b'DXIL')
     dxil_length = struct.unpack_from('<I', shader, dxil + 4)[0]
     bitcode_offset, bitcode_size = struct.unpack_from('<II', shader, dxil + 24)
+    data = bytearray(shader)
+    struct.pack_into('<I', data, dxil + 28, 0)
+    malformed['empty-bitcode'] = data
+    data = bytearray(shader)
+    data[dxil + 16 + bitcode_offset:dxil + 20 + bitcode_offset] = b'\0' * 4
+    malformed['bad-bitcode-magic'] = data
     raw_inputs = {
         'validated-zero': b'\0' * 4,
         'validated-program': shader[dxil + 8:dxil + 8 + dxil_length],
