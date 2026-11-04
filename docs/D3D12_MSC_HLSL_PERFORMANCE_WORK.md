@@ -128,7 +128,7 @@ original dates, measurements and limitations.
 | Input DXIL | Controlled `-Od` and `-O3` pixel tests passed; embedded debug exposed an LLVM metadata incompatibility addressed by a separately built patched toolchain. | Expand shader coverage and deployment verification; do not recompile game shaders. |
 | Root validation | Unset, zero, bound-resource and DXIL validation were compared on one valid/missing-resource pair; DXIL validation also passed controlled HLSL GPU pixels. | Validate broader inputs and runtime versions before changing production flags. |
 | In-process and persistent cache | Process cache plus single-flight exists, disk cache explicitly disabled (`d3d12_shader_converter.cpp:199-213,228-237,1812-1837`). Map has no evident capacity bound. Key includes stage, source, root, targets, spaces, configuration and flags, but loaded-dylib content identity is not trusted for persistent use. | Measure hits, waits and memory growth; validate content identity, corruption recovery and opt-in before disk cache. Function specializations require separate keys. |
-| Function constants | Two values produced distinct pixels; cbuffer, branch and specialization controls were measured at two update frequencies. No D3D12 production switch or specialization PSO cache. | Measure memory and representative workloads; prove cache identity and fallback. |
+| Function constants | Two values produced distinct pixels; cbuffer, branch and specialization controls were measured at two update frequencies. A later test-owned PSO cache passed five specialization values, repeated lookups and four incomplete-key controls. No D3D12 production switch or specialization PSO cache. | Validate production identity/fallback separately; measure memory and representative workloads. |
 | Framebuffer fetch / hybrid | Controlled one-pass hybrid and multipass reference passed pixel checks; whole-command-buffer GPU timing was recorded. Bandwidth remains unmeasured. | Test representative formats, devices, CPU costs and bandwidth before enabling. |
 | RT intrinsic masks | `IRObjectGatherRaytracingIntrinsics` is loaded but has no call site (`metalirconverter.c:47,425`); full masks retained in current paths. | Aggregate all pipeline shader requirements, validate SBT/hit groups/residency and A/B ray dispatch before narrowing. |
 | RT attribute/mode/PSO | General conversion uses 16 bytes; state-object path rejects attributes >16 and specialized conversions receive configured size (`d3d12_raytracing_pipeline.cpp:411-418,456-458`, `metalirconverter.c:949,1468,1595`). Visible-function approach unchanged. | Verify per-state-object semantics, compile and dispatch timings before binary functions, specialized raygen or intersection-table changes. |
@@ -1447,3 +1447,131 @@ for commands, identities, controls and limits. This establishes the controlled
 compute path only. Function Constant specialization/PSO cache isolation and
 graphics/stage-in replay still need separate evidence; no production cache
 policy or public capability was changed.
+
+### Function Constant PSO cache isolation design (2026-11-04)
+
+**Goal / baseline:** At `a9fb572646973116879ca5f1829418ae29dbd261`, the
+cbuffer comparison retains two PSOs by sequence index. It does not test a
+specialization-key lookup. Branch is `feat/d3d12`; the existing `.gitignore`
+edit is outside this slice. macOS 27.2 (26B123), Xcode 27.2 (27B52), Metal
+32023.922 and the Metal Toolchain 27.2 `metallib` were rechecked. The earlier
+missing-toolchain limitation was resolved by the clean build documented above.
+
+**Evidence / contract:** Apple's installed MSC `UserManual.md`, “Adopting
+Metal language features in HLSL”, requires UInt4 opaque packing for function
+constants. The existing fixture declares one float4 at index zero. These
+are explicit Metal extensions, not a Microsoft D3D12 dynamic-cbuffer contract;
+Mullion and Windows behavior are not substitutes for this Metal specialization
+test. The existing production D3D12 extension spaces remain disabled.
+
+**Scope / module boundary:** Extend the opt-in cbuffer probe and its runner
+with a test-owned cache. Each cache is scoped to one device, metallib/entry,
+vertex function and fixed render descriptor. Its ordered key contains the
+constant index, Metal type and all 16 value bytes, copied without float
+comparison or structure padding. No production PSO lookup is modified.
+
+**Changes / test plan:** Lazily create five variants differing in each RGBA
+word, then revisit them in an interleaved 15-request sequence. Verify five
+misses/creations and ten hits, plus all 16 pixels after every request. Four
+negative controls each omit one value word from the key and must fail at the
+first resulting collision, after the expected prefix of correct readbacks.
+Run independent processes, a separate Metal API/GPU validation pass and the
+existing dynamic/branch and wrong-pixel controls. Record raw lookup times
+separately for hits/misses; they are not a representative performance benchmark.
+
+**Non-scope / risks:** No D3D12 extension exposure, cross-device/library cache,
+disk persistence, eviction, concurrency or in-flight destruction test. The
+single UInt4/index-zero fixture does not vary type or index. Five tiny PSOs do
+not establish memory cost, workload coverage or a production optimization.
+
+**Rollback / definition of done:** Remove this opt-in probe mode and runner
+checks independently. Completion requires a successful build, exact cache and
+pixel sequences, four intentional collision failures, original-mode regression,
+paired-runtime identity evidence and a focused local commit without pushing.
+Gate 0 and Gate 1 complete; implementation is authorized by the MSC task.
+
+**Gate 2 / changed files:** `tests/dx12/dx12_msc_cbuffer_compare.cpp` adds
+`--specialization-cache` and four `--specialization-cache-omit-{r,g,b,a}`
+controls. Cache insertion occurs only after Metal function and PSO creation
+succeed. `tests/dx12/run_msc_cbuffer_compare.py` verifies exact lookup counts,
+creation counts, readback sequences and intentional mismatches; it records raw
+samples and summaries and verifies the staged builtin WineMetal PE copy too.
+Each run gets an isolated DXMT shader-cache path. This document records the
+design, evidence and remaining scope. No runtime source changed.
+
+**Gate 3 / LOCAL_PASS:** The opt-in executable/fixtures and the full existing
+candidate build completed successfully. On Apple M1 Max, macOS 27.2, staged
+Wine 11.0, five ordinary processes and one Metal API/GPU validation process
+each recorded five cache misses, ten hits, five function creations and five
+PSO creations. All 90 specialization readbacks checked all 64 RGBA bytes of
+their 4x4 textures exactly. The initial six comparison PSOs are additional
+to these five cache-owned PSOs; these counts do not describe a whole process.
+
+Each incomplete-key control exited 16 with its expected wrong pixel after
+2, 4, 6 or 8 correct specialization readbacks respectively:
+
+| Omitted word | Request / variant | First bad byte | Actual / expected |
+| --- | --- | --- | --- |
+| R | 2 / 1 | 0 | 255 / 0 |
+| G | 4 / 2 | 1 | 0 / 255 |
+| B | 6 / 3 | 2 | 0 / 255 |
+| A | 8 / 4 | 3 | 255 / 0 |
+
+The original wrong-pixel control returned 14 as required. The existing
+frequency mode passed two ordinary processes, a validation process and both
+wrong-pixel/wrong-selection controls. Seventeen manual parser mutations of
+the recorded logs were rejected: missing/duplicate lookups, wrong identity,
+missing/wrong pixels, incorrect counts, unknown records, unexpected failure,
+nonfinite timing, and missing failure/false success in each negative control.
+Metal validation enabled messages, loaded PE export bytes, loaded PE/Unix/MSC
+paths and stage/build contents were checked by the runner.
+
+The 50 non-validation hits had lookup median/P95/min/max of
+1.0/134.5/0.8/149.9 microseconds. The 25 misses had
+494.7/3487.7/170.6/3918.1 microseconds. Miss timing includes specialization,
+Metal PSO creation and insertion; hit timing covers key construction and map
+lookup. Both include timer/scheduling effects. The comparison PSOs ran first,
+so the driver was already exercised. These small samples and long tails are
+not a game performance conclusion or isolated Metal compiler timing.
+
+Build: `dxmt-current-patches-20261103/`, using the separate
+`llvm-current-patches-20261103/install` LLVM. The WineMetal Unix SHA-256 was
+`c9e20da27632144651fd744d01ddb26445800ea4baa1fbd36a0257188f1fbd8c`.
+The loaded MSC file was `/usr/local/lib/libmetalirconverter.dylib`, SHA-256
+`cc487a757f431c83483346c06a3ae8558910ecc510ce59b1e4f905d5d6d72bd4`.
+This is file identity, not a dynamic product-version query. All artifact hashes
+and raw logs are recorded in `result-msc-specialization-cache-20261104/` and
+`result-msc-specialization-frequency-regression-20261104/` under the external
+`dxmt-test/n95-capability-gate/` directory.
+
+Reproduction from the repository root (fresh output directories required):
+
+```sh
+base=/Users/zhangbo/Documents/Vibe-Codeding/dxmt-test/n95-capability-gate
+WINEPREFIX="$base/prefix-dxc-build-cache-gpu-20261104" meson compile \
+  -C "$base/dxmt-current-patches-20261103" dx12_msc_cbuffer_compare \
+  dx12_metal_hlsl_dynamic_main dx12_metal_hlsl_dynamic_branch_main \
+  dx12_metal_hlsl_constants_fixture
+meson compile -C "$base/dxmt-current-patches-20261103"
+python3 tests/dx12/run_msc_cbuffer_compare.py \
+  --stage "$base/stage-msc-specialization-cache-20261104" \
+  --prefix "$base/prefix-msc-space-fresh-20261104" \
+  --build "$base/dxmt-current-patches-20261103" \
+  --converter /usr/local/lib/libmetalirconverter.dylib \
+  --output "$base/NEW-specialization-results" --processes 5 --specialization-cache
+```
+
+Prepare a new stage from the isolated Wine installation and refresh the
+executable/three fixtures, D3D12/DXGI and both WineMetal halves before running.
+Use the runtime prefix only with its compatible staged Wine; the repository's
+build-time Wine/DXC uses the separate prefix shown above. Run the same command
+with `--processes 2 --frequency` and a different output path for regression.
+
+**Gate 4 / delivery:** Diff and whitespace checks passed. The slice affects
+only opt-in probes, their runner and this report; no Feature Level, Shader Model,
+Tier, production cache policy or dual-backend behavior changes. GPU occupancy,
+memory, cross-device/configuration reuse and production D3D12 specialization
+cache correctness remain **NOT_RUN**. The MSC task remains incomplete. The
+next recommended slice is graphics/stage-in conversion-cache replay with GPU
+output verification. Commit only these three files, preserve the existing
+`.gitignore` edit, and do not push.

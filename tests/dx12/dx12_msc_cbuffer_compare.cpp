@@ -1,11 +1,13 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <d3d12.h>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <map>
 #include <utility>
 #include <vector>
 #include "Metal.hpp"
@@ -72,13 +74,143 @@ static bool compile(const char *file, ID3DBlob *root, bool constants,
   return true;
 }
 
+// This cache belongs to one device/library/entry/vertex/render configuration.
+// It is a controlled Metal prototype, not the production D3D12 PSO cache.
+static int specialization_cache(WMT::Device device, WMT::Library lib,
+                                const std::string &entry, WMT::Function vertex,
+                                WMT::CommandQueue queue, int omitted_word) {
+  const float values[5][4] = {
+      {1, 0, 0, 1}, {0, 0, 0, 1}, {1, 1, 0, 1}, {1, 0, 1, 1}, {1, 0, 0, 0}};
+  const uint8_t expected[5][4] = {{255, 0, 0, 255},
+                                  {0, 0, 0, 255},
+                                  {255, 255, 0, 255},
+                                  {255, 0, 255, 255},
+                                  {255, 0, 0, 0}};
+  const unsigned sequence[] = {0, 0, 1, 0, 2, 1, 3, 2, 4, 0, 4, 3, 2, 1, 0};
+  // Index, Metal type, then all four opaque value words. No float equality,
+  // pointer identity, sequence index or padding participates in the key.
+  using Key = std::array<uint32_t, 6>;
+  std::map<Key, WMT::Reference<WMT::RenderPipelineState>> cache;
+  unsigned hits = 0, misses = 0, functions = 0, pipelines = 0;
+  LARGE_INTEGER frequency{};
+  if (!QueryPerformanceFrequency(&frequency))
+    return 15;
+  WMTTextureInfo ti{};
+  ti.pixel_format = WMTPixelFormatRGBA8Unorm;
+  ti.width = ti.height = 4;
+  ti.depth = ti.array_length = ti.mipmap_level_count = ti.sample_count = 1;
+  ti.type = WMTTextureType2D;
+  ti.usage = WMTTextureUsageRenderTarget;
+  ti.options = WMTResourceStorageModeShared;
+  auto texture = device.newTexture(ti);
+  if (!texture)
+    return 11;
+  WMT::Error error;
+  for (unsigned n = 0; n < std::size(sequence); ++n) {
+    const unsigned variant = sequence[n];
+    // Copy each request into scratch storage; lookup uses its content, never
+    // the address of the source fixture or the order of requests.
+    std::array<float, 4> value{};
+    std::memcpy(value.data(), values[variant], sizeof(value));
+    LARGE_INTEGER start{}, finish{};
+    if (!QueryPerformanceCounter(&start))
+      return 15;
+    Key key{0, uint32_t(WMTDataTypeUInt4)};
+    std::memcpy(key.data() + 2, value.data(), 16);
+    if (omitted_word >= 0)
+      key[2 + omitted_word] = 0; // Intentional incomplete-key control.
+    auto found = cache.find(key);
+    const bool hit = found != cache.end();
+    if (hit) {
+      ++hits;
+    } else {
+      ++misses;
+      WMTFunctionConstant constant{};
+      constant.index = 0;
+      constant.type = WMTDataTypeUInt4;
+      constant.data.set(value.data());
+      auto fragment =
+          lib.newFunctionWithConstants(entry.c_str(), &constant, 1, error);
+      if (!fragment)
+        return 9;
+      ++functions;
+      WMTRenderPipelineInfo info{};
+      WMT::InitializeRenderPipelineInfo(info);
+      info.vertex_function = vertex.handle;
+      info.fragment_function = fragment.handle;
+      info.colors[0].pixel_format = WMTPixelFormatRGBA8Unorm;
+      auto pipeline = device.newRenderPipelineState(info, error);
+      if (!pipeline)
+        return 10;
+      ++pipelines;
+      found = cache.emplace(key, pipeline).first;
+    }
+    if (!QueryPerformanceCounter(&finish))
+      return 15;
+    std::cout << "SPECIALIZATION_LOOKUP " << n << " " << variant << " "
+              << (hit ? "hit" : "miss") << " " << cache.size() << " "
+              << functions << " " << pipelines << " "
+              << (1000000.0 * (finish.QuadPart - start.QuadPart) /
+                  frequency.QuadPart)
+              << "\n";
+    WMTRenderPassInfo pass;
+    WMT::InitializeRenderPassInfo(pass);
+    pass.colors[0].texture = texture.handle;
+    pass.colors[0].load_action = WMTLoadActionClear;
+    pass.colors[0].store_action = WMTStoreActionStore;
+    auto command = queue.commandBuffer();
+    if (!command)
+      return 12;
+    auto encoder = command.renderCommandEncoder(pass);
+    if (!encoder)
+      return 12;
+    encoder.setRenderPipelineState(found->second);
+    encoder.drawPrimitives(WMTPrimitiveTypeTriangle, 0, 3);
+    encoder.endEncoding();
+    command.commit();
+    command.waitUntilCompleted();
+    if (command.status() != WMTCommandBufferStatusCompleted)
+      return 13;
+    uint8_t pixels[64]{};
+    texture.getBytes({0, 0, 0}, {4, 4, 1}, 0, 0, pixels, 16, 64);
+    for (unsigned byte = 0; byte < sizeof(pixels); ++byte) {
+      if (pixels[byte] != expected[variant][byte % 4]) {
+        std::cerr << "SPECIALIZATION_MISMATCH " << n << " " << variant << " "
+                  << byte << " " << unsigned(pixels[byte]) << " "
+                  << unsigned(expected[variant][byte % 4]) << "\n";
+        return 16;
+      }
+    }
+    std::cout << "SPECIALIZATION_PIXEL " << n << " " << variant << " "
+              << unsigned(pixels[0]) << "," << unsigned(pixels[1]) << ","
+              << unsigned(pixels[2]) << "," << unsigned(pixels[3]) << "\n";
+  }
+  std::cout << "SPECIALIZATION_CACHE " << misses << " " << hits << " "
+            << cache.size() << " " << functions << " " << pipelines << "\n";
+  return misses == 5 && hits == 10 && cache.size() == 5 && functions == 5 &&
+                 pipelines == 5
+             ? 0
+             : 17;
+}
+
 int main(int argc, char **argv) {
+  const char *omission_flags[] = {
+      "--specialization-cache-omit-r", "--specialization-cache-omit-g",
+      "--specialization-cache-omit-b", "--specialization-cache-omit-a"};
+  int omitted_word = -1;
+  for (unsigned i = 0; argc == 5 && i < std::size(omission_flags); ++i)
+    if (std::strcmp(argv[4], omission_flags[i]) == 0)
+      omitted_word = int(i);
+  const bool check_specialization_cache =
+      omitted_word >= 0 ||
+      (argc == 5 && std::strcmp(argv[4], "--specialization-cache") == 0);
   if (argc != 4 &&
       !(argc == 5 && (std::strcmp(argv[4], "--wrong") == 0 ||
                       std::strcmp(argv[4], "--frequency") == 0 ||
                       std::strcmp(argv[4], "--frequency-wrong") == 0 ||
                       std::strcmp(argv[4], "--ignore-debug") == 0 ||
-                      std::strcmp(argv[4], "--ignore-debug-wrong") == 0)))
+                      std::strcmp(argv[4], "--ignore-debug-wrong") == 0 ||
+                      check_specialization_cache)))
     return 2;
   for (const auto &symbol :
        {std::pair{"d3d12.dll", "D3D12CreateDevice"},
@@ -263,6 +395,12 @@ vertex float4 vertex_main(uint i [[vertex_id]]) { const float2 p[3] = {float2(-1
       std::cout << "CBUFFER_PIXEL " << mode << " " << i << " "
                 << unsigned(pixel[0]) << "," << unsigned(pixel[1]) << ","
                 << unsigned(pixel[2]) << "," << unsigned(pixel[3]) << "\n";
+    }
+    if (mode == 2 && check_specialization_cache) {
+      int status = specialization_cache(device, lib, entry[mode], vertex, queue,
+                                        omitted_word);
+      if (status)
+        return status;
     }
     if (argc == 5 && (std::strcmp(argv[4], "--frequency") == 0 ||
                       std::strcmp(argv[4], "--frequency-wrong") == 0)) {
