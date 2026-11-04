@@ -124,7 +124,7 @@ the detailed sections below preserve original measurements and limits.
 | Linear versus root layout | A native Metal control compared linear and explicit layouts with one SRV and one UAV, including reflection, readback and timing; D3D12 equivalence remains unproven. | Measure representative resource sets and D3D12 binding costs before any production change. |
 | GPU and OS targets | Apple6/Apple7 controlled conversion and GPU output were compared on M1 Max; target parameters are included in the conversion key. | Test OS targets and additional devices; do not promote minimum platform. |
 | Argument buffer/occupancy | Root and table residency is tracked in command list (`d3d12_command_list.cpp:949-975`). No register or occupancy counters captured. | Capture representative vertex/fragment/compute counters and CPU binding cost before changing ABI. |
-| Execution overlap | Exact readbacks and 50 timing samples per visibility passed. After correcting layout-depth handling and adding submission/execution-point checks, three fresh ALL/PIXEL trace pairs passed: 72 workloads, 216 point pairs, no observed Compute/Vertex overlap. The N13 audit found that residency deltas, direct bindings, transitive predecessors and alias/barrier obligations do not provide a complete early-access proof. Direct/transitive/split-list CS→VB tests pass; the encoder now records ordinary direct IA coverage with unknown paths kept unclassified. Explicit legacy/enhanced barrier scopes and split/alias reasons are retained on the same recording chain. | Next: establish ordinary MSC vertex shader resource-access completeness through the existing reflection/binding owner; combine only after alias and transitive obligations are also proven. Current Fence stages remain unchanged; see the [dependency contract and regression](msc-fence-dependency-design.md) and [trace evidence](msc-trace-attribution.md). |
+| Execution overlap | Exact readbacks and 50 timing samples per visibility passed. After correcting layout-depth handling and adding submission/execution-point checks, three fresh ALL/PIXEL trace pairs passed: 72 workloads, 216 point pairs, no observed Compute/Vertex overlap. The N13 audit found that residency deltas, direct bindings, transitive predecessors and alias/barrier obligations do not provide a complete early-access proof. Direct/transitive/split-list CS→VB tests pass; the encoder now records ordinary direct IA coverage with unknown paths kept unclassified. Explicit legacy/enhanced barrier scopes and split/alias reasons are retained on the same recording chain. | Controlled VS root/table reads and writes now pass, including SRV/UAV mutation after Close and closed-list replay. Submission additions are verified to be deltas, not complete access sets. Next prove a conservative access superset through the existing binding owner, including rebinding; alias and transitive obligations remain required. Current Fence stages remain unchanged; see the [dependency contract and regression](msc-fence-dependency-design.md) and [trace evidence](msc-trace-attribution.md). |
 | Input DXIL | Controlled `-Od` and `-O3` pixel tests passed; embedded debug exposed an LLVM metadata incompatibility addressed by a separately built patched toolchain. | Expand shader coverage and deployment verification; do not recompile game shaders. |
 | Root validation | Unset, zero, bound-resource and DXIL validation were compared on one valid/missing-resource pair; DXIL validation also passed controlled HLSL GPU pixels. | Validate broader inputs and runtime versions before changing production flags. |
 | In-process and persistent cache | Process cache plus single-flight exists, disk cache explicitly disabled (`d3d12_shader_converter.cpp:199-213,228-237,1812-1837`). Map has no evident capacity bound. Key includes stage, source, root, targets, spaces, configuration and flags, but loaded-dylib content identity is not trusted for persistent use. | Measure hits, waits and memory growth; validate content identity, corruption recovery and opt-in before disk cache. Function specializations require separate keys. |
@@ -1744,3 +1744,32 @@ for exact source anchors, commands, P95/ranges, artifact identities and limits.
 Next establish ordinary MSC VS resource-access completeness in the existing
 reflection/binding path. Alias identity, transitive predecessors and broader
 shader access remain required before any Fence-stage change.
+
+
+### Ordinary MSC vertex resource probes — 2026-11-04
+
+At baseline `d1e83d41`, the existing overlap probe now exercises root SRV/UAV,
+a VERTEX-visible resource table, and post-Close mutation of both SRV and UAV
+followed by closed-list replay. Compute produces distinct changing input
+checksums; VS reads them, writes a unique output element per invocation and
+forwards the checksum to the exact image oracle. The probe checks recorded
+Vertex declarations independently from live submission additions. The latter
+are correctly empty when the recorded resource is selected again, so they
+cannot serve as the complete access set of a scheduler.
+
+The VS batch passed 15 processes, 48 image and 48 all-element VS output
+readbacks, 16 scratch readbacks, eight replays and six expected one-bit
+image/write failures. API/GPU validation and runtime identity passed; 28
+parser tests, full x64 build and all nine DXIL fixtures passed. Adjacent
+regression passed another 32 processes, 112 image and 28 scratch readbacks,
+with eight expected negative exits. Final artifact pairing and actual loaded
+identities passed across all 47 processes. There is
+no production hot-path overhead or synchronization/capability change.
+
+Exact Airconv descriptor footprint metadata remains unavailable for MSC, but
+exactness is not inherently necessary: a proven conservative superset could
+satisfy coverage. Next prove that superset using the existing binding owner
+and recorded declarations plus live additions, including successive rebinding.
+Arbitrary DXIL, bindless/internal accesses, alias identity, transitive edges,
+application-release lifetime, GPU timeline benefit and the other MSC work
+remain open. See the [VS resource report](msc-fence-dependency-design.md#msc-vertex-resource-probes--design-card-2026-11-04).

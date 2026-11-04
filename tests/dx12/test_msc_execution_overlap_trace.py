@@ -226,5 +226,65 @@ class DependencyLogTest(unittest.TestCase):
             self.parse('\n'.join(line for line in self.log().splitlines() if not line.startswith('INPUT_ASSEMBLY')))
 
 
+class VertexShaderLogTest(unittest.TestCase):
+    # Synthetic contract cases; GPU readbacks and deployment run separately.
+    def log(self, workload='vs-table-live', negative=None):
+        live = workload == 'vs-table-live'
+        lines = ['OVERLAP_BACKEND msc visibility=all iterations=1024',
+                 'DEPENDENCY_CONFIG workload=' + workload]
+        for i in range(3):
+            replay = int(live and bool(i & 1))
+            late = int(live and not i & 1)
+            lines += [f'INPUT_ASSEMBLY sample={i} slots=0 indexed=0 complete=1 replay={replay}',
+                      f'DEPENDENCY_ENCODERS sample={i} sequence=CR lists=1',
+                      f'VS_BINDINGS sample={i} recorded_read=1 recorded_write=1 late_read={late} late_write={late} replay={replay}']
+            if negative and i == 2:
+                lines.append('VS_WRITE_MISMATCH sample=2 index=0 actual=42 expected=43' if negative == 'write' else
+                             'OVERLAP_MISMATCH sample=2 x=0 y=0 actual=42 expected=43')
+                break
+            lines.append(f'VS_WRITEBACK sample={i} exact_bytes=24576')
+            if live:
+                lines.append(f'DEPENDENCY_SCRATCH sample={i} exact_bytes=24576')
+            lines.append(f'OVERLAP_SAMPLE {i} gpu_ns=1000 encode_ms=1 submit_ms=1 exact_bytes=65536')
+        if not negative:
+            lines.append('OVERLAP_PASS visibility=all samples=1 warmup=2')
+        return '\n'.join(lines) + '\n'
+
+    def parse(self, log, workload='vs-table-live', negative=None):
+        from run_msc_execution_overlap import parse
+        return parse(log, 'all', 1, 1024, negative == 'image', workload, require_ia=True,
+                     wrong_write=negative == 'write')
+
+    def test_shader_modes_and_both_oracles(self):
+        for workload in ('vs-root', 'vs-table', 'vs-table-live'):
+            for negative in (None, 'image', 'write'):
+                with self.subTest(workload=workload, negative=negative):
+                    self.assertEqual(len(self.parse(self.log(workload, negative), workload, negative)),
+                                     2 if negative else 3)
+
+    def test_recording_cannot_replace_late_uses(self):
+        for old, new in [('recorded_read=1', 'recorded_read=0'),
+                         ('recorded_write=1', 'recorded_write=0'),
+                         ('late_read=1', 'late_read=0'), ('late_write=1', 'late_write=0'),
+                         ('replay=1', 'replay=0')]:
+            with self.subTest(old=old), self.assertRaises(AssertionError):
+                self.parse(self.log().replace(old, new))
+
+    def test_submission_deltas_cannot_be_treated_as_full_sets(self):
+        with self.assertRaisesRegex(AssertionError, 'binding'):
+            self.parse(self.log('vs-root').replace('late_read=0', 'late_read=1'), 'vs-root')
+
+    def test_incomplete_writeback_is_rejected(self):
+        line = 'VS_WRITEBACK sample=1 exact_bytes=24576\n'
+        for replacement in ('', line + line, line.replace('24576', '4')):
+            with self.subTest(replacement=replacement), self.assertRaisesRegex(AssertionError, 'write readback'):
+                self.parse(self.log().replace(line, replacement))
+
+    def test_wrong_write_control_requires_one_bit_at_expected_index(self):
+        for old, new in [('index=0', 'index=1'), ('expected=43', 'expected=44')]:
+            with self.subTest(old=old), self.assertRaisesRegex(AssertionError, 'wrong VS-write'):
+                self.parse(self.log(negative='write').replace(old, new), negative='write')
+
+
 if __name__ == '__main__':
     unittest.main()

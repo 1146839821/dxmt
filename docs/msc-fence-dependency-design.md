@@ -736,3 +736,132 @@ completeness using the existing reflection/binding owner, with controlled VS
 root/table reads and writes plus negative unknown/volatile/indirect paths.
 Preserve current waits. This fills the next missing proof component without
 adding a scheduler or treating residency deltas as complete resource accesses.
+
+
+## MSC vertex resource probes — design card, 2026-11-04
+
+1. **Goal / node:** N13; establish ordinary MSC VS root/table read and write evidence before any dependency-completeness or Fence-stage claim.
+2. **Baseline:** `d1e83d41`, `feat/d3d12`; only the user's `.gitignore` is dirty; retain macOS/Metal 27.2 and the isolated patched-LLVM build.
+3. **Evidence / gap:** `BuildDescriptorFootprint` consumes Airconv declarations; graphics initialization does not call it for MSC. MSC reflection exposes TLAB layout, not individual table accesses. Existing binding scans are conservative and submission records are residency deltas.
+4. **Contract:** D3D12 root buffer SRV/UAV and vertex visibility; v1.0 descriptor tables may change between Close and Execute, but not during execution. Preserve all current waits and descriptor ownership.
+5. **Selection:** extend the existing overlap shader/probe/runner with `vs-root`, `vs-table`, `vs-table-live`; reject inventing exact DXIL reflection or a new resource-state/scheduling owner.
+6. **Proposed path:** compute produces changing structured-buffer checksums; VS reads each vertex through t0 and writes a distinct u0 element; PS forwards the checksum to an exact image oracle.
+7. **Live case:** change both table SRV and UAV after Close; alternate selected resources on closed-list replay after completion. Check recording-time native declarations and submission-time deltas separately.
+8. **Scope / ownership:** existing test HLSL, C++ probe, Meson fixture registration and Python runner/parser tests; existing command list remains the binding owner. No production/source ABI or capability change.
+9. **Cost / non-scope:** zero production draw/submit/storage overhead. This is correctness evidence; no new GPU trace, stage relaxation or benchmark speedup claim.
+10. **Proof:** full image plus every VS-written uint, changing seeds, wrong-output controls, immutable replay, actual loaded PE/Unix/MSC identities, Metal API/GPU validation and adjacent existing cases.
+11. **Risks / rollback:** a controlled shader cannot establish arbitrary DXIL/alias/descriptor coverage; keep completeness unproven. Revert this focused test commit if it breaks existing probes.
+12. **Done / next gate:** full build, parser and real GPU results with retained identities/logs, delivery audit and commit without push; document blockers and next smallest proof component.
+
+
+### Binding evidence and scope of the result
+
+| Evidence type | Finding / source at `d1e83d41` |
+| --- | --- |
+| STATIC_SOURCE | `d3d12_shader_converter.cpp:39` builds exact table footprints from `SM50GetResourceRanges`; `d3d12_pipeline_graphics.cpp:1855` invokes that only for Airconv. The MSC path cannot borrow this exactness flag. |
+| STATIC_SOURCE | `d3d12_command_list.cpp:3981` collects root buffer addresses; `:4649` collects resource tables, with conservative Vertex/Fragment stages on ordinary graphics. `:4463` resolves live table descriptors. `:4421` omits already encoded resource/stage/usage coverage from submission additions. |
+| SPEC_REQUIRED | Microsoft `using-descriptors-directly-in-the-root-signature.md:20` permits structured/byte-address root SRV/UAV buffers and forbids root UAV counters. This fixture uses structured uint buffers without counters. |
+| SPEC_REQUIRED | Microsoft `root-signature-version-1-1.md:78`: v1.0 tables may change after recording and before submission; they must remain unchanged until that execution completes. The probe waits on the queue fence before its next mutation. |
+| APPLE_DOCUMENTED | Installed MSC UserManual, Indirect Resources (`:234`), requires residency declarations for resources reached through argument buffers and nested tables; offline reflection (`:522`) complements the source compiler's reflection. The installed SDK/MSC integration guide does not provide a complete per-descriptor shader access set. |
+| MULLION_OBSERVED | Pinned `93de32b9`, `d3d12_command_list.cpp:1290`, `:1922`, `:2967`, `:3018`: stage-specific root upload and root/table setters are useful semantic references. Its LLVM/AIR backend and resource owner differ. No code was copied and no Mullion runtime result is claimed. |
+| UNVERIFIED | Arbitrary VS texture/bindless/alias/internal accesses, application-release lifetime, and all relevant predecessor edges. Passing these controlled probes is not complete dependency coverage. |
+
+The official Microsoft documents were freshly retrieved, with contents, URLs
+and SHA-256 in external `sources.json`; pinned Mullion source and the installed
+MSC manual are retained beside them. Exact reflection is **not inherently
+required** for a safe scheduler: a proven complete conservative superset would
+also suffice. The existing residency deltas alone do not supply that superset.
+This slice adds the controlled evidence needed to test that distinction without
+introducing another resource map or interpreting an empty delta as independence.
+
+The three modes use the same DXIL:
+
+- `vs-root`: VS t0/u0 are root buffer descriptors with VERTEX visibility.
+- `vs-table`: VS t0/u0 are a two-range v1.0 table with VERTEX visibility.
+- `vs-table-live`: recording sees input/output A; after Close, both table
+  descriptors change to B. The identical closed list is then replayed with A.
+  Both inputs are produced by compute in the list, with different changing
+  checksums; each selected output is checked after the fence. State transitions
+  restore the same initial/final states for replay. No descriptor is modified
+  during execution and no CPU wait splits the producer/consumer chain.
+
+Each draw emits 6,144 VS invocations over 1,024 cells. VS reads t0, forwards
+its checksum to the pixel shader, and writes `checksum ^ vertex_id ^
+0xa5c31f27` to a unique UAV element. The CPU checks every image pixel and all
+24,576 selected output bytes. Distinct values on all six vertices of a cell's
+UAV output expose missing/incorrect invocation writes even when the pixel
+checksum is identical within the cell. No atomic/cross-invocation ordering
+assumption is needed.
+
+The private test walks render `UseResource` packets to require the recording
+input read and output read/write declaration at Vertex. It separately calls
+the existing submission collector and requires a late Vertex read **and**
+read/write declaration when B replaces A. Replaying A requires neither new
+declaration because A is already covered by the immutable recorded packets.
+Those packets are rechecked on replay; the existing IA summary is also checked
+before and after each submission. The collector is called for inspection and
+again by the actual queue. The output oracles verify the real queue path; the
+inspection call does not replace submission or retain its resources through it.
+This does not prove arbitrary packet-byte immutability or application-release
+lifetime, and must not be reported as such.
+
+### Validation and delivery
+
+Environment: Apple M1 Max; macOS 27.2 `26B123`, Xcode 27.2 `27B52`, Metal
+`32023.922`, Wine 11.0; compiled SDK API 4.0.3. Runtime MSC is identified by
+actual path and SHA-256, not a dynamically queried product version. Evidence:
+`dxmt-test/n95-capability-gate/result-msc-vs-resources-20261104/`.
+Build: `dxmt-metal272-identity-audit-20261104`, with the existing external
+patched LLVM. Stage/prefix: `stage-msc-vs-resources-20261104` and
+`prefix-msc-vs-resources-20261104`, cloned separately from the previous isolated
+stage/prefix. PE/Unix pairing, loaded export bytes, actual loaded paths and
+converter content identity are checked by the runner for every process.
+
+| Check / Gate | Result | Evidence / limit |
+| --- | --- | --- |
+| Gate 0 / Gate 1 | PASS | Live baseline/worktree and CodeGraph-first audit, specification evidence and bounded design above. |
+| Gate 2 | PASS | Existing test owners only; zero production changes or additional production allocation, lock, scan, record storage, encoder or barrier. |
+| Full x64 default-target build | LOCAL_PASS | `full-build-offset-fixed.log`; `meson compile -C BUILD`, exit 0. |
+| Nine shader fixtures | LOCAL_PASS | `fixture-build.log`: existing texture/VB and new VS-resource CS/VS/PS variants compiled with DXC. |
+| Log-contract regression | LOCAL_PASS | 28 Python tests; synthetic cases are parser evidence, not GPU results. Missing declarations, live deltas, replay, byte counts and malformed wrong-write controls are rejected. Historical texture trace parsing remains supported. |
+| VS root/table/live GPU batch | LOCAL_PASS | 15 processes; 48 successful full-image and 48 VS output readbacks, 16 scratch readbacks, eight closed-list replays, 54 binding-evidence checks and six expected negative exits. Counts include warmups and exclude failing oracle samples. |
+| Metal validation / identity | LOCAL_PASS | Validation and negative-control processes enable API/GPU validation; repeat processes disable it. Actual states and absence of errors are verified separately in every log. |
+| Adjacent texture / VB / IA regression | LOCAL_PASS | 32 processes, 112 successful full-image and 28 scratch readbacks, seven IA replays and eight expected negative exits. `correctness-audit.json`, individual summaries/logs and final staged identities. |
+| Windows native / x86 / Mullion runtime / new GPU trace / performance A/B | NOT_RUN | Test-only change; no speedup, occupancy, overlap, complete-access or capability claim. |
+| Gate 3 / Gate 4 | PASS within test scope | All four batches, scoped C++ format and diff checks pass. Final source/build/stage hashes and Git state are in `delivery-manifest.json`; full dependency/scheduling readiness remains unproven. |
+
+Across all four completed batches: 47 processes, 160 successful image, 48 VS output and 44 scratch readbacks, 15 replays, 54 binding checks and 14 expected negative exits. These are controlled fixture results including warmups, not representative application coverage or GPU overlap measurements. `audit.py` reparses every retained log using the final parser and verifies the final staged hashes. Validation is enabled for the 25 validation/negative processes; the 22 repeat/timing processes intentionally disable it.
+
+Two preparatory failures are retained: the first full build needed an explicit
+WineMetal test link dependency for the collector's retained Resource references;
+the first binding inspection supplied a null offset pointer to LookupBufferByVA,
+which intentionally rejects it. The probe now supplies and checks a real offset.
+The latter failed before submission. Neither required a production admission,
+binding, residency or synchronization change. Pixel and VS-write one-bit wrong
+oracles each fail at sample 2/index 0 as intended; they remain distinct controls.
+
+| Changed file | Responsibility |
+| --- | --- |
+| `tests/dx12/msc_execution_overlap.hlsl:30` | Controlled VS SRV read/UAV write with a unique per-invocation oracle; preserves existing texture/IA variants. |
+| `tests/dx12/dx12_msc_execution_overlap.cpp:130` | Recorded declarations versus live submission delta checks, root/table/live cases, closed-list replay and all-element output readback. |
+| `tests/dx12/meson.build:53` | Explicit WineMetal test dependency and three opt-in DXIL fixtures; no new executable or runner. |
+| `tests/dx12/run_msc_execution_overlap.py:26` | New batch selection, both independent negative controls, exact binding/output contracts and existing deployment checks. |
+| `tests/dx12/test_msc_execution_overlap_trace.py:229` | Synthetic parser acceptance/rejection coverage for the new evidence. |
+| `docs/msc-fence-dependency-design.md` | Design, source/specification evidence, proof boundaries and delivery audit. |
+| `docs/D3D12_MSC_HLSL_PERFORMANCE_WORK.md` | Overall work status and remaining dependency blockers. |
+
+Public FL/SM/Tier, the WineMetal/COM ABI, production cache/shader conversion,
+D3D10/11 and current Fence stages are unchanged. Existing test modes now link
+WineMetal explicitly and therefore require the same paired deployment already
+used by the runner. The test is not a general shader-access reflection API.
+Rollback is this focused test/documentation commit; no cache/state migration.
+The user's `.gitignore` stays unstaged, and this work does not push.
+
+**Next recommended slice:** prove a conservative ordinary-MSC root/table
+access superset on the existing binding owner, including successive root/table
+rebinding in one encoder and live descriptors on replay. Use the union of
+recorded declarations and submission additions, not additions alone; explicit
+unknown/direct-indexed/internal cases must remain conservative. Do not require
+exact DXIL reflection if the semantic superset can be proven, add a duplicate
+resource owner, or change Fence stages. Alias/backing identity and transitive
+predecessors remain separate mandatory components before scheduling changes.

@@ -104,8 +104,7 @@ std::string dependency_encoders(ID3D12GraphicsCommandList *first,
   throw std::runtime_error("missing dependency render encoder");
 }
 
-dxmt::RenderEncoderData::InputAssemblyUse
-input_assembly(ID3D12GraphicsCommandList *list) {
+dxmt::RenderEncoderData *render_encoder(ID3D12GraphicsCommandList *list) {
   dxmt::RenderEncoderData *render = nullptr;
   for (auto *encoder =
            static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list)->entry;
@@ -118,14 +117,78 @@ input_assembly(ID3D12GraphicsCommandList *list) {
   }
   if (!render)
     throw std::runtime_error("missing input assembly record");
-  return render->input_assembly;
+  return render;
+}
+
+dxmt::RenderEncoderData::InputAssemblyUse
+input_assembly(ID3D12GraphicsCommandList *list) {
+  return render_encoder(list)->input_assembly;
+}
+
+// Recorded declarations and submission-time residency deltas have different
+// owners. Neither is an exact shader access set or an independence proof.
+void shader_bindings(ID3D12Device *device, ID3D12GraphicsCommandList *list,
+                     ID3D12Resource *recorded_input,
+                     ID3D12Resource *recorded_output,
+                     ID3D12Resource *latest_input,
+                     ID3D12Resource *latest_output, unsigned sample, bool late,
+                     bool replay) {
+  auto native = [&](ID3D12Resource *resource) {
+    uint64_t offset = 0;
+    auto allocation =
+        static_cast<dxmt::MTLD3D12Device *>(device)->LookupBufferByVA(
+            resource->GetGPUVirtualAddress(), &offset);
+    if (!allocation || offset)
+      throw std::runtime_error("shader buffer allocation missing");
+    return allocation->buffer().handle;
+  };
+  const auto read = WMTResourceUsageRead;
+  const auto read_write = WMTResourceUsageRead | WMTResourceUsageWrite;
+  auto *render = render_encoder(list);
+  auto recorded = [&](obj_handle_t resource, unsigned usage) {
+    for (auto *cmd = reinterpret_cast<wmtcmd_base *>(&render->cmd_head); cmd;
+         cmd = static_cast<wmtcmd_base *>(cmd->next.ptr)) {
+      if (cmd->type != WMTRenderCommandUseResource)
+        continue;
+      const auto *use = reinterpret_cast<wmtcmd_render_useresource *>(cmd);
+      if (use->resource == resource && (use->usage & usage) == usage &&
+          (use->stages & WMTRenderStageVertex))
+        return true;
+    }
+    return false;
+  };
+  if (!recorded(native(recorded_input), read) ||
+      !recorded(native(recorded_output), read_write))
+    throw std::runtime_error("VS recorded resource declaration missing");
+  std::vector<dxmt::SubmissionResourceUse> uses;
+  std::vector<WMT::Reference<WMT::Resource>> resources;
+  check(static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list)
+            ->CollectResourceUsesForSubmission(uses, resources),
+        "VS submission resources");
+  auto submitted = [&](obj_handle_t resource, unsigned usage) {
+    for (const auto &use : uses)
+      if (use.encoder == render && use.resource.handle == resource &&
+          (use.usage & usage) == usage && (use.stages & WMTRenderStageVertex))
+        return true;
+    return false;
+  };
+  if (submitted(native(latest_input), read) != late ||
+      submitted(native(latest_output), read_write) != late)
+    throw std::runtime_error("VS submission delta mismatch");
+  std::cout << "VS_BINDINGS sample=" << sample
+            << " recorded_read=1 recorded_write=1 late_read=" << late
+            << " late_write=" << late << " replay=" << replay << '\n';
 }
 
 int run(int argc, char **argv) {
   if (argc != 9 && argc != 10)
     return 2;
   const char *workload = argc == 10 ? argv[9] : "texture";
-  const bool vb = strcmp(workload, "texture") != 0;
+  const bool vs_root = !strcmp(workload, "vs-root");
+  const bool vs_live = !strcmp(workload, "vs-table-live");
+  const bool vs_resources = vs_root || vs_live || !strcmp(workload, "vs-table");
+  const bool vb = !vs_resources && strcmp(workload, "texture") != 0;
+  const bool buffer_input = vb || vs_resources;
   const bool transitive = !strcmp(workload, "vb-transitive");
   const bool split_list = !strcmp(workload, "vb-split-list");
   const bool mixed = !strcmp(workload, "vb-input-mixed");
@@ -139,10 +202,12 @@ int run(int argc, char **argv) {
   const bool pixel = !strcmp(argv[4], "pixel");
   if (!pixel && strcmp(argv[4], "all"))
     return 2;
-  if (vb && pixel)
+  if (buffer_input && pixel)
     return 2; // VB cases have no graphics descriptor table to compare.
   const bool wrong = !strcmp(argv[7], "wrong");
-  if (!wrong && strcmp(argv[7], "normal"))
+  const bool wrong_write = !strcmp(argv[7], "wrong-write");
+  if ((!wrong && !wrong_write && strcmp(argv[7], "normal")) ||
+      (wrong_write && !vs_resources))
     return 2;
   auto number = [](const char *text, unsigned limit) {
     char *end = nullptr;
@@ -204,11 +269,12 @@ int run(int argc, char **argv) {
   }
   Owned<ID3D12RootSignature> compute_root, graphics_root;
   auto root = [&](bool compute, Owned<ID3D12RootSignature> &target) {
-    D3D12_DESCRIPTOR_RANGE range{};
+    D3D12_DESCRIPTOR_RANGE ranges[2]{};
+    auto &range = ranges[0];
     range.RangeType = compute ? D3D12_DESCRIPTOR_RANGE_TYPE_UAV
                               : D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
     range.NumDescriptors = 1;
-    D3D12_ROOT_PARAMETER parameters[2]{};
+    D3D12_ROOT_PARAMETER parameters[3]{};
     parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     parameters[0].DescriptorTable = {1, &range};
     parameters[0].ShaderVisibility = !compute && pixel
@@ -220,6 +286,22 @@ int run(int argc, char **argv) {
         compute ? D3D12_SHADER_VISIBILITY_ALL : D3D12_SHADER_VISIBILITY_VERTEX;
     D3D12_ROOT_SIGNATURE_DESC desc{2, parameters, 0, nullptr,
                                    D3D12_ROOT_SIGNATURE_FLAG_NONE};
+    if (vs_resources && !compute) {
+      parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+      if (vs_root) {
+        parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+        parameters[0].Descriptor = {0, 0};
+        parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+        parameters[2].Descriptor = {0, 0};
+        parameters[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+        desc.NumParameters = 3;
+      } else {
+        ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+        ranges[1].NumDescriptors = 1;
+        ranges[1].OffsetInDescriptorsFromTableStart = 1;
+        parameters[0].DescriptorTable = {2, ranges};
+      }
+    }
     if (vb && !compute) {
       desc.NumParameters = 0;
       desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
@@ -281,7 +363,7 @@ int run(int argc, char **argv) {
     throw std::runtime_error("MSC backend required");
   std::cout << "OVERLAP_BACKEND msc visibility=" << argv[4]
             << " iterations=" << iterations << '\n';
-  if (vb)
+  if (buffer_input)
     std::cout << "DEPENDENCY_CONFIG workload=" << workload << '\n';
   constexpr UINT width = 128, height = 128;
   constexpr UINT vertex_count = 32 * 32 * 6,
@@ -289,6 +371,7 @@ int run(int argc, char **argv) {
   Owned<ID3D12Resource> texture, target, readback, times;
   Owned<ID3D12Resource> vertices, scratch, scratch_readback, separator;
   Owned<ID3D12Resource> indices, indirect_arguments;
+  Owned<ID3D12Resource> vs_output, vs_output_alt, vs_readback, vs_readback_alt;
   Owned<ID3D12CommandSignature> signature;
   auto resource = [&](Owned<ID3D12Resource> &out, bool buffer, UINT64 bytes,
                       D3D12_RESOURCE_FLAGS flags, D3D12_RESOURCE_STATES state,
@@ -311,16 +394,20 @@ int run(int argc, char **argv) {
                                           IID_PPV_ARGS(&out.value)),
           "resource");
   };
-  if (vb) {
+  const auto input_state =
+      vs_resources ? D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
+                   : D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
+  if (buffer_input) {
     resource(vertices, true, vertex_bytes,
              D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-             mixed ? D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER
-                   : D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+             mixed || vs_live ? input_state
+                              : D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
              D3D12_HEAP_TYPE_DEFAULT);
-    if (transitive || split_list) {
+    if (transitive || split_list || vs_live) {
       resource(scratch, true, vertex_bytes,
                D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-               D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_HEAP_TYPE_DEFAULT);
+               vs_live ? input_state : D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+               D3D12_HEAP_TYPE_DEFAULT);
       resource(scratch_readback, true, vertex_bytes, D3D12_RESOURCE_FLAG_NONE,
                D3D12_RESOURCE_STATE_COPY_DEST);
     }
@@ -337,6 +424,20 @@ int run(int argc, char **argv) {
   } else {
     resource(texture, false, 0, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
              D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+  }
+  if (vs_resources) {
+    resource(vs_output, true, vertex_bytes,
+             D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+             D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_HEAP_TYPE_DEFAULT);
+    resource(vs_readback, true, vertex_bytes, D3D12_RESOURCE_FLAG_NONE,
+             D3D12_RESOURCE_STATE_COPY_DEST);
+    if (vs_live) {
+      resource(vs_output_alt, true, vertex_bytes,
+               D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+               D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_HEAP_TYPE_DEFAULT);
+      resource(vs_readback_alt, true, vertex_bytes, D3D12_RESOURCE_FLAG_NONE,
+               D3D12_RESOURCE_STATE_COPY_DEST);
+    }
   }
   if (indexed) {
     resource(indices, true, vertex_bytes, D3D12_RESOURCE_FLAG_NONE,
@@ -365,8 +466,8 @@ int run(int argc, char **argv) {
           "draw signature");
   }
   resource(target, false, 0, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
-           mixed ? D3D12_RESOURCE_STATE_COPY_SOURCE
-                 : D3D12_RESOURCE_STATE_RENDER_TARGET);
+           mixed || vs_live ? D3D12_RESOURCE_STATE_COPY_SOURCE
+                            : D3D12_RESOURCE_STATE_RENDER_TARGET);
   auto tdesc = target->GetDesc();
   D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
   UINT64 bytes = 0;
@@ -377,7 +478,7 @@ int run(int argc, char **argv) {
   resource(times, true, 16, D3D12_RESOURCE_FLAG_NONE,
            D3D12_RESOURCE_STATE_COPY_DEST);
   Owned<ID3D12DescriptorHeap> descriptors, rtv;
-  D3D12_DESCRIPTOR_HEAP_DESC hdesc{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 2,
+  D3D12_DESCRIPTOR_HEAP_DESC hdesc{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 4,
                                    D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
                                    0};
   check(device->CreateDescriptorHeap(&hdesc, IID_PPV_ARGS(&descriptors.value)),
@@ -386,10 +487,10 @@ int run(int argc, char **argv) {
   auto gpu = descriptors->GetGPUDescriptorHandleForHeapStart();
   UINT step = device->GetDescriptorHandleIncrementSize(hdesc.Type);
   D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
-  uav.Format = vb ? DXGI_FORMAT_UNKNOWN : DXGI_FORMAT_R32_UINT;
+  uav.Format = buffer_input ? DXGI_FORMAT_UNKNOWN : DXGI_FORMAT_R32_UINT;
   uav.ViewDimension =
-      vb ? D3D12_UAV_DIMENSION_BUFFER : D3D12_UAV_DIMENSION_TEXTURE2D;
-  if (vb) {
+      buffer_input ? D3D12_UAV_DIMENSION_BUFFER : D3D12_UAV_DIMENSION_TEXTURE2D;
+  if (buffer_input) {
     uav.Buffer.NumElements = vertex_count;
     uav.Buffer.StructureByteStride = sizeof(UINT);
     device->CreateUnorderedAccessView(vertices, nullptr, &uav, cpu);
@@ -404,8 +505,18 @@ int run(int argc, char **argv) {
   srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
   srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
   srv.Texture2D.MipLevels = 1;
-  if (!vb)
+  if (!buffer_input)
     device->CreateShaderResourceView(texture, &srv, {cpu.ptr + step});
+  if (vs_resources) {
+    srv.Format = DXGI_FORMAT_UNKNOWN;
+    srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+    srv.Buffer = {};
+    srv.Buffer.NumElements = vertex_count;
+    srv.Buffer.StructureByteStride = sizeof(UINT);
+    device->CreateShaderResourceView(vertices, &srv, {cpu.ptr + 2 * step});
+    device->CreateUnorderedAccessView(vs_output, nullptr, &uav,
+                                      {cpu.ptr + 3 * step});
+  }
   hdesc = {D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 1, D3D12_DESCRIPTOR_HEAP_FLAG_NONE,
            0};
   check(device->CreateDescriptorHeap(&hdesc, IID_PPV_ARGS(&rtv.value)),
@@ -437,9 +548,9 @@ int run(int argc, char **argv) {
     Sleep(2000);
   std::cout << std::setprecision(12);
   for (unsigned sample = 0; sample < samples + 2; ++sample) {
-    const bool replay = mixed && (sample & 1);
-    const UINT constants[2] = {(mixed ? sample / 2 : sample) * 79u + 17u,
-                               iterations};
+    const bool replay = (mixed || vs_live) && (sample & 1);
+    const UINT constants[2] = {
+        ((mixed || vs_live) ? sample / 2 : sample) * 79u + 17u, iterations};
     const UINT scratch_constants[2] = {constants[0] ^ 0x9e3779b9u, iterations};
     auto begin = std::chrono::steady_clock::now();
     ID3D12GraphicsCommandList *draw_list = split_list ? second_list : list;
@@ -451,13 +562,14 @@ int run(int argc, char **argv) {
         check(second_list->Reset(second_allocator, nullptr),
               "second list reset");
       }
-      if (sample || mixed) {
-        transition(list, vb ? vertices.value : texture.value,
-                   vb ? D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER
-                      : D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+      if (sample || mixed || vs_live) {
+        transition(list, buffer_input ? vertices.value : texture.value,
+                   buffer_input ? input_state
+                                : D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         if (scratch)
-          transition(list, scratch, D3D12_RESOURCE_STATE_COPY_SOURCE,
+          transition(list, scratch,
+                     vs_live ? input_state : D3D12_RESOURCE_STATE_COPY_SOURCE,
                      D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         transition(list, target, D3D12_RESOURCE_STATE_COPY_SOURCE,
                    D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -469,16 +581,16 @@ int run(int argc, char **argv) {
       list->SetComputeRootDescriptorTable(0, gpu);
       list->SetComputeRoot32BitConstants(1, 2, constants, 0);
       list->SetPipelineState(compute_pso);
-      list->Dispatch(vb ? vertex_count / 64 : width / 8, vb ? 1 : height / 8,
-                     1);
+      list->Dispatch(buffer_input ? vertex_count / 64 : width / 8,
+                     buffer_input ? 1 : height / 8, 1);
       D3D12_RESOURCE_BARRIER uav_barrier{};
       uav_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-      uav_barrier.UAV.pResource = vb ? vertices.value : texture.value;
+      uav_barrier.UAV.pResource = buffer_input ? vertices.value : texture.value;
       list->ResourceBarrier(1, &uav_barrier);
-      transition(list, vb ? vertices.value : texture.value,
+      transition(list, buffer_input ? vertices.value : texture.value,
                  D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                 vb ? D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER
-                    : D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                 buffer_input ? input_state
+                              : D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
       if (transitive) {
         // A real unrelated copy delimits encoders without a CPU wait or a
         // timestamp between the dependent producer and consumer.
@@ -498,12 +610,36 @@ int run(int argc, char **argv) {
         draw_list->SetComputeRoot32BitConstants(1, 2, scratch_constants, 0);
         draw_list->SetPipelineState(compute_pso);
         draw_list->Dispatch(vertex_count / 64, 1, 1);
+        if (vs_live)
+          transition(draw_list, scratch, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                     input_state);
       }
       draw_list->SetGraphicsRootSignature(graphics_root);
       if (vb) {
         D3D12_VERTEX_BUFFER_VIEW view{vertices->GetGPUVirtualAddress(),
                                       vertex_bytes, sizeof(UINT)};
         draw_list->IASetVertexBuffers(0, 1, &view);
+      } else if (vs_resources) {
+        transition(draw_list, vs_output, D3D12_RESOURCE_STATE_COPY_SOURCE,
+                   D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        if (vs_live) {
+          transition(draw_list, vs_output_alt, D3D12_RESOURCE_STATE_COPY_SOURCE,
+                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+          // Recording always sees A; mutation below occurs only after Close.
+          device->CreateShaderResourceView(vertices, &srv,
+                                           {cpu.ptr + 2 * step});
+          device->CreateUnorderedAccessView(vs_output, nullptr, &uav,
+                                            {cpu.ptr + 3 * step});
+        }
+        if (vs_root) {
+          draw_list->SetGraphicsRootShaderResourceView(
+              0, vertices->GetGPUVirtualAddress());
+          draw_list->SetGraphicsRootUnorderedAccessView(
+              2, vs_output->GetGPUVirtualAddress());
+        } else {
+          draw_list->SetGraphicsRootDescriptorTable(0, {gpu.ptr + 2 * step});
+        }
+        draw_list->SetGraphicsRoot32BitConstants(1, 2, constants, 0);
       } else {
         draw_list->SetGraphicsRootDescriptorTable(0, {gpu.ptr + step});
         draw_list->SetGraphicsRoot32BitConstants(1, 2, constants, 0);
@@ -564,10 +700,25 @@ int run(int argc, char **argv) {
       destination.PlacedFootprint = footprint;
       draw_list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
       if (scratch) {
-        transition(draw_list, scratch, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+        transition(draw_list, scratch,
+                   vs_live ? input_state
+                           : D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                    D3D12_RESOURCE_STATE_COPY_SOURCE);
         draw_list->CopyBufferRegion(scratch_readback, 0, scratch, 0,
                                     vertex_bytes);
+        if (vs_live)
+          transition(draw_list, scratch, D3D12_RESOURCE_STATE_COPY_SOURCE,
+                     input_state);
+      }
+      if (vs_resources) {
+        auto copy_output = [&](ID3D12Resource *source, ID3D12Resource *dest) {
+          transition(draw_list, source, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                     D3D12_RESOURCE_STATE_COPY_SOURCE);
+          draw_list->CopyBufferRegion(dest, 0, source, 0, vertex_bytes);
+        };
+        copy_output(vs_output, vs_readback);
+        if (vs_live)
+          copy_output(vs_output_alt, vs_readback_alt);
       }
       draw_list->ResolveQueryData(queries, D3D12_QUERY_TYPE_TIMESTAMP, 0, 2,
                                   times, 0);
@@ -587,7 +738,7 @@ int run(int argc, char **argv) {
               << " indexed=" << recorded_ia.indexed
               << " complete=" << recorded_ia.complete() << " replay=" << replay
               << '\n';
-    if (vb) {
+    if (buffer_input) {
       const auto encoders = dependency_encoders(list, second_list);
       if (encoders != (transitive ? "CBCR" : split_list ? "C|CR" : "CR"))
         throw std::runtime_error("dependency encoder topology mismatch: " +
@@ -595,6 +746,21 @@ int run(int argc, char **argv) {
       std::cout << "DEPENDENCY_ENCODERS sample=" << sample
                 << " sequence=" << encoders << " lists=" << (split_list ? 2 : 1)
                 << '\n';
+    }
+    const bool latest_alt = vs_live && !replay;
+    if (vs_resources) {
+      if (vs_live) {
+        device->CreateShaderResourceView(latest_alt ? scratch.value
+                                                    : vertices.value,
+                                         &srv, {cpu.ptr + 2 * step});
+        device->CreateUnorderedAccessView(latest_alt ? vs_output_alt.value
+                                                     : vs_output.value,
+                                          nullptr, &uav, {cpu.ptr + 3 * step});
+      }
+      shader_bindings(device, draw_list, vertices, vs_output,
+                      latest_alt ? scratch.value : vertices.value,
+                      latest_alt ? vs_output_alt.value : vs_output.value,
+                      sample, latest_alt, replay);
     }
     begin = std::chrono::steady_clock::now();
     ID3D12CommandList *lists[] = {list, second_list};
@@ -630,8 +796,10 @@ int run(int argc, char **argv) {
           mapped + footprint.Offset + y * footprint.Footprint.RowPitch);
       for (UINT x = 0; x < width; ++x) {
         uint32_t expected =
-            mix(constants[0] + (y / 4) * 32 + x / 4 + 0x12345u, iterations);
-        if (!vb)
+            mix((latest_alt ? scratch_constants[0] : constants[0]) +
+                    (y / 4) * 32 + x / 4 + 0x12345u,
+                iterations);
+        if (!buffer_input)
           expected ^= mix(constants[0] ^ (y * width + x), iterations);
         if (wrong && sample == 2 && x == 0 && y == 0)
           expected ^= 1;
@@ -647,6 +815,32 @@ int run(int argc, char **argv) {
     readback->Unmap(0, &empty);
     if (!valid)
       return 1;
+    if (vs_resources) {
+      D3D12_RANGE written_range{0, vertex_bytes};
+      UINT *values = nullptr;
+      auto *result = latest_alt ? vs_readback_alt.value : vs_readback.value;
+      check(result->Map(0, &written_range, reinterpret_cast<void **>(&values)),
+            "map VS output");
+      const auto seed = latest_alt ? scratch_constants[0] : constants[0];
+      for (UINT i = 0; i < vertex_count; ++i) {
+        auto expected =
+            mix(seed + i / 6 + 0x12345u, iterations) ^ i ^ 0xa5c31f27u;
+        if (wrong_write && sample == 2 && i == 0)
+          expected ^= 1;
+        if (values[i] != expected) {
+          std::cerr << "VS_WRITE_MISMATCH sample=" << sample << " index=" << i
+                    << " actual=" << values[i] << " expected=" << expected
+                    << '\n';
+          valid = false;
+          break;
+        }
+      }
+      result->Unmap(0, &empty);
+      if (!valid)
+        return 1;
+      std::cout << "VS_WRITEBACK sample=" << sample
+                << " exact_bytes=" << vertex_bytes << '\n';
+    }
     if (scratch) {
       D3D12_RANGE scratch_range{0, vertex_bytes};
       UINT *values = nullptr;

@@ -13,7 +13,7 @@ uint mix_value(uint value) {
 }
 
 #if defined(COMPUTE)
-#if defined(VERTEX_INPUT)
+#if defined(VERTEX_INPUT) || defined(VERTEX_RESOURCES)
 RWStructuredBuffer<uint> output_vertices : register(u0);
 [numthreads(64, 1, 1)]
 void cs_main(uint3 id : SV_DispatchThreadID) {
@@ -27,6 +27,10 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 }
 #endif
 #else
+#if defined(VERTEX_RESOURCES)
+StructuredBuffer<uint> input_vertices : register(t0);
+RWStructuredBuffer<uint> written_vertices : register(u0);
+#endif
 struct VertexOutput {
   float4 position : SV_Position;
   nointerpolation uint checksum : TEXCOORD0;
@@ -46,7 +50,11 @@ VertexOutput vs_main(uint id : SV_VertexID
   VertexOutput result;
   result.position = float4(float(grid.x) / 16 - 1,
                            1 - float(grid.y) / 16, 0, 1);
-#if defined(VERTEX_INPUT)
+#if defined(VERTEX_RESOURCES)
+  result.checksum = input_vertices[id];
+  // A unique element per invocation, checked independently of rasterization.
+  written_vertices[id] = result.checksum ^ id ^ 0xa5c31f27u;
+#elif defined(VERTEX_INPUT)
   result.checksum = checksum;
 #else
   result.checksum = mix_value(seed + cell + 0x12345u);
@@ -54,11 +62,11 @@ VertexOutput vs_main(uint id : SV_VertexID
   return result;
 }
 
-#if !defined(VERTEX_INPUT)
+#if !defined(VERTEX_INPUT) && !defined(VERTEX_RESOURCES)
 Texture2D<uint> input_texture : register(t0);
 #endif
 uint ps_main(VertexOutput input) : SV_Target {
-#if defined(VERTEX_INPUT)
+#if defined(VERTEX_INPUT) || defined(VERTEX_RESOURCES)
   return input.checksum;
 #else
   return input_texture.Load(int3(uint2(input.position.xy), 0)) ^ input.checksum;

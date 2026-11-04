@@ -53,7 +53,7 @@ dx12_msc_concurrent = executable('dx12_msc_concurrent', 'dx12_msc_concurrent.cpp
 dx12_msc_execution_overlap = executable('dx12_msc_execution_overlap', 'dx12_msc_execution_overlap.cpp',
   include_directories: [include_directories('../../src/airconv'), include_directories('../../src/dxgi'),
     include_directories('../../src/dxmt'), include_directories('../../src/winemetal'), include_directories('../../src/util')],
-  dependencies: [d3d12_dep],
+  dependencies: [d3d12_dep, winemetal_dep],
 )
 
 dx12_airconv_compute_residency = executable('dx12_airconv_compute_residency', 'dx12_airconv_compute_residency.cpp',
@@ -281,6 +281,14 @@ if dxc_command.length() > 0
       input: 'msc_execution_overlap.hlsl',
       output: 'msc_execution_overlap_vb.' + stage + '.cso',
       command: dxc_command + ['-D', 'VERTEX_INPUT=1'] +
+        (stage == 'cs' ? ['-D', 'COMPUTE=1'] : []) +
+        ['-E', stage + '_main', '-T', stage + '_6_0', '@INPUT@', '-Fo', '@OUTPUT@'],
+      build_by_default: false,
+    )
+    custom_target('dx12_msc_execution_overlap_vs_resources_' + stage,
+      input: 'msc_execution_overlap.hlsl',
+      output: 'msc_execution_overlap_vs_resources.' + stage + '.cso',
+      command: dxc_command + ['-D', 'VERTEX_RESOURCES=1'] +
         (stage == 'cs' ? ['-D', 'COMPUTE=1'] : []) +
         ['-E', stage + '_main', '-T', stage + '_6_0', '@INPUT@', '-Fo', '@OUTPUT@'],
       build_by_default: false,
