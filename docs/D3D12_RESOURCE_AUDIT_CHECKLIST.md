@@ -56,6 +56,12 @@ and does not justify another unchanged local MS_LOAD or Submit timing matrix.
 
 ## Completed Slices
 
+- [~] N15 controlled buffer-plan preparation/admission audit reproduces a
+  stale logical snapshot versus live native copy after an intervening source
+  remap. The source audit and proposed admission-time resolution Design Card
+  are complete; implementation and public activation remain open. See
+  [2026-11-05 audit](sparse-handoff-retirement-audit.md#buffer-plan-preparation-versus-admission--n15-audit-2026-11-05).
+
 - [x] N09 typed-buffer format admission rejects unsupported native SRV/UAV
   formats before publication. See the 2026-10-27 slice below; BGRA SRV usage,
   RGB96 execution and BUFFER query reporting remain separate OPEN items.
