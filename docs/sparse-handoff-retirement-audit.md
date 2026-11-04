@@ -592,3 +592,90 @@ Only docs/sparse-handoff-retirement-audit.md appended. No source/test/ABI/config
 ### 10. Next Recommended Slice
 
 Execute the Design Card's **external native buffer map/copy/unmap completion-boundary probe**, with distinct GPU-only completion and benign gate/cancellation controls on M1 Max. Do not yet integrate a mapping-error bridge, change production FIFO/backend or raise capabilities. This is one N13 validation slice; shader/texture expansion and runtime integration remain subsequent decisions.
+
+## N13 native buffer mapping boundary — Execution card, 2026-11-05
+
+- GOAL / BASELINE: execute prior section5 Design Card at 3d917452; one external native buffer validation slice, original .gitignore preserved.
+- CURRENT PATH / CONTRACT: native producer → sparse queue gate/barrier/map or copy/unmap → private GPU completion event → classic readback. Prior E6 official source contracts remain pinned.
+- SCOPE: external Objective-C++ fixture/commands/logs under dxmt-test, real64-KiB page query, map/copy/remap/unmap, closed-gate/unrelated-cancel and wrong-oracle controls.
+- OWNERSHIP: retain both heaps, source/destination/placed initialization buffers, upload/readback buffers, residency set, queues/events and barrier allocators until exact native and classic completion; no production lifetime assertion.
+- METHOD: distinct GPU-only completion event never CPU-signaled; CPU opens only the separate gate. Unmap has its own completion checkpoint and is followed by valid remap before reading.
+- NON-SCOPE: production/bridge/test source edits, mapping NSError coverage, unsafe GPU faults, capability promotion, backend replacement or repeated full Wine regression batches.
+- VALIDATION / COST: Metal API+shader validation environments at process launch, full nonuniform word/guard checks, changing seeds, independent negative controls, actual binary/SDK/image identities. Timing diagnostic only, no optimization claim.
+- ERROR / ROLLBACK: timeout means unknown and no safe in-process resource teardown; terminate isolated probe preserving logs. Revert focused report commit; external artifacts do not alter runtime.
+- DoD: compile probe, real positive/negative GPU evidence, cleanup after confirmed completion, source-scope audit, documented remaining blockers, repository-style commit/no push; overall goal active.
+
+## N13 native buffer mapping boundary — Delivery, 2026-11-05
+
+### 1. Task Summary / Gate outcome
+
+Gate0/1 baseline and prior Design Card verified; Gate2 external native probe implemented; Gate3 real GPU matrix and Gate4 identity/scope audit PASS for this slice. Five distinct map/copy/remap/unmap checkpoints use a private GPU-only completion event. Broad goal remains active; production mapping completion/error integration is not complete. No runtime, bridge, repository test or capability code modified.
+
+### 2. Baseline Evidence
+
+Baseline feat/d3d12 at3d9174526d05299ed43204d2c393516f44fb8970; local origin reference0 behind/1 ahead at start, not refreshed by this agent. Original unstaged .gitignore SHA256764aac09922db4654ca6de63fd20cf014739d9292623eb979f448f38e609b759 preserved. Rechecked actual macOS27.2/26B123, Xcode27.2/27B52, Apple clang21.0.0/clang-2100.4.1.1 and Metal32023.922/metalfe32023.922.4. Native executable uses system Metal/Foundation, neither Wine nor MSC loaded; no claim about a new DXMT/Wine build.
+
+E7 = /Users/zhangbo/Documents/Vibe-Codeding/dxmt-test/n95-capability-gate/result-sparse-mapping-native-boundary-20261105. Retains mapping_boundary.mm, release/ASan binaries, exact compile commands in compile.json/builds.json, run_matrix.py, each log/process.json, matrix.json, audit.json, environment.txt, SDK headers and prior E6 official source/reference bytes. Pinned Mullion93de32b9145885ceb2e45be7d445e56d62499b3c queue593–625/1338–1353/1392–1404 and bridge4129–4164 remain source references, not a new Mullion runtime observation.
+
+### 3. Findings / real evidence
+
+| Finding | Evidence / exact boundary |
+| --- | --- |
+| Actual M1 Max is Apple7=true, Apple8/9=false, Metal4=true, PlacementSparse=true. Returned64-KiB page bytes65536. Two real131072-byte compatible placement heaps and two131072-byte sparse buffers created; reported buffer sparse tier1. | E7 mapping_boundary.mm:71–148; every final DEVICE/RESOURCE record. NATIVE_OBSERVED / LOCAL_PASS for these resources, not D3D12 Tier1 promotion. Device/pipeline classes are MTLDebugDevice/MTLDebugComputePipelineState. |
+| Closed GPU gate prevents native mapping completion and dependent classic execution despite a separate event advanced to UINT64_MAX. | Probe:220–281,303–334; each PENDING record has private_value0/read_done0/canary_bad0, unrelated cancel_valueUINT64_MAX.40ms observation per checkpoint. LOCAL_PASS of the exact benign ordering oracle, not device-removal recovery. |
+| Opening gate yields native completion value1 and classic statusCompleted4, with no natural NSError from preceding barrier. | Probe:334–348 and COMPLETE records. Callback is labelled preceding-barrier coverage only; it is not assigned mapping-error coverage. |
+| Map source to heapA; copy mappings to destination; remap destination page1 to heapB; source data stays heapA; unmap destination; map both destination pages to heapB. | Probe:248–280,351–384,386–391. Seven full32768-DWORD readbacks per process, distinct per-heap/per-page/per-word/seed data, guard words checked. All real data matches except one deliberately changed expected word in negative control. |
+| Unmap is independently followed by private event/classic empty checkpoint before valid remap/read. No shader reads an unmapped buffer. | Probe:270–275,287–302,386–391. Completion/order verified. No unmapped-load, shader-status, physical-page-release or post-error unmap claim. |
+| Resources/residency and barrier allocator remain owned through exact completion. | Probe fields60–69, initial residency145–158, allocator reset384, residency detach/end392–394. ASan positive run passed. This conservative native fixture does not prove production COM lifetime or last-reference reclamation. |
+
+Producer initializes distinct data through ordinary placed buffers at heap offset0, completes classic producer work and orders sparse queue behind its event (probe:203–217). A ResourceAlias barrier into ResourceState matches existing DXMT native handoff (production native:4223–4227). Classic compute uses both heaps and a buffer barrier between disjoint output dispatches; no concurrent alias writes. Each source/destination read covers both pages. Private completion events are never CPU-signaled; CPU modifies only gate and unrelated cancellation marker.
+
+Specification: E7/MTL4CommandQueue.h:261–276 gives prior-GPU-work event ordering; mapping methods:395–431 and operation structs:170–207 define buffer page mapping/copy. MTL4CommitFeedback.h:19–40 scopes errors to committed command buffers. Retained E6 apple-op-0/2/3/5.json and operation-docs.json provide exact official URLs/hashes. Fresh Apple residency documentation retained in apple-residency.json/new-sources.json. Attempted buffer-create documentation URL404 is recorded and supports no claim; installed MTLDevice.h:1493–1508 supplies exact API. No driver guarantee extrapolated from benign execution.
+
+### 4. Design Decisions
+
+Use an external Objective-C++ executable with ARC-owned fixture fields, explicit resident heaps/resources and retained barrier allocator. Distinct private completion, application gate, classic read-done and unrelated cancellation events prevent shared-value conflation. The gate tests observability before work can run. Each negative control still opens gate and drains actual GPU work before exiting1. Timeout uses process termination rather than unwinding uncertain in-flight resource ownership; the external runner has45s watchdog, actual per-event waits10s.
+
+Three changed seeds prevent stale all-zero/readback acceptance. Wrong-word toggles exactly the last source word's expectation and must produce exactly one mismatch; wrong-event substitutes the already advanced unrelated cancellation event into the pending oracle and must reject exactly one checkpoint. Both controls otherwise run the full real mapping sequence with valid inputs. These are oracle-negative controls, not synthetic Metal capabilities, driver errors or invalid GPU work.
+
+Mullion shares event ordering/resident input ownership concepts; its CPU mapping wait/held-work scheduler is not copied. Existing DXMT production FIFO, Metal3 fallback, D3D11, MSC/Airconv and mapping tables remain untouched. No source borrowed from reference implementation, no new licensing obligation introduced.
+
+### 5. Changed Files / artifacts
+
+Only repository change: docs/sparse-handoff-retirement-audit.md execution card and delivery. All probe source, temporary runner, logs and generated binaries reside in E7 outside repository; no new src/d3d12 file or repository Python/gate runner. Release source429 lines, exact final source SHA256768b57fd3904c3df6abd25cab86e49527fe9159295a6895629d1bd66c6f3cc23. Release binary SHA256eeb023d5e44d0764a36c376708122cd662082d175c2f4a6e20d60c1f2e1c7099; ASan binarya37a1597714efa257e26141d968d522da0a5108ba4185cc6d8b6fce19c5e8147. Loaded path and LC_UUID match each actual executable, system Metal/AGX/IOGPU image UUIDs retained; no WineMetal PE/Unix pairing is involved in this native-only slice.
+
+### 6. Validation Results
+
+| Check | Result |
+| --- | --- |
+| Release and ASan native builds | PASS; Xcode clang, C++20, ARC/blocks, Foundation/Metal, deployment target27.2. Exact commands/logs retained. No compile warnings. |
+| Three release processes with different seeds | LOCAL_PASS;15 mapping checkpoints,21 full readbacks and688128 DWORD comparisons, no mismatches/guard corruption. |
+| ASan positive process | LOCAL_PASS;5 checkpoints,7 readbacks and229376 DWORD comparisons. ASAN_OPTIONS detect_leaks=0:halt_on_error=1; no claim of leak testing. |
+| Wrong-word control | Expected exit1; one deliberate data-oracle mismatch, remaining readbacks/checkpoints and final drain complete. |
+| Wrong-event control | Expected exit1; one deliberately rejected completion-oracle substitution; actual private completion, data and drain complete. |
+| All final processes |6 total =4 positive +2 expected negative;30 mapping checkpoints,42 readbacks,1376256 compared DWORDs including negative-process checks. All six process launches have API+GPU validation enabled and stderr reporting; logs contain only enabled notices plus JSON evidence, no validation diagnostics. |
+| Identity / source scope / formatting | PASS E7/audit.json: binary SHA/path/UUID, exact final source, no src/tests/include/build/config diff, original .gitignore preserved, no staged/untracked residue before delivery. |
+| Complete DXMT build / Wine regression / D3D11 / Metal3 runtime | NOT_RUN: no production/test changes, native probe validates only the stated boundary. Prior E5 results remain historical, not rerun or recounted. |
+| Native mapping failure / driver hang / missing event / Windows/other GPU | NOT_RUN; no unsafe fault induced. This run does not demonstrate mapping NSError attribution or cancellation teardown. |
+
+Initial unformatted native run also passed5 checkpoints/7 readbacks; supplemental only, excluded from six-process final totals. Before final acceptance, an explicit classic compute memory barrier was added between output dispatches, source formatted and rebuilt. Final release/ASan matrix uses the recorded final bytes. No failed GPU run was hidden. Actual command: python3 E7/run_matrix.py (expand E7 to absolute path); use a fresh evidence destination/labels when repeating to preserve historical outputs.
+
+### 7. Capability / performance impact
+
+Public FL/SM/Options/Tiers unchanged. Real native sparse tier1 is a Metal buffer property, not evidence for any complete D3D12 tiled tier. No Apple7 hardware-block assertion. Native probe is not an MSC compiler/binding test. Zero production runtime cost because only documentation changed; no CPU/GPU optimization or no-regression claim. Deliberate5x40ms pending windows and compilation/process startup make elapsed process time unsuitable as a mapping performance benchmark.
+
+### 8. Risks / remaining blockers
+
+- SPEC_UNVERIFIED: asynchronous errors from the separate void mapping operations; no official evidence that preceding barrier or later sentinel commit reports them. All benign callbacks succeeded; that does not close the contract gap.
+- BACKEND_NOT_IMPLEMENTED: DXMT still lacks an independent mapping-terminal credential bound to existing Submission ownership. This probe establishes usable benign ordering with a private event; production integration remains separate.
+- SPEC_UNVERIFIED: no-event/driver-error terminal teardown and safe last-reference release. Device-removal cancellation event remains unsuitable as sole completion proof. A timeout never authorizes resource retirement.
+- UNVERIFIED: production mapping input lifetime/residency through failure and partial self-copy, texture/packed-tail variants, and broader shader-status/format conformance. This conservative fixture does not expose an actual production UAF or prove its absence.
+- TARGET_DEVICE_NOT_AVAILABLE: Windows/other-GPU differential; actual M1 Max target remains available. No new MSC_SEMANTIC_GAP established here.
+
+### 9. Git State / Rollback
+
+Focused docs(d3d12) commit, no push or shared Wine modification. Final SHA/status/tracking and artifact index retained post-commit in E7/delivery-manifest.json. Original .gitignore bytes preserved. Reverting this one report commit rolls back repository changes; external native evidence remains reproducible and does not change runtime. No goal completion claim.
+
+### 10. Next Recommended Slice
+
+One N13 Design Card for an **independent native mapping-completion credential through the existing WineMetal owner**, then bounded integration into existing Submission after its ownership/failure protocol is settled. Use this probe's private GPU-only terminal event, keep it separate from cancellation and committed-barrier NSError, and retain named mapping inputs through actual terminal evidence. First specify prepare-before-issue, partial-issue failure, no-event/removal and release contracts; do not add a scheduler, second logical mapping table or publish an undocumented mapping-error success result. Runtime implementation requires that concrete design; this round stops after native validation/report commit.
