@@ -1642,6 +1642,11 @@ SparseMappingQueue_prepareBufferBatch(
   return params.ret;
 }
 WINEMETAL_API uint32_t
+SparseMappingCompletion_prepareTerminal(obj_handle_t completion, uint32_t test_flags) {
+  struct unixcall_sparsemappingcompletion_seal params = {completion, test_flags, 0};
+  return WINE_UNIX_CALL(unix_sparsemappingcompletion_prepareterminal, &params) == 0;
+}
+WINEMETAL_API uint32_t
 SparseMappingCompletion_issueNext(obj_handle_t completion) {
   struct unixcall_generic_obj_noret params = {completion};
   return WINE_UNIX_CALL(unix_sparsemappingcompletion_issuenext, &params) == 0;

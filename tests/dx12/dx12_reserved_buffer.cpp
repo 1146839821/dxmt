@@ -716,6 +716,19 @@ int CheckSparseMappingPayload(const char *mode, uint32_t seed) {
 }
 
 int CheckSparseMappingCredential(const char *mode, uint32_t seed) {
+  const bool terminal = !std::strncmp(mode, "mapping-terminal", 16);
+  const bool terminal_event =
+      !std::strcmp(mode, "mapping-terminal-event") ||
+      !std::strcmp(mode, "mapping-terminal-event-delay");
+  const bool terminal_partial = !std::strcmp(mode, "mapping-terminal-partial"),
+             terminal_delay =
+                 !std::strcmp(mode, "mapping-terminal-delay") ||
+                 !std::strcmp(mode, "mapping-terminal-event-delay"),
+             terminal_wrong =
+                 !std::strcmp(mode, "mapping-terminal-wrong-event"),
+             terminal_word = !std::strcmp(mode, "mapping-terminal-wrong-word"),
+             terminal_failure =
+                 !std::strcmp(mode, "mapping-terminal-prepare-failure");
   static_assert(sizeof(WMTSparseBufferBatchOperation) == 64);
   static_assert(offsetof(WMTSparseBufferBatchOperation, source) == 8);
   static_assert(offsetof(WMTSparseBufferBatchOperation, offset) == 48);
@@ -762,6 +775,7 @@ int CheckSparseMappingCredential(const char *mode, uint32_t seed) {
   MAP_BIND(SparseBarrierCompletion_submit);
   MAP_BIND(SparseBarrierCompletion_wait);
   MAP_BIND(SparseMappingQueue_prepareBufferBatch);
+  MAP_BIND(SparseMappingCompletion_prepareTerminal);
   MAP_BIND(SparseMappingCompletion_issueNext);
   MAP_BIND(SparseMappingCompletion_seal);
   MAP_BIND(SparseMappingCompletion_wait);
@@ -778,6 +792,7 @@ int CheckSparseMappingCredential(const char *mode, uint32_t seed) {
 #undef MAP_BIND
   for (const char *symbol :
        {"SparseMappingQueue_prepareBufferBatch",
+        "SparseMappingCompletion_prepareTerminal",
         "SparseMappingCompletion_issueNext", "SparseMappingCompletion_seal",
         "SparseMappingCompletion_wait",
         "SparseMappingCompletion_retireInputs"}) {
@@ -890,12 +905,16 @@ int CheckSparseMappingCredential(const char *mode, uint32_t seed) {
   SparseMappingQueue_waitForEvent(sparse, produced, 1);
   require(MTLCommandBuffer_status(init) == WMTCommandBufferStatusCompleted,
           "producer failed");
-  const bool partial = !std::strcmp(mode, "mapping-partial"),
-             wrong_event = !std::strcmp(mode, "mapping-wrong-event"),
-             wrong_word = !std::strcmp(mode, "mapping-wrong-word");
+  const bool partial =
+                 terminal_partial || !std::strcmp(mode, "mapping-partial"),
+             wrong_event =
+                 terminal_wrong || !std::strcmp(mode, "mapping-wrong-event"),
+             wrong_word =
+                 terminal_word || !std::strcmp(mode, "mapping-wrong-word");
   WMTSparseMappingResult result = {};
   require(!SparseMappingQueue_prepareBufferBatch(0, nullptr, 0) &&
               !SparseMappingQueue_prepareBufferBatch(sparse, nullptr, 1) &&
+              !SparseMappingCompletion_prepareTerminal(0, 0) &&
               !SparseMappingCompletion_issueNext(0) &&
               !SparseMappingCompletion_seal(0, WMTSparseMappingHostAccepted) &&
               !SparseMappingCompletion_wait(0, 0, &result) &&
@@ -909,7 +928,25 @@ int CheckSparseMappingCredential(const char *mode, uint32_t seed) {
     std::printf("MAPPING_PREPARE_FAILURE PASS calls=0 drained=1\n");
     return 0;
   }
+  if (terminal_failure) {
+    auto c = SparseMappingQueue_prepareBufferBatch(sparse, nullptr, 0);
+    require(c && !SparseMappingCompletion_prepareTerminal(c, 1),
+            "terminal prepare failure");
+    require(SparseMappingCompletion_seal(c, WMTSparseMappingHostRejected) &&
+                SparseMappingCompletion_retireInputs(c),
+            "prepare failure unissued");
+    NSObject_release(c);
+    for (auto i = owned.rbegin(); i != owned.rend(); ++i)
+      NSObject_release(*i);
+    std::printf("MAPPING_TERMINAL_PREPARE_FAILURE PASS calls=0 drained=1\n");
+    return 0;
+  }
   auto zero = own(SparseMappingQueue_prepareBufferBatch(sparse, nullptr, 0));
+  require(!SparseMappingCompletion_prepareTerminal(zero, 4),
+          "invalid terminal flags");
+  if (terminal)
+    require(SparseMappingCompletion_prepareTerminal(zero, 1),
+            "empty terminal prepare");
   require(
       !SparseMappingCompletion_wait(zero, 0, nullptr) &&
           !SparseMappingCompletion_issueNext(zero) &&
@@ -961,6 +998,9 @@ int CheckSparseMappingCredential(const char *mode, uint32_t seed) {
           "overflow count accepted");
   auto rejected = SparseMappingQueue_prepareBufferBatch(sparse, &valid, 1);
   require(rejected != 0, "rejected prepare");
+  if (terminal)
+    require(SparseMappingCompletion_prepareTerminal(rejected, 1),
+            "rejected terminal prepare");
   require(
       !SparseMappingCompletion_seal(rejected, WMTSparseMappingHostUnset) &&
           !SparseMappingCompletion_seal(
@@ -978,6 +1018,9 @@ int CheckSparseMappingCredential(const char *mode, uint32_t seed) {
   NSObject_release(rejected);
   auto abandoned = SparseMappingQueue_prepareBufferBatch(sparse, &valid, 1);
   require(abandoned != 0, "unissued release prepare");
+  if (terminal)
+    require(SparseMappingCompletion_prepareTerminal(abandoned, 1),
+            "abandoned terminal prepare");
   NSObject_release(abandoned);
   std::printf(
       "MAPPING_HOST_CONTRACT invalid=9 rejected=1 abandoned=1 calls=0\n");
@@ -1015,6 +1058,11 @@ int CheckSparseMappingCredential(const char *mode, uint32_t seed) {
     obj_handle_t c = SparseMappingQueue_prepareBufferBatch(
         sparse, ops, partial || paired ? 2 : 1);
     require(c != 0, "prepare batch");
+    if (terminal)
+      require(SparseMappingCompletion_prepareTerminal(
+                  c, (terminal_event ? 0 : 1) | (terminal_delay ? 2 : 0)) &&
+                  !SparseMappingCompletion_prepareTerminal(c, 1),
+              "terminal prepare once");
     ops[0] = ops[1];
     ops[0].heap = heaps[step == 0 || step == 1 ? 1 : 0];
     require(SparseMappingCompletion_wait(c, UINT64_MAX, &result) &&
@@ -1028,17 +1076,29 @@ int CheckSparseMappingCredential(const char *mode, uint32_t seed) {
                  done = own(MTLDevice_newSharedEvent(device));
     obj_handle_t barrier =
         own(SparseMappingQueue_prepareBarrierBeforeResourceState(sparse));
+    // Settle the preceding callback before the gate, matching E13's controlled
+    // boundary. This callback alone must not authorize mapping retirement.
+    if (terminal) {
+      WMTSparseBarrierResult pre = {};
+      require(SparseBarrierCompletion_submit(barrier) &&
+                  SparseBarrierCompletion_wait(barrier, 10000, &pre) &&
+                  pre.state == WMTSparseBarrierCompleted,
+              "terminal pre settled");
+    }
     SparseMappingQueue_waitForEvent(sparse, gate, 1);
-    require(SparseBarrierCompletion_submit(barrier), "barrier submit");
+    if (!terminal)
+      require(SparseBarrierCompletion_submit(barrier), "barrier submit");
     require(SparseMappingCompletion_issueNext(c) &&
                 SparseMappingCompletion_wait(c, 0, &result) &&
                 result.state == WMTSparseMappingIssuing &&
                 result.possibly_issued_calls == 1 &&
                 !SparseMappingCompletion_retireInputs(c),
             "issue contract");
-    require(!SparseMappingCompletion_seal(c, WMTSparseMappingHostRejected) &&
-                !SparseMappingCompletion_seal(c, WMTSparseMappingHostUnset),
-            "issuing outcome accepted");
+    require(
+        !SparseMappingCompletion_prepareTerminal(c, 1) &&
+            !SparseMappingCompletion_seal(c, WMTSparseMappingHostRejected) &&
+            !SparseMappingCompletion_seal(c, WMTSparseMappingHostUnset),
+        "issuing outcome accepted");
     if (paired)
       require(!SparseMappingCompletion_seal(c, WMTSparseMappingHostAccepted) &&
                   SparseMappingCompletion_issueNext(c),
@@ -1050,7 +1110,8 @@ int CheckSparseMappingCredential(const char *mode, uint32_t seed) {
                 !SparseMappingCompletion_seal(c, host) &&
                 !SparseMappingCompletion_issueNext(c),
             "single close");
-    SparseMappingQueue_signalEvent(sparse, done, 1);
+    if (!terminal)
+      SparseMappingQueue_signalEvent(sparse, done, 1);
     MTLSharedEvent_signalValue(cancel, UINT64_MAX);
     std::fill(out, out + 2 * words + guards, 0xa5a55a5au);
     require(SparseMappingCompletion_wait(c, 40, &result), "pending transport");
@@ -1068,12 +1129,22 @@ int CheckSparseMappingCredential(const char *mode, uint32_t seed) {
                 step, result.state, (unsigned long long)result.event_value,
                 (unsigned long long)observed, result.host_outcome, pending);
     MTLSharedEvent_signalValue(gate, 1);
+    if (terminal_delay && !terminal_event) {
+      require(SparseMappingCompletion_wait(c, 40, &result) &&
+                  result.state == WMTSparseMappingSealedPending &&
+                  !result.event_value &&
+                  !SparseMappingCompletion_retireInputs(c),
+              "terminal report delay");
+      std::printf("MAPPING_TERMINAL_DELAY step=%u pending=1 retired=0\n", step);
+    }
     require(SparseMappingCompletion_wait(c, 10000, &result) &&
                 result.state == WMTSparseMappingGPUComplete &&
-                result.event_value == 1 && result.host_outcome == host &&
+                result.event_value == (terminal && !terminal_event ? 0u : 1u) &&
+                result.host_outcome == host &&
                 result.possibly_issued_calls == issued && result.seals == 1,
             "mapping completion");
-    require(MTLSharedEvent_waitUntilSignaledValue(done, 1, 10000),
+    require(terminal ? MTLSharedEvent_signaledValue(done) == 0
+                     : MTLSharedEvent_waitUntilSignaledValue(done, 1, 10000),
             "ordered completion");
     WMTSparseBarrierResult feedback = {};
     require(SparseBarrierCompletion_wait(barrier, 10000, &feedback) &&
@@ -1082,7 +1153,8 @@ int CheckSparseMappingCredential(const char *mode, uint32_t seed) {
             "barrier feedback");
     unsigned reads = step == 0 ? 1 : (step == 3 ? 0 : 2);
     obj_handle_t read = MTLCommandQueue_commandBuffer(classic);
-    MTLCommandBuffer_encodeWaitForEvent(read, done, 1);
+    if (!terminal)
+      MTLCommandBuffer_encodeWaitForEvent(read, done, 1);
     enc = MTLCommandBuffer_blitCommandEncoder(read);
     require(read && enc, "readback objects");
     for (unsigned n = 0; n < reads; ++n)
@@ -1116,10 +1188,12 @@ int CheckSparseMappingCredential(const char *mode, uint32_t seed) {
             "retire contract");
     NSObject_release(c);
     std::printf("MAPPING_COMPLETE step=%u reads=%u bad=%u guard=%u host=%u "
-                "partial=%u state=%u issued=%llu seals=%u retired=%u\n",
+                "partial=%u state=%u issued=%llu seals=%u retired=%u "
+                "terminal=%u private=%llu\n",
                 step, reads, bad, guard, result.host_outcome, partial,
                 result.state, (unsigned long long)result.possibly_issued_calls,
-                result.seals, result.inputs_retired);
+                result.seals, result.inputs_retired, terminal,
+                (unsigned long long)result.event_value);
   }
   // Final native release cannot free inputs while the gate still holds work.
   // Exercise both explicitly sealed and destructor-sealed valid prefixes.
@@ -1130,6 +1204,10 @@ int CheckSparseMappingCredential(const char *mode, uint32_t seed) {
     op.length = 2;
     auto c = SparseMappingQueue_prepareBufferBatch(sparse, &op, 1);
     require(c != 0, "release prepare");
+    if (terminal)
+      require(SparseMappingCompletion_prepareTerminal(
+                  c, (terminal_event ? 0 : 1) | (terminal_delay ? 2 : 0)),
+              "release terminal prepare");
     auto gate = own(MTLDevice_newSharedEvent(device));
     auto barrier =
         own(SparseMappingQueue_prepareBarrierBeforeResourceState(sparse));
@@ -2293,7 +2371,8 @@ int main(int argc, char **argv) {
     return CheckSparseMappingPayload(
         argv[1], static_cast<uint32_t>(std::strtoul(argv[2], nullptr, 0)));
 
-  if (argc == 3 && (!std::strcmp(argv[1], "mapping-normal") ||
+  if (argc == 3 && (!std::strncmp(argv[1], "mapping-terminal", 16) ||
+                    !std::strcmp(argv[1], "mapping-normal") ||
                     !std::strcmp(argv[1], "mapping-partial") ||
                     !std::strcmp(argv[1], "mapping-wrong-event") ||
                     !std::strcmp(argv[1], "mapping-wrong-word") ||

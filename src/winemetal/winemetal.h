@@ -2545,9 +2545,17 @@ STATIC_ASSERT(sizeof(WMTSparseMappingResult) == 32);
 // resource bounds/page sizes and ordering; unmap requires zero heap/offset.
 // Release after retire; an early
 // final release of issued work seals/drains and may block forever on GPU loss.
+// Terminal preparation/issue/seal must be serialized by the admission caller;
+// callers retain this object across concurrent wait calls.
 WINEMETAL_API obj_handle_t SparseMappingQueue_prepareBufferBatch(
     obj_handle_t queue, const struct WMTSparseBufferBatchOperation *operations, uint64_t count
 );
+// Explicit controlled opt-in, before first issue. Prepares all post-work objects;
+// ordinary batch callers remain private-event-only. Flags 1/2 are test controls:
+// omit the private GPU signal / delay reporting actual post feedback by 200ms.
+// An error feedback never authorizes retirement. Result ABI is unchanged; a
+// successful terminal may set GPUComplete with event_value still zero.
+WINEMETAL_API uint32_t SparseMappingCompletion_prepareTerminal(obj_handle_t completion, uint32_t test_flags);
 WINEMETAL_API uint32_t SparseMappingCompletion_issueNext(obj_handle_t completion);
 // Exactly once. Host outcome is independent of GPU completion/error coverage.
 WINEMETAL_API uint32_t SparseMappingCompletion_seal(obj_handle_t completion, enum WMTSparseMappingHostOutcome outcome);

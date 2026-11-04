@@ -1275,3 +1275,74 @@ No public Tiled Resources Tier, Feature Level or Shader Model changes. Metal3 sh
 Only docs/sparse-handoff-retirement-audit.md changes this round: execution card, source/SDK/Mullion evidence, native outcomes, bounded ownership design and unresolved fault gate. No repository source/test/build files, dependencies or runtime ABI changes. Commit using docs(d3d12) style, no push; original .gitignore remains dirty/excluded. E13/delivery-manifest.json records committed SHA/status/source and evidence hashes.
 
 Next single slice: **extend the existing WineMetal mapping credential with a controlled post-ResourceState completion path**, prepared before issue and validated through its existing controlled caller with actual omitted-event, delayed-report and partial-prefix readbacks. Reuse the current native owner/state machine; keep ordinary production callers and error-quiescence retirement disabled. This tests the bridge boundary before changing queue admission. Do not automatically combine buffer Submission activation or texture mapping plans into it.
+
+
+## Controlled WineMetal post-mapping credential — execution card, 2026-11-05
+
+GOAL: Reproduce E13's ordered successful post-mapping completion in the existing WineMetal credential.
+BASELINE: 0dd1d762846ea6a62e28784fd35a5223353b0759; original .gitignore excluded.
+PATH: Existing buffer batch -> explicit prepareTerminal before issue -> seal -> private event / real post callback -> wait/retire.
+EVIDENCE: E13 SDK contracts, current source and pinned Mullion; actual successful native readbacks, error quiescence unverified.
+SCOPE: Additive controlled configuration; reuse credential owner and existing result ABI; native callback payload has no PE owner.
+BOUNDARY: Ordinary callers unchanged; no production queue attachment, texture plans, capability or D3D11 changes.
+PLAN: Prepare allocator/command/marker/residency/options before issue; real ResourceState→Blit barrier; success only, error never substitutes.
+PERF: Extra native objects/submit only after explicit opt-in; no global scan or production hot-path change.
+PROOF: Existing mapping probe, omitted event, delayed report, partial prefix, wrong boundary/word and final release controls.
+RISK: Callback may precede or outlive caller; callback state independent, native inputs remain owned through actual completion.
+ROLLBACK: Revert focused bridge/probe change; no public D3D12 ABI or existing mapping result layout change.
+DONE: Matched x64 build/stage, actual validation/readbacks/identities, nearby regressions, delivery audit and commit/no push.
+
+
+## Controlled WineMetal post-mapping credential — delivery, 2026-11-05
+
+### Task Summary / Baseline Evidence
+
+One N15/N13 bridge slice, baseline0dd1d762846ea6a62e28784fd35a5223353b0759 on feat/d3d12. E14 = /Users/zhangbo/Documents/Vibe-Codeding/dxmt-test/n95-capability-gate/result-sparse-terminal-bridge-20261105. Apple M1 Max, macOS27.2/26B123, Xcode27.2/27B52, Metal32023.922, Wine11.0. Current actual probe queries report Apple7/Metal4/PlacementSparse true and Apple8/9 false. Original .gitignore preserved. Previous turn was progress: E13 audit, native evidence and commit0dd1d762 completed. This round implements the recommended controlled bridge; overall sparse/MSC roadmap remains incomplete.
+
+### Findings / Specification / Reference
+
+SPEC_REQUIRED: installed SDK MTL4CommandEncoder.h:49–72 orders ResourceState work before subsequent Blit work; MTL4CommitFeedback.h:19–40 describes actual completion of committed workload, with error attribution limited to committed command buffers. Apple JSON refreshed this round matches E13 hashes446d58464e935d7d5e957469f5b807901160460b7cbaceee04c3f9daa193a270 and ea330ec2a6b5639a74dfb9c50ad437ad9e6f4c7449471ad899bf60f10b3d608c; URLs/hashes in E14/sources-fresh.json. A successful ordered post callback is corroborated by current bridge GPU readbacks; error quiescence of standalone void mappings remains SPEC_UNVERIFIED. No error callback authorizes release.
+
+REFERENCE_SOURCE: Mullion93de32b9145885ceb2e45be7d445e56d62499b3c queue593–625 retains its mapping closure through dedicated mapped-event wait;1338–1353/1392–1404 retain Update/Copy inputs. E14/mullion-queue is the retained E13 fresh retrieval (SHA256641a21ad8fce6aa6f3f6f0cb02e0e3ae162a97a0eb7740d738c5f70ece6492, sources.json). No new Mullion runtime or latest-HEAD claim, no code transplant. Microsoft public device-removal/fence behavior remains the E13 contract; it does not define native heap-release safety. Windows native NOT_RUN.
+
+SOURCE_AUDIT: existing ordinary MappingCompletion used only its private GPU event. E13's ordered post callback existed only in an external prototype. The new explicit prepareTerminal entry brings it through the existing native batch owner and PE/Unix transport, leaving production queue admission and buffer plans unchanged.
+
+### Design Decisions / Changed Files
+
+- src/winemetal/unix/winemetal_unix.c:4401 onward adds native-only WMTMappingTerminalFeedback, retained by commit options/callback without capturing the batch or any PE owner. prepareTerminal:4550 creates command buffer, allocator,256byte marker, committed command-buffer-scoped residency set, feedback state and options before issue. ResourceState→Blit/ResourceAlias followed by a real marker fill gives the callback actual ordered work. Preparation failure releases local objects and submits nothing; retry remains possible.
+- Same file:seal/wait/dealloc preserve the existing batch state machine. Seal commits prepared post work once, normally also signals the independent event; explicit test flags omit that signal or delay reporting actual feedback by200ms. wait snapshots retained evidence under batch lock, then waits outside it. Either actual private event or successful reported post callback permits GPUComplete; event_value remains the actual event value, including0. Error report alone remains pending; timed condition slices avoid busy-spin and still observe a later independent GPU event. Early final release seals/drains via the same path. Callback may outlive batch when private event finishes first, but only owns independent native state; no self-cycle or PE callback.
+- src/winemetal/winemetal.h:2553 adds the explicit controlled API and documents flags, serialization, retirement semantics and unchanged32byte result ABI. Existing64byte operation and16/48byte request layouts remain unchanged.
+- src/winemetal/winemetal_thunks.h/.c append ordinal208 and one export, reusing the existing fixed-width16byte input transport. Both native/wow64 tables are appended and length-asserted; no prior ordinal shifts or incompatible result replacement.
+- tests/dx12/dx12_reserved_buffer.cpp:719 extends the existing mapping probe. It tests omitted event, partial issue, delayed report, event-present comparison, preparation failure, rejected/abandoned/zero plans, wrong event/word and final release. Terminal readback is CPU-submitted only after credential completion with no auxiliary done-event signal/wait, avoiding an accidental second completion proof. The test uses native WineMetal buffers/blits; it is not an MSC sparse shader test.
+- docs/sparse-handoff-retirement-audit.md records this design, evidence, validation and unresolved gate. No new repository files/runners, D3D12 source files or Metal backend replacement.
+
+Successful callback and host acceptance remain distinct. Partial prefix failure drains actual changed native mappings but does not imply CPU map rollback. Zero/rejected/abandoned preparation does not submit terminal GPU work. Ordinary callers do not call prepareTerminal, allocate its objects, log terminal reports or gain a post submit.
+
+### Validation Results
+
+| Check | Result |
+|---|---|
+| Full x64 default target | PASS using .github/build_dxmt.sh release configuration, repository LLVM-MinGW, external patched LLVM15 installation, tests/D3D12/NVAPI/NVNGX enabled. Incremental full build, not clean/warning-free. Existing managed-storage deprecations/nonvirtual sentinel warnings remain. No shared install. |
+| i686 compile | PASS final probe and PE thunk objects with repository LLVM-MinGW; compile-only, no32bit runtime. Existing static ABI checks apply. |
+| Scoped clang-format / git diff --check | PASS modified code hunks only. |
+| Omitted-event terminal matrix | LOCAL_PASS7 processes: changing-seed normal2,partial2,delay1 and2 expected-negative exits.35 mapping/readback steps +14 final-release cases;49 buffer readbacks,1605632DWORDs, guards clean except exactly one deliberate wrong word. All successful terminal retirements show actual event0. Each process has7 actual native callbacks/reports and10 batch-owner create/destroy identities. |
+| Preparation failures | LOCAL_PASS6 processes: buffer,allocator,marker,residency,options,encoder preparation failures; zero possibly-issued calls and no terminal callback. Invalid flags, duplicate/late prepare, zero, rejection and abandonment also checked in the matrix. |
+| Private-event present comparison | LOCAL_PASS2 processes, normal/delayed-report:14 readbacks,458752DWORDs; actual event1 and post callback/report7each. Pending final release drains, while callback state may finish independently of the caller. These are correctness cases, not timing benchmarks. |
+| Existing mapping / buffer plans | LOCAL_PASS ordinary mapping normal/partial; plan-normal/partial/self/release. Ordinary event-only path shows no terminal work; plan oracle98304DWORDs each for3readback modes,5COM sentinels destroyed exactly once per plan process. |
+| Nearby regression | LOCAL_PASS public reserved buffer311296DWORD oracle, wrong-oracle expected exit1, feedback normal, submitted-barrier fault/removal, reserved texture handoff retirement, packed full-mips/copy and actual D3D11 buffer copy256DWORDs. |
+| Final total / identities | PASS28 processes,3 expected exit1 controls. Nine terminal processes alone give63 actual callbacks,63 readbacks,2064384DWORDs. Metal API/GPU validation notices in all28; no unexpected Metal fault. Actual PE export bytes/paths, Unix UUID/path and build/stage pairing audited. E14/artifacts.json and delivery-audit.json retain hashes. Compiled MSC SDK API4.0.3; dylib product version unknown; dylib SHA256cc487a757f431c83483346c06a3ae8558910ecc510ce59b1e4f905d5d6d72bd4. |
+| Forced Metal3, Windows/Mullion runtime, other GPU, ASan, real GPU fault/missing callback, automatic queue integration | NOT_RUN / not implemented. No hardware block assigned to this M1 Max. Native blit readbacks do not prove broader MSC sparse semantics. |
+
+Retained non-GPU failures: initial build selected PATH GCC and rejected -fblocks; corrected by prepending repository LLVM-MinGW, full rebuild passed. Initial delay matrix found BOOL value2 rather than normalized1 (actual delayed GPU work succeeded); normalized before final rebuild. Review fixed infinite error-report busy-spin and retained local callback snapshot. Temporary regression audit expected PAYLOAD_RESULT instead of actual PLAN_RESULT; corrected external collector. One Wine child appended loader diagnostics to the first case log after tested process exit; original recorded prefix hash was independently recovered/verified, final hash and appended bytes retained in late-log-audit.json. These are not hidden GPU failures. Final suite uses build-delivery-final.log, matrix-final.log and regressions-final.log; preliminary runs remain supplemental.
+
+### Capability Impact / Cost / Regression Risks
+
+No Tiled Resources Tier, Feature Level, Shader Model, MSC compatibility flag, D3D11 behavior or Metal3 shadow change. src/d3d12 command_queue/buffer/device.hpp are byte-identical to baseline. Extra allocation/command buffer/allocator/condition/marker/residency set/commit occurs only for explicit controlled prepareTerminal, never ordinary resource mappings or draw/dispatch. No new global registry, scheduler, heap scan or production mutex. This is correctness groundwork, not an optimization; GPU/CPU performance A/B NOT_RUN, no no-regression/speedup claim. Native owner size increases, even though no ordinary production caller creates it today.
+
+SPEC_UNVERIFIED remains real error quiescence and standalone mapping NSError attribution; if neither private event nor successful ordered callback arrives, final release can wait indefinitely. No timeout, synthetic error or public device-removal notification authorizes early free. BACKEND_NOT_IMPLEMENTED remains bounded Submission admission/publication attachment and texture/packed plans. MSC_SEMANTIC_GAP: none newly demonstrated; general sparse shader behavior still unproven. TARGET_DEVICE_NOT_AVAILABLE: Windows/other GPUs, not Apple7. Previous gate scheduling anomaly remains documented in E13 and is not resolved by this controlled test.
+
+### Git State / Rollback / Next Recommended Slice
+
+Commit this focused six-file change as feat(winemetal), no push; original .gitignore is excluded/preserved. No staged/untracked leftovers expected; final SHA/status/hashes in E14/delivery-manifest.json. Reverting the focused commit removes the additive controlled API/probe while restoring the prior native credential; paired PE/Unix rebuild required when switching.
+
+Next single slice: **attach a prepared buffer plan to one bounded Submission envelope through a controlled queue test entry**, using E13's existing admission owner and E14's prepared post completion, with capacity reservation, publish-after-seal, partial/removal race and FIFO retirement tests. Keep ordinary production activation disabled until ownership and error/teardown gates are met; do not combine texture plans or capability promotion.

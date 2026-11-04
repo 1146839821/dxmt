@@ -4396,6 +4396,79 @@ struct wmt_prepared_buffer_operation {
   MTL4UpdateSparseBufferMappingOperation update;
   MTL4CopySparseBufferMappingOperation copy;
 };
+// A post-mapping callback owns only native evidence, never its batch/PE owner.
+API_AVAILABLE(macos(26.0))
+@interface WMTMappingTerminalFeedback : NSObject {
+  NSCondition *condition_;
+  BOOL native_, success_, reported_, delay_;
+}
+- (id)initWithDelay:(BOOL)delay;
+- (void)record:(id<MTL4CommitFeedback>)feedback;
+- (void)publish;
+- (BOOL)wait:(uint64_t)timeout event:(id<MTLSharedEvent>)event;
+@end
+@implementation WMTMappingTerminalFeedback
+- (id)initWithDelay:(BOOL)delay {
+  if (!(self = [super init]))
+    return nil;
+  condition_ = [[NSCondition alloc] init];
+  delay_ = delay;
+  if (!condition_) {
+    [self release];
+    return nil;
+  }
+  return self;
+}
+- (void)record:(id<MTL4CommitFeedback>)feedback {
+  [condition_ lock];
+  native_ = YES;
+  success_ = feedback.error == nil;
+  fprintf(
+      stderr, "SPARSE_MAPPING_TERMINAL native=%p success=%u error=%ld delay=%u\n", self, success_,
+      (long)feedback.error.code, delay_
+  );
+  [condition_ unlock];
+  if (delay_)
+    dispatch_after(
+        dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC), dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+          @autoreleasepool {
+            [self publish];
+          }
+        }
+    );
+  else
+    [self publish];
+}
+- (void)publish {
+  [condition_ lock];
+  reported_ = YES;
+  fprintf(stderr, "SPARSE_MAPPING_TERMINAL report=%p success=%u\n", self, success_);
+  [condition_ broadcast];
+  [condition_ unlock];
+}
+- (BOOL)wait:(uint64_t)timeout event:(id<MTLSharedEvent>)event {
+  [condition_ lock];
+  NSDate *deadline = timeout != UINT64_MAX ? [NSDate dateWithTimeIntervalSinceNow:(double)timeout / 1000.0] : nil;
+  while (!(native_ && reported_ && success_) && event.signaledValue < 1) {
+    if (!timeout || (deadline && deadline.timeIntervalSinceNow <= 0))
+      break;
+    // Errors never authorize release. Poll the independent GPU event too, and
+    // avoid spinning on an error report when neither completion proof arrives.
+    NSDate *slice = [NSDate dateWithTimeIntervalSinceNow:1.0];
+    if (deadline && [deadline compare:slice] == NSOrderedAscending)
+      slice = deadline;
+    [condition_ waitUntilDate:slice];
+  }
+  const BOOL complete = native_ && reported_ && success_;
+  [condition_ unlock];
+  return complete;
+}
+- (void)dealloc {
+  [condition_ release];
+  [super dealloc];
+}
+@end
+
 API_AVAILABLE(macos(26.0))
 @interface WMTSparseMappingCompletion : NSObject {
   id<MTL4CommandQueue> queue_;
@@ -4405,10 +4478,18 @@ API_AVAILABLE(macos(26.0))
   uint64_t count_, next_;
   struct WMTSparseMappingResult result_;
   BOOL trace_;
+  id<MTL4CommandBuffer> terminal_buffer_;
+  id<MTL4CommandAllocator> terminal_allocator_;
+  id<MTLBuffer> terminal_marker_;
+  id<MTLResidencySet> terminal_residency_;
+  MTL4CommitOptions *terminal_options_;
+  WMTMappingTerminalFeedback *terminal_feedback_;
+  uint32_t terminal_flags_;
 }
 - (id)initWithQueue:(id<MTL4CommandQueue>)queue
          operations:(const struct WMTSparseBufferBatchOperation *)ops
               count:(uint64_t)count;
+- (BOOL)prepareTerminal:(uint32_t)flags;
 - (BOOL)issueNext;
 - (BOOL)seal:(uint32_t)outcome;
 - (void)wait:(uint64_t)timeout result:(struct WMTSparseMappingResult *)result;
@@ -4466,6 +4547,69 @@ API_AVAILABLE(macos(26.0))
     fprintf(stderr, "SPARSE_MAPPING_OWNER create=%p planned=%llu\n", self, (unsigned long long)count_);
   return self;
 }
+- (BOOL)prepareTerminal:(uint32_t)flags {
+  [lock_ lock];
+  if (flags > 3 || terminal_feedback_ || result_.state != WMTSparseMappingPrepared || result_.seals) {
+    [lock_ unlock];
+    return NO;
+  }
+  id<MTLDevice> device = [queue_ device];
+  const char *failure = getenv("DXMT_TEST_SPARSE_TERMINAL_PREPARE_FAILURE");
+  id<MTL4CommandBuffer> buffer = failure && !strcmp(failure, "buffer") ? nil : [device newCommandBuffer];
+  id<MTL4CommandAllocator> allocator = failure && !strcmp(failure, "allocator") ? nil : [device newCommandAllocator];
+  id<MTLBuffer> marker = failure && !strcmp(failure, "marker")
+                             ? nil
+                             : [device newBufferWithLength:256 options:MTLResourceStorageModeShared];
+  MTLResidencySetDescriptor *desc = [[MTLResidencySetDescriptor alloc] init];
+  desc.initialCapacity = 1;
+  id<MTLResidencySet> residency =
+      !desc || (failure && !strcmp(failure, "residency")) ? nil : [device newResidencySetWithDescriptor:desc error:nil];
+  [desc release];
+  WMTMappingTerminalFeedback *feedback = [[WMTMappingTerminalFeedback alloc] initWithDelay:(flags & 2) != 0];
+  MTL4CommitOptions *options = failure && !strcmp(failure, "options") ? nil : [[MTL4CommitOptions alloc] init];
+  BOOL valid = buffer && allocator && marker && residency && feedback && options;
+  if (valid) {
+    [residency addAllocation:marker];
+    [residency commit];
+    [buffer beginCommandBufferWithAllocator:allocator];
+    [buffer useResidencySet:residency];
+    id<MTL4ComputeCommandEncoder> encoder =
+        failure && !strcmp(failure, "encoder") ? nil : [buffer computeCommandEncoder];
+    valid = encoder != nil;
+    if (encoder) {
+      [encoder barrierAfterQueueStages:MTLStageResourceState
+                          beforeStages:MTLStageBlit
+                     visibilityOptions:MTL4VisibilityOptionResourceAlias];
+      [encoder fillBuffer:marker range:NSMakeRange(0, 256) value:0x3c];
+      [encoder endEncoding];
+    }
+    [buffer endCommandBuffer];
+  }
+  if (!valid) {
+    [options release];
+    [feedback release];
+    [buffer release];
+    [allocator release];
+    [residency release];
+    [marker release];
+    [lock_ unlock];
+    return NO;
+  }
+  [options addFeedbackHandler:^(id<MTL4CommitFeedback> value) {
+    @autoreleasepool {
+      [feedback record:value];
+    }
+  }];
+  terminal_buffer_ = buffer;
+  terminal_allocator_ = allocator;
+  terminal_marker_ = marker;
+  terminal_residency_ = residency;
+  terminal_options_ = options;
+  terminal_feedback_ = feedback;
+  terminal_flags_ = flags;
+  [lock_ unlock];
+  return YES;
+}
 - (BOOL)issueNext {
   [lock_ lock];
   if ((result_.state != WMTSparseMappingPrepared && result_.state != WMTSparseMappingIssuing) || next_ == count_ ||
@@ -4498,8 +4642,15 @@ API_AVAILABLE(macos(26.0))
   result_.seals = 1;
   if (result_.possibly_issued_calls) {
     // All wrapper storage and the GPU-only event were prepared before issue.
-    [queue_ signalEvent:event_ value:1];
     result_.state = WMTSparseMappingSealedPending;
+    if (terminal_buffer_) {
+      id<MTL4CommandBuffer> buffers[] = {terminal_buffer_};
+      [queue_ commit:buffers count:1 options:terminal_options_];
+      [terminal_options_ release];
+      terminal_options_ = nil;
+    }
+    if (!(terminal_flags_ & 1))
+      [queue_ signalEvent:event_ value:1];
   } else
     result_.state = WMTSparseMappingNotIssued;
   [lock_ unlock];
@@ -4509,15 +4660,20 @@ API_AVAILABLE(macos(26.0))
   [lock_ lock];
   BOOL pending = result_.state == WMTSparseMappingSealedPending;
   id<MTLSharedEvent> event = [event_ retain];
+  WMTMappingTerminalFeedback *terminal = [terminal_feedback_ retain];
   [lock_ unlock];
-  if (pending && timeout)
+  // Controlled terminal waits use the callback condition; ordinary callers keep
+  // their original private-event path. No callback acquires the batch lock.
+  const BOOL terminal_complete = pending && terminal && [terminal wait:timeout event:event];
+  if (pending && timeout && !terminal)
     [event waitUntilSignaledValue:1 timeoutMS:timeout];
   [lock_ lock];
   result_.event_value = event.signaledValue;
-  if (result_.state == WMTSparseMappingSealedPending && result_.event_value >= 1)
+  if (result_.state == WMTSparseMappingSealedPending && (result_.event_value >= 1 || terminal_complete))
     result_.state = WMTSparseMappingGPUComplete;
   *result = result_;
   [lock_ unlock];
+  [terminal release];
   [event release];
 }
 - (BOOL)retireInputs {
@@ -4570,6 +4726,12 @@ API_AVAILABLE(macos(26.0))
         result_.state, result_.host_outcome, (unsigned long long)result_.possibly_issued_calls,
         (unsigned long long)result_.event_value, result_.inputs_retired
     );
+  [terminal_options_ release];
+  [terminal_buffer_ release];
+  [terminal_allocator_ release];
+  [terminal_residency_ release];
+  [terminal_marker_ release];
+  [terminal_feedback_ release];
   [event_ release];
   [queue_ release];
   [lock_ release];
@@ -4588,6 +4750,17 @@ _SparseMappingQueue_prepareBufferBatch(void *obj) {
         [[WMTSparseMappingCompletion alloc] initWithQueue:(id)p->queue operations:p->operations.ptr count:p->count];
     return p->ret ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
   }
+#endif
+  return STATUS_UNSUCCESSFUL;
+}
+static NTSTATUS
+_SparseMappingCompletion_prepareTerminal(void *obj) {
+  struct unixcall_sparsemappingcompletion_seal *p = obj;
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000
+  if (@available(macOS 26.0, *))
+    return p->completion && !p->reserved && [(WMTSparseMappingCompletion *)p->completion prepareTerminal:p->outcome]
+               ? STATUS_SUCCESS
+               : STATUS_UNSUCCESSFUL;
 #endif
   return STATUS_UNSUCCESSFUL;
 }
@@ -5320,9 +5493,11 @@ const void *__wine_unix_call_funcs[] = {
     &_SparseMappingCompletion_seal,
     &_SparseMappingCompletion_wait,
     &_SparseMappingCompletion_retireInputs,
+    &_SparseMappingCompletion_prepareTerminal,
 };
 _Static_assert(
-    sizeof(__wine_unix_call_funcs) / sizeof(__wine_unix_call_funcs[0]) == unix_sparsemappingcompletion_retireinputs + 1,
+    sizeof(__wine_unix_call_funcs) / sizeof(__wine_unix_call_funcs[0]) ==
+        unix_sparsemappingcompletion_prepareterminal + 1,
     "Sparse completion Unix-call ordinal mismatch"
 );
 
@@ -5536,10 +5711,11 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_SparseMappingCompletion_seal,
     &_SparseMappingCompletion_wait,
     &_SparseMappingCompletion_retireInputs,
+    &_SparseMappingCompletion_prepareTerminal,
 };
 _Static_assert(
     sizeof(__wine_unix_call_wow64_funcs) / sizeof(__wine_unix_call_wow64_funcs[0]) ==
-        unix_sparsemappingcompletion_retireinputs + 1,
+        unix_sparsemappingcompletion_prepareterminal + 1,
     "Sparse completion WOW64 ordinal mismatch"
 );
 #endif
