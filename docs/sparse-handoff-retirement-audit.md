@@ -2221,3 +2221,249 @@ resource mixed-cycle diagnostic and final pure-controlled controls to prove
 the intended schedule before public routing changes. Do not partially activate
 only buffers or introduce a second scheduler. This delivery does not implement
 that independent queue migration, and the overall goal remains active.
+
+
+## Common Native Sparse Issue Ordering — N15 Audit, 2026-11-05
+
+### Task Summary / Baseline Evidence
+
+READ-ONLY SOURCE AUDIT + DESIGN, following the preceding delivery. No production
+or repository test source changes. Baseline feat/d3d12
+1e2abba1df86c11d31b0268cb643124b570e30b4; cached origin ahead18/behind0, target
+remote ref not refreshed. Original unstaged .gitignore is preserved. Previous
+turn is progress: committed texture completion/retirement, not merely a plan.
+E24 = ../dxmt-test/n95-capability-gate/result-sparse-common-issue-audit-20261105.
+Actual macOS27.2(26B123), Xcode27.2(27B52); diagnostic reports Apple7=1,
+Apple8/9=0, Metal4=1, placement=1 on M1 Max. The matched stage uses Wine11.0,
+SDK API4.0.3, runtime product version unknown. No capability override is used.
+CodeGraph preceded source lookup; current source snapshots/hashes are retained.
+
+Goal: identify every issue/publication owner on the existing per-D3D12-queue
+native sparse queue and design one common ordering path. Gate0 evidence and
+Gate1 Design Card are complete. Gate2 implementation is NOT_RUN by this audit's
+scope. Gate3 external diagnostic and Gate4 doc/source/runtime identity audit
+are complete. No public activation or hardware denial is inferred.
+
+### Specification / Mullion Reference
+
+SPEC_REQUIRED: official Microsoft source snapshots in E24 document GPU-side
+Wait returning immediately (ms-wait.source:50–64), saved-temporary semantics for
+overlapping CopyTileMappings (ms-copy.source:84–90), and legal volatile descriptor
+changes before submission but not while submitted work is unfinished
+(ms-rs11.source:75–83). UpdateTileMappings defines ordered region/range traversal,
+NULL/SKIP/REUSE and ignored parameters (ms-update.source:103–139). Do not turn a
+queue Wait into an API-thread GPU wait or reinterpret descriptor volatility.
+These contracts do not by themselves prove an exact Apple native-copy sampling
+point, real GPU error quiescence or backing-lifetime equivalence.
+
+APPLE_SDK_SOURCE: freshly copied installed MTL4CommandQueue.h:261–275 defines
+signal after prior GPU work and wait before future work;349–415 requires
+ResourceState ordering, compatible placement page sizes and appropriate alias
+usage. MTLResidencySet.h:41–45,80–136 separates pending membership/commit from
+execution; heap COM retention and residency membership remain different proofs.
+No new page-size experiment ran: the prior real M1 Max64KiB result remains
+separately identified evidence, not a new hardware blocker.
+
+MULLION_SOURCE_OBSERVED: fresh ls-remote still resolves HEAD/main to
+93de32b9145885ceb2e45be7d445e56d62499b3c. Its queue Map593–625 uses a common held
+closure for buffer and texture mapping, settles predecessors, commits residency,
+issues mapping work and signals/waits the mapping event. Update1280–1350 and
+Copy1355–1404 own operation arrays and named objects. Texture bookkeeping still
+has CPU-maintained mapped_tiles; this is not proof of complete semantics.
+Use its common ownership boundary as reference; do not import Hold/Gate/Settle,
+its backend, unmap workaround, or scheduler. No Mullion code is copied and no
+license changes arise. Windows native and Mullion runtime are NOT_RUN.
+E24/sources.json includes URLs, pinned revisions, snapshots and hashes; failed
+web-tool lookups yielded no usable source and are not cited as evidence.
+
+### Current Source Evidence / Entry-Point Inventory
+
+All queue line references below are src/d3d12/d3d12_command_queue.cpp at the
+baseline. Native references are src/winemetal/unix/winemetal_unix.c.
+
+| Owner / path | Current behavior and required migration boundary |
+| --- | --- |
+| Queue initialization82–84,884–898 | One native sparse queue/event per D3D12 queue, global residency set attached. No per-resource native queue exists or is proposed. |
+| Public Update949–978 and Copy980–1010 | Under commit_mutex_, BeginSparseMapping719–761 immediately queues native wait(odd), commits classic handoff plus native pre-barrier, calls resource legacy issue/publication, then End763–775 queues native signal(even). This is the eager owner. Rejected resource input still closes its event pair. |
+| Controlled buffer Submit789–854 | Captures owned intent, waits for bounded capacity, prepares pre-barrier/classic handoff, reserves even event and publishes into existing FIFO. No native wait/map/signal at admission. |
+| CompletionThread529–633 / IssueDeferredSparse477–526 | Waits predecessors/classic handoff outside queue locks, resolves live mappings, prepares terminal, issues native wait/pre-barrier/map/seal/signal, then waits and retires actual native credentials before next FIFO retirement. Only buffer plans currently fit Submission106. |
+| CommitSubmissionLocked658–679 | Commits classic buffer, immediately submits sparse_barrier when present, then publishes. A future common deferred record must not pass its pre-barrier through this eager submission branch accidentally. Prepared objects alone do not issue work. |
+| Native map/copy input owners | buffer.cpp:178–295 and texture.cpp:541–635,2225–2404 own controlled PrepareNative/Issue/Finish/Wait/Retire. Legacy buffer298–347 and texture2411–2436 instead issue synchronously. Keep resource tile_mappings_ as the sole logical authority. |
+| Native bridge | wait4099–4107, signal4075–4083; barrier submit4248–4270; batch issue4670–4687; seal4689–4720 includes terminal commit and optional private signal. Legacy buffer update4901, texture update4979, buffer copy5060, texture copy5121 issue directly. Moving only event calls is insufficient. |
+| ExecuteCommandLists1060–1168,1845 | Bounded admission and live descriptor resolution occur before classic commit; native sparse event wait is encoded at1165–1166. Preserve that descriptor observation point and allocator/recording ownership. |
+| Signal1874–1915 / Wait1919–1959 | Both admit classic records waiting the reserved sparse even value. Completion publishes the fence after earlier FIFO records. Do not publish successful fence progress for failed mapping work. |
+| GetClockCalibration1970–2026 / Present2052–2092 | Both wait the latest sparse even value in their classic buffer. Calibration releases commit_mutex_ before its synchronous native wait. Include these callers, not only draw/dispatch. |
+| Capacity/removal/destruction | WaitForSubmissionSpace637–643 uses existing32-slot bound; completion reduces count outside commit_mutex_. Removal150–160 signals eventMAX and wakes waiters; destruction784–787 stops then joins/drains. MAX/cancellation is not native completion proof. |
+
+SOURCE_AUDIT: a full src call-site inventory finds GetTileMapping only in the
+queue's shadow fallback1370 and resource implementations; native buffer
+CopyTiles1241–1282 uses stable sparse buffer, native texture1284–1359 uses
+immutable tile geometry. Neither reads current heap mappings for its native GPU
+blit. IsTileMapped has no production caller in this scan. Sampler LOD sidecar
+validation command_list.cpp:1583–1587 checks descriptor addresses, not tiles.
+CollectResourceUsesForSubmission1606–1609 resolves existing live descriptors;
+there is no basis to defer all descriptor resolution or add a tile-map cache.
+
+SOURCE_AUDIT: heap.cpp:61–64 unregisters residency on heap destruction;
+device.cpp:2108–2155 commits membership changes. Mapping plans retain old/new/
+source heaps to their own terminal, but that is not automatically every later
+consumer's physical backing lifetime. Same-queue remap follows predecessors;
+valid cross-queue alias/remap requires explicit order. Prove the lifetime across
+those boundaries with actual paused consumers before public migration. Do not
+pin every heap forever or snapshot an unresolved future mapping at API admission.
+
+### Current-HEAD Runtime Evidence / Dependency Cycle
+
+E24 external consumer_audit.cpp is derived from the existing E21 diagnostic and
+recompiled/linked against current HEAD headers/import libraries. Production bytes
+match E23 delivery; WineMetal PE/Unix are paired. The final executable adds one
+real texture variant:128x128 R32_UINT reserved texture plus64KiB texture heap.
+No repository source/test was edited. Initial four buffer-only runs and their
+older executable are retained under initial-buffer-* and excluded below.
+
+Schedule: Wait(unblock,1); controlled buffer update reserves1/2; public update of
+another buffer OR texture reserves3/4; Signal(done,99); CPU Signal(unblock,1).
+After actual controlled issue notification, native wait3 was already enqueued
+by the later public call; classic signal3 waits2; controlled signal2 is behind
+native wait3. Dependency cycle: wait3 -> classic signal3 -> classic wait2 ->
+native signal2 -> wait3. Different resources and different resource types do
+not remove this queue-level cycle. Source proves the dependency edges; the
+bounded observation alone is not proof of an infinite GPU hang.
+
+LOCAL_FAIL, expected diagnostic exit2: both changing seeds0x77321abc/0x11223344
+reproduce wait_status258, completed0, device healthy at250ms, for buffer-buffer
+and buffer-texture mixes. LOCAL_PASS controls: second update also controlled;
+both reach done99 with status0 within10s. Final6 processes use one executable,
+8 actual mapping-terminal callbacks and30 sentinel destructions for the five
+instrumented buffer/heap objects per process. Texture objects are real but are
+not part of that sentinel count. API/GPU validation enabled/clean, no process
+kill. Explicit diagnostic removal after observation releases the cycle and drains
+real callbacks; this is cleanup, not spontaneous hardware/device failure.
+No new consumer data readback or performance result is claimed by these cases.
+Loaded PE paths/export bytes, Unix UUID E683A9A6-6E7A-367D-8B6D-3ACB5D4BA01F,
+MSC path/hash and stage artifacts are checked. E24/audit.json and per-process
+logs retain the final accounting; initial runs are separate.
+
+### Design Card — Common Buffer/Texture Mapping Issue in Existing Submission FIFO
+
+**Goal:** eliminate the split eager/deferred issue owner for all placement-sparse
+Update/CopyTileMappings on each D3D12 queue. Both buffer and texture public calls,
+and the controlled seam, must share one ordered admission/issue/retirement path.
+This is one queue-ordering slice; a buffer-only switch cannot satisfy the goal.
+
+**Baseline / Evidence:**1e2abba1, source inventory and final6 real-device runs
+above. Texture intent/native credential prerequisites are complete; common
+ordering and full consumer-lifetime validation remain incomplete.
+
+**Scope:** existing queue.cpp, internal device.hpp and existing reserved probes;
+resource owner adjustments only where needed to express the same contract.
+Use existing buffer/texture plans and native completion; preserve the Metal3
+shadow path. No new src/d3d12 file, runner, scheduler or independent state map.
+
+**Non-Scope:** no backend replacement, shader ABI/cache change, Mullion scheduler,
+new resource format/Tier/FL/SM promotion or unconditional synchronization removal.
+Do not treat passing queue tests as MSC shader semantic completion.
+
+**Architecture / Module Boundary:** Submission owns exactly one active transient
+mapping intent, preferably a variant of the two existing unique_ptr plan types.
+Visit their common operations in the queue; preserve virtual method ordering and
+resource-owned logical state. This avoids a third plan/state machine and a second
+queue. Queue owns order/events/capacity; resource owns validation/live mapping
+resolution/publication; WineMetal owns native input copies and completion proof.
+
+**Proposed Changes / Time Sequence:**
+1. Under existing commit serialization validate/copy public inputs into an owned
+   buffer or texture intent. Preserve current invalid-input/error policy. Wait
+   for the same bounded capacity; do not retain caller-array pointers or resolve
+   a future copy source as final state. If preparation/capacity fails before
+   issue, release private refs outside resource/submission locks.
+2. Prepare classic handoff and native pre-barrier before commit. Reserve odd/even
+   event values and atomically publish one FIFO record after classic commit.
+   All mapping records defer native pre-barrier submission, waits, maps, terminal
+   commits and signals to the same existing completion owner. Remove eager
+   Begin/End usage from native-backed public calls together, for both types.
+   Retain the immediate shadow-only path where no native sparse queue exists.
+3. Completion finishes every earlier record, then PrepareNative resolves current
+   source and old target owners. Prepare terminal before any native issue; issue
+   wait(odd), ResourceState pre-barrier, operations, seal, signal(even). Full host
+   acceptance alone publishes logical state once; actual callback/private event
+   establishes native retirement separately. Later classic consumers already
+   wait even. No GPU/condition wait while holding commit/submission/tile locks.
+4. Empty/SKIP still preserves order without inventing mapping completion. Before-
+   issue failure cancels/unwinds; after possible issue retain/seal/drain the
+   prefix and remove device using existing policy. Never report full logical
+   success or release inputs because eventMAX was signaled. Delay/fault tests
+   must exercise these branches and retain real feedback.
+5. Keep descriptor live resolution at Execute admission. Demonstrate that source,
+   overwritten and intermediate heaps remain resident through required mapping
+   and consumer endpoints, including legal cross-queue alias/remap schedules.
+   If current owner references cannot prove this without new state authority,
+   stop activation and report the exact missing lifetime contract; do not ship a
+   partial buffer-only public path as a completed common-owner fix.
+
+**Test Plan:** use existing reserved_buffer / reserved_texture_overlap / packed
+probes and existing MSC consumer cases. Convert the E24 sequence into permanent
+regression cases in those existing files; after implementation all mixed cases
+must complete without diagnostic removal and produce full changing-seed native
+readback, not just done99. Required matrix follows. No repository gate runner.
+
+| Scenario | Required post-change oracle / present status |
+| --- | --- |
+| Buffer-buffer and buffer-texture mixes, reverse texture-buffer, copy/update | No progress before predecessor; full buffer/texture output after release; two seeds and exact callbacks/owners. Current two forward mixes LOCAL_FAIL; reverse/copy variants NOT_RUN. |
+| Future source remap / forward producer / ABA / self overlap | GPU data must reflect ordered source at execution; saved-source self copy; NULL/SKIP/REUSE/repeated tile updates; existing controlled tests rerun with public common owner. New path NOT_RUN. |
+| Standard texture / packed tail / cross queue | Full edge/padding and texel readbacks. Packed uses CopyTextureRegion, not undefined packed CopyTiles. New queue route NOT_RUN; E23 data is prior independent credential evidence. |
+| Consumer lifetime / descriptors | Pause real consumer, release allowed public references, ordered alias/remap/unmap; live descriptor update before Execute, replay, raw/typed/counter/root VA and texture reads; exact words/guards and residency/sentinels. New path NOT_RUN. |
+| Capacity32/blocked33 / removal / destruction | Wait producer returns/admission bounded; completion needs no commit lock; blocked admission wakes on removal; no possible-issued inputs freed without proof. New mixed variants NOT_RUN. |
+| Empty/reject / early-late OOM / partial prefix / delayed callback/no private event | Zero issue before failed prepare; full success not published for partial prefix; actual terminal drains; no false fence success. New mixed variants NOT_RUN. |
+| Signal / Wait / Execute / calibration / Present adjacency | Preserve latest sparse wait and existing fence rewind/latching; no early success; current minimal drawing/queue probes selected by touched paths. New path NOT_RUN. |
+| Metal3 / D3D11 / MSC / build identities | Preserve fallback and API behavior; x64 full build plus x86 bridge compile/runtime as available, paired stage and actual load identities. Production rebuild/rendering NOT_RUN in this docs-only audit. |
+
+**Costs / Risks:** current32-slot FIFO and one completion thread remain. A tagged
+plan pointer adds bounded Submission storage; measure compiler layout, per-map
+allocation and warm/cold enqueue median/P95 plus data completion latency. The
+existing completion owner waits native work, so additional CPU serialization and
+classic queue backpressure must be measured, not called free or faster. Compare
+same GPU/toolchain with paired binaries/fixtures and validation policy; report
+INCONCLUSIVE when noise overlaps. Risks include early pre-barrier submit through
+CommitSubmissionLocked, future native waits overtaking producers, old/new heap
+release under locks, empty seals, partial native failures and fence success on
+removal. A timeout is diagnostic, never permission to free native inputs.
+
+**Alternatives Rejected:** deferring just wait/signal; buffer-only activation;
+per-resource native queues; another thread/scheduler or logical history map;
+CPU draining under commit_mutex_; broad descriptor deferral; permanent heap
+pinning. Each either preserves the demonstrated cycle, breaks ownership/timing,
+or adds architecture without proof. Keep conservative waits until evidence
+supports any later optimization.
+
+**Rollback Plan:** one focused implementation revert of common routing, preserving
+this red evidence and prior owned plans/credentials. No capability rollback is
+needed because exposure must remain unchanged.
+
+**Definition of Done:** all placement-native buffer/texture public mapping entries
+and controlled issue have one FIFO native owner; the E24 cycle becomes complete
+GPU readback without removal; order/source/partial-error/capacity/consumer-lifetime
+matrix passes with exact build identity; adjacent Metal3/D3D11/MSC checks run or
+are explicitly limited without claiming activation readiness; costs recorded;
+no new scheduler/map/modules, focused commit without push. Stop after that slice.
+
+### Remaining Blockers / Delivery Audit
+
+BACKEND_NOT_IMPLEMENTED(P1): common public buffer/texture ordering and production
+routing; current FIFO plan field is buffer-only. SPEC_UNVERIFIED: complete
+consumer backing/residency lifetime, genuine error quiescence, Apple live-source
+sampling detail, Windows differential and production performance acceptance.
+MSC_SEMANTIC_GAP: no new one demonstrated by liveness tests; broader sparse/status
+shader semantics retain their independent gates. TARGET_DEVICE_NOT_AVAILABLE:
+Windows/other-GPU comparison only. M1 Max Apple7 placement sparse is available;
+no BLOCKED_BY_HARDWARE classification is justified here.
+
+Changed files: this existing audit report and D3D12_RESOURCE_AUDIT_CHECKLIST.md.
+Public FL/SM/Tier, Metal3 fallback, D3D11 code and MSC ABI remain unchanged.
+SOURCE_AUDIT/diagnostic build/final6-run expected outcomes/identity/diff checks
+PASS; the four mixed failures are explicitly LOCAL_FAIL, not feature passes.
+No production build, new conformance readback or performance A/B ran this round.
+Final SHA/status/source and artifact hashes are in E24/delivery-manifest.json;
+one docs(d3d12) commit, no push, only original .gitignore remains unstaged.
+Next recommended slice is the single common-owner implementation card above;
+this audit stops before implementation. Overall goal remains active.

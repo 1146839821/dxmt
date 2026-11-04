@@ -96,6 +96,13 @@ and does not justify another unchanged local MS_LOAD or Submit timing matrix.
   evidence includes 25 full tile, 6 texel and 21 buffer readbacks. Public activation
   and mixed eager/deferred native issue remain OPEN; the next gate is a common
   buffer/texture native issue ordering design, not partial public activation.
+  That audit now revalidates the current HEAD cycle with both buffer-buffer and
+  buffer-texture mixes (two seeds each); pure-controlled controls complete.
+  One common owner in the existing bounded Submission FIFO is required for all
+  native-backed public mapping entries. The next Design Card includes producer
+  order, partial-prefix cleanup, capacity and consumer/residency lifetime;
+  implementation and public activation remain OPEN. See the
+  [common native issue audit](sparse-handoff-retirement-audit.md#common-native-sparse-issue-ordering--n15-audit-2026-11-05).
   See [native completion delivery](sparse-handoff-retirement-audit.md#texture-native-completion--delivery-2026-11-05)
   and the preceding
   [consumer audit and Design Card](sparse-handoff-retirement-audit.md#public-buffer-plan-activation-consumers--n15-audit-2026-11-05).
