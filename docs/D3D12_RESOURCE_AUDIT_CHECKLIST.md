@@ -81,9 +81,17 @@ and does not justify another unchanged local MS_LOAD or Submit timing matrix.
   different resource. Two final mixed runs time out at the bounded observation
   with the device healthy; two matched pure-controlled runs complete. This is
   liveness evidence, not new GPU data readback. Public activation stays OPEN.
-  Next prerequisite: controlled texture-owned intent extraction, followed by
-  one common native issue owner and backing-lifetime validation; no hardware
-  blocker or Tier/FL promotion is inferred. See
+  Controlled texture-owned intent extraction is now complete: preparation owns
+  caller inputs without native issue/publication, and copy resolves current
+  source mappings at explicit serialized execution. Public wrappers remain
+  synchronous. Two final seeds pass four full native tile readbacks each;
+  standard/packed ownership, wrong-word, OOM and legacy failure controls pass.
+  Public activation and the mixed-owner cycle remain OPEN. Next prerequisite:
+  a texture-specific native terminal/retirement credential before one common
+  native issue owner and backing-lifetime validation. No hardware blocker or
+  Tier/FL promotion is inferred. See the
+  [texture intent delivery](sparse-handoff-retirement-audit.md#controlled-texture-owned-mapping-intent--delivery-2026-11-05)
+  and the preceding
   [consumer audit and Design Card](sparse-handoff-retirement-audit.md#public-buffer-plan-activation-consumers--n15-audit-2026-11-05).
 
 - [x] N09 typed-buffer format admission rejects unsupported native SRV/UAV

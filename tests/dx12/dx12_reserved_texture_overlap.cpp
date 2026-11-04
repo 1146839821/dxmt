@@ -14,6 +14,9 @@
 #include <stdexcept>
 #include <thread>
 #include <utility>
+#include <memory>
+#include <cstdlib>
+#include "../../src/d3d12/d3d12_device.hpp"
 
 namespace {
 
@@ -97,6 +100,167 @@ void CreateBuffer(ID3D12Device *device, Owned<ID3D12Resource> &resource,
   Check("CreateBuffer", device->CreateCommittedResource(
                             &properties, D3D12_HEAP_FLAG_NONE, &description,
                             state, nullptr, IID_PPV_ARGS(&resource.ptr)));
+}
+
+// Internal matched-build probe; ordinary modes retain delay-loaded WineMetal.
+class TextureIntentSentinel final : public IUnknown {
+  std::atomic<ULONG> refs_{1};
+  std::atomic<UINT> &deaths_;
+
+public:
+  explicit TextureIntentSentinel(std::atomic<UINT> &deaths) : deaths_(deaths) {}
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void **out) override {
+    if (!out)
+      return E_POINTER;
+    *out = nullptr;
+    if (iid != __uuidof(IUnknown))
+      return E_NOINTERFACE;
+    *out = this;
+    AddRef();
+    return S_OK;
+  }
+  ULONG STDMETHODCALLTYPE AddRef() override { return ++refs_; }
+  ULONG STDMETHODCALLTYPE Release() override {
+    const auto n = --refs_;
+    if (!n) {
+      ++deaths_;
+      delete this;
+    }
+    return n;
+  }
+};
+
+bool CheckTextureIntentOwnership(ID3D12Device *device, bool packed = false) {
+  using namespace dxmt;
+  auto require = [](bool ok) {
+    if (!ok)
+      throw std::runtime_error("texture intent ownership");
+  };
+  std::atomic<UINT> deaths{0};
+  const GUID key = {0x92143401,
+                    0xe31e,
+                    0x475a,
+                    {0x88, 0x14, 0x29, 0x03, 0x77, 0x40, 0x19, 0x12}};
+  auto attach = [&](ID3D12Object *obj) {
+    auto sentinel = new TextureIntentSentinel(deaths);
+    Check("attach intent sentinel",
+          obj->SetPrivateDataInterface(key, sentinel));
+    sentinel->Release();
+  };
+  D3D12_RESOURCE_DESC desc = {};
+  desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+  desc.Width = 384;
+  desc.Height = 128;
+  desc.DepthOrArraySize = 1;
+  desc.MipLevels = 1;
+  desc.SampleDesc.Count = 1;
+  desc.Format = DXGI_FORMAT_R32_UINT;
+  desc.Layout = D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE;
+  if (packed) {
+    desc.Width = 64;
+    desc.Height = 64;
+    desc.MipLevels = 4;
+  }
+  Owned<ID3D12Resource> source, target;
+  Check("intent source",
+        device->CreateReservedResource(&desc, D3D12_RESOURCE_STATE_COMMON,
+                                       nullptr, IID_PPV_ARGS(&source.ptr)));
+  Check("intent target",
+        device->CreateReservedResource(&desc, D3D12_RESOURCE_STATE_COMMON,
+                                       nullptr, IID_PPV_ARGS(&target.ptr)));
+  UINT total = 0;
+  D3D12_PACKED_MIP_INFO packed_info = {};
+  device->GetResourceTiling(source.ptr, &total, &packed_info, nullptr, nullptr,
+                            0, nullptr);
+  require(total == (packed ? packed_info.NumTilesForPackedMips : 3) && total &&
+          (!packed || packed_info.NumPackedMips));
+  D3D12_HEAP_DESC hd = {};
+  hd.SizeInBytes = 3ull * kTileBytes;
+  hd.Properties = Properties(D3D12_HEAP_TYPE_DEFAULT);
+  hd.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_NON_RT_DS_TEXTURES;
+  Owned<ID3D12Heap> heap;
+  Check("intent heap", device->CreateHeap(&hd, IID_PPV_ARGS(&heap.ptr)));
+  attach(source.ptr);
+  attach(target.ptr);
+  attach(heap.ptr);
+  auto src = static_cast<MTLD3D12Resource *>(source.ptr),
+       dst = static_cast<MTLD3D12Resource *>(target.ptr);
+  auto expected = static_cast<MTLD3D12Heap *>(heap.ptr)->GetTileBackingBuffer();
+  std::unique_ptr<D3D12SparseTextureMappingPlan> update, copy;
+  auto check_failure = [&](HRESULT hr, const char *name) {
+    char phase[16] = {};
+    if (!GetEnvironmentVariableA(name, phase, sizeof(phase)) ||
+        std::strcmp(phase, "intent"))
+      return false;
+    require(hr == E_OUTOFMEMORY);
+    update.reset();
+    copy.reset();
+    require(!src->IsTileMapped(0) && !dst->IsTileMapped(0));
+    source.ptr->Release();
+    source.ptr = nullptr;
+    target.ptr->Release();
+    target.ptr = nullptr;
+    heap.ptr->Release();
+    heap.ptr = nullptr;
+    require(deaths == 3);
+    std::printf("TEXTURE_INTENT_PREPARE_END unchanged=1 oom=1 destroyed=3\n");
+    return true;
+  };
+  {
+    std::vector<D3D12_TILED_RESOURCE_COORDINATE> starts(1);
+    std::vector<D3D12_TILE_REGION_SIZE> sizes(1);
+    sizes[0].NumTiles = total;
+    std::vector<UINT> offsets{0}, counts{total};
+    std::printf("TEXTURE_INTENT_PREPARE_BEGIN ownership=1\n");
+    HRESULT hr = src->PrepareTextureTileUpdate(
+        1, starts.data(), sizes.data(), heap.ptr, 1, nullptr, offsets.data(),
+        counts.data(), D3D12_TILE_MAPPING_FLAG_NONE, update);
+    if (check_failure(hr, "DXMT_TEST_SPARSE_TEXTURE_UPDATE_FAILURE"))
+      return true;
+    Check("prepare update", hr);
+    hr = dst->PrepareTextureTileCopy(src, starts.data(), starts.data(),
+                                     sizes.data(), D3D12_TILE_MAPPING_FLAG_NONE,
+                                     copy);
+    if (check_failure(hr, "DXMT_TEST_SPARSE_TEXTURE_COPY_FAILURE"))
+      return true;
+    Check("prepare copy", hr);
+    starts[0].X = 999;
+    sizes[0].NumTiles = 0;
+    offsets[0] = 999;
+    counts[0] = 0;
+  }
+  for (UINT i = 0; i < total; ++i)
+    require(!src->IsTileMapped(i) && !dst->IsTileMapped(i));
+  std::printf(
+      "TEXTURE_INTENT_PREPARE_END unchanged=1 caller_arrays_destroyed=1\n");
+  source.ptr->Release();
+  source.ptr = nullptr;
+  target.ptr->Release();
+  target.ptr = nullptr;
+  heap.ptr->Release();
+  heap.ptr = nullptr;
+  require(deaths == 0);
+  Check("execute owned update", update->IssueLegacy({}));
+  require(update->IssueLegacy({}) == E_INVALIDARG);
+  Check("execute live copy", copy->IssueLegacy({}));
+  require(copy->IssueLegacy({}) == E_INVALIDARG);
+  UINT mismatches = 0;
+  for (UINT i = 0; i < total; ++i) {
+    WMT::Buffer actual;
+    UINT64 offset = 0;
+    Check("owned copy mapping", dst->GetTileMapping(i, actual, offset));
+    mismatches +=
+        actual.handle != expected.handle || offset != UINT64(i) * kTileBytes;
+  }
+  update.reset();
+  require(deaths == 0);
+  copy.reset();
+  require(deaths == 3);
+  std::printf("TEXTURE_INTENT_OWNERSHIP packed=%u tiles=%u "
+              "changed_source_observed=1 mismatches=%u destroyed=%u\n",
+              packed, total, mismatches, deaths.load());
+  require(!mismatches);
+  return false;
 }
 
 // Use the existing SM6 fixture through the normal descriptor/root/MSC path.
@@ -250,7 +414,7 @@ struct GateWatchdog {
 int Run(bool bad_oracle, bool cross_resource, bool bad_cross, bool cross_queue,
         bool reverse_queue, bool early_work, DXGI_FORMAT format, bool bad_edge,
         bool bad_position, bool multi_heap, bool retirement,
-        bool bad_retirement, bool bad_shader) {
+        bool bad_retirement, bool bad_shader, bool intent, bool bad_intent) {
   Owned<ID3D12Device> device;
   Check("device", D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
                                     IID_PPV_ARGS(&device.ptr)));
@@ -326,7 +490,16 @@ int Run(bool bad_oracle, bool cross_resource, bool bad_cross, bool cross_queue,
   UINT *data = nullptr;
   Check("upload map",
         upload->Map(0, nullptr, reinterpret_cast<void **>(&data)));
-  const std::array<UINT, 3> values{0x11112222, 0x33334444, 0x55556666};
+  std::array<UINT, 3> values{0x11112222, 0x33334444, 0x55556666};
+  if (intent) {
+    char seed[16] = {};
+    GetEnvironmentVariableA("DXMT_TEST_TEXTURE_INTENT_SEED", seed,
+                            sizeof(seed));
+    const auto value = static_cast<UINT>(std::strtoul(seed, nullptr, 0));
+    for (auto &word : values)
+      word ^= value;
+    std::printf("TEXTURE_INTENT_SEED value=%u\n", value);
+  }
   for (UINT i = 0; i < 3; i++)
     for (UINT j = 0; j < kTileBytes / 4; j++)
       data[i * (kTileBytes / 4) + j] = TileWord(values[i], j);
@@ -428,6 +601,9 @@ int Run(bool bad_oracle, bool cross_resource, bool bad_cross, bool cross_queue,
     for (UINT tile = 0; tile < 2 && ok; ++tile) {
       for (UINT word = 0; word < kTileBytes / sizeof(UINT); ++word) {
         UINT wanted = expected[tile] ? TileWord(expected[tile], word) : 0;
+        if (bad_intent && std::strcmp(name, "intent live source") == 0 &&
+            tile == 1 && word == kTileBytes / sizeof(UINT) - 1)
+          wanted ^= 1;
         if (bad_retirement && std::strcmp(name, "handoff queued") == 0 &&
             tile == 0 && word == kTileBytes / sizeof(UINT) - 1)
           wanted ^= 1u;
@@ -560,6 +736,157 @@ int Run(bool bad_oracle, bool cross_resource, bool bad_cross, bool cross_queue,
     std::cout << "Sparse handoff retirement readback passed\n";
     return 0;
   }
+  if (intent) {
+    using namespace dxmt;
+    for (const auto &entry :
+         {std::pair{"d3d12.dll", "D3D12CreateDevice"},
+          std::pair{"winemetal.dll",
+                    "SparseMappingQueue_tryUpdateTextureMappings"}}) {
+      const auto module = GetModuleHandleA(entry.first);
+      const auto code = reinterpret_cast<const unsigned char *>(
+          GetProcAddress(module, entry.second));
+      char path[2048] = {};
+      if (!module || !code || !GetModuleFileNameA(module, path, sizeof(path)))
+        throw std::runtime_error("intent runtime identity");
+      std::printf("LOADED_MODULE %s %s\nLOADED_CODE %s %s ", entry.first, path,
+                  entry.first, entry.second);
+      for (UINT i = 0; i < 16; ++i)
+        std::printf("%02x", code[i]);
+      std::printf("\n");
+    }
+    if (CheckTextureIntentOwnership(device.ptr))
+      return 0;
+    CheckTextureIntentOwnership(device.ptr, true);
+    auto require = [](bool ok) {
+      if (!ok)
+        throw std::runtime_error("texture intent GPU contract");
+    };
+    auto native_device = static_cast<MTLD3D12Device *>(device.ptr);
+    auto metal = native_device->GetMTLDevice();
+    require(metal.supportsPlacementSparse() &&
+            metal.supportsFamily(WMTGPUFamilyMetal4));
+    auto sparse = metal.newSparseMappingQueue();
+    require(bool(sparse));
+    sparse.addResidencySet(native_device->GetGlobalResidencySet());
+    Owned<ID3D12Resource> marker;
+    auto marker_desc = BufferDescription(kTileBytes, D3D12_RESOURCE_FLAG_NONE);
+    Check("terminal marker", device->CreateReservedResource(
+                                 &marker_desc, D3D12_RESOURCE_STATE_COMMON,
+                                 nullptr, IID_PPV_ARGS(&marker.ptr)));
+    // A real unmap of an unused buffer page supplies the existing terminal
+    // observer. It carries no texture operation or texture ownership.
+    auto execute_plan = [&](D3D12SparseTextureMappingPlan &plan) {
+      WMTSparseBufferBatchOperation op = {};
+      op.mode = WMTSparseTextureMappingModeUnmap;
+      op.destination =
+          static_cast<MTLD3D12Resource *>(marker.ptr)->GetMetalBuffer().handle;
+      op.length = 1;
+      auto terminal = sparse.prepareBufferBatch(&op, 1);
+      require(bool(terminal) &&
+              SparseMappingCompletion_prepareTerminal(terminal.handle, 1));
+      auto barrier = sparse.prepareBarrierBeforeResourceState();
+      require(bool(barrier) && barrier.submit());
+      const HRESULT hr = plan.IssueLegacy(sparse);
+      require(terminal.issueNext());
+      require(terminal.seal(SUCCEEDED(hr) ? WMTSparseMappingHostAccepted
+                                          : WMTSparseMappingHostRejected));
+      WMTSparseMappingResult result = {};
+      require(terminal.wait(10000, result) &&
+              result.state == WMTSparseMappingGPUComplete &&
+              terminal.retireInputs());
+      WMTSparseBarrierResult before = {};
+      require(barrier.wait(10000, before) &&
+              before.state == WMTSparseBarrierCompleted &&
+              before.native_feedback_received);
+      Check("execute texture intent", hr);
+      require(plan.IssueLegacy(sparse) == E_INVALIDARG);
+    };
+    Owned<ID3D12Resource> destination;
+    Check("intent GPU destination",
+          device->CreateReservedResource(&d, D3D12_RESOURCE_STATE_COMMON,
+                                         nullptr,
+                                         IID_PPV_ARGS(&destination.ptr)));
+    auto source = static_cast<MTLD3D12Resource *>(texture.ptr);
+    auto target = static_cast<MTLD3D12Resource *>(destination.ptr);
+    std::unique_ptr<D3D12SparseTextureMappingPlan> plan;
+    {
+      auto start = zero;
+      auto size = all;
+      std::printf("TEXTURE_INTENT_PREPARE_BEGIN gpu_copy=1\n");
+      Check("prepare GPU copy",
+            target->PrepareTextureTileCopy(source, &start, &start, &size,
+                                           D3D12_TILE_MAPPING_FLAG_NONE, plan));
+      start.X = 999;
+      size.NumTiles = 0;
+    }
+    for (UINT i = 0; i < 3; ++i)
+      require(!target->IsTileMapped(i));
+    std::printf(
+        "TEXTURE_INTENT_PREPARE_END unchanged=1 caller_arrays_destroyed=1\n");
+    D3D12_TILED_RESOURCE_COORDINATE a = {}, b = {};
+    b.X = 1;
+    D3D12_TILE_REGION_SIZE pair = {};
+    pair.NumTiles = 2;
+    queue->CopyTileMappings(texture.ptr, &b, texture.ptr, &a, &pair,
+                            D3D12_TILE_MAPPING_FLAG_NONE);
+    Check("source remap drain", queue->Signal(fence.ptr, ++serial));
+    Wait(fence.ptr, serial);
+    execute_plan(*plan);
+    std::swap(texture.ptr, destination.ptr);
+    verify("intent live source", {values[0], values[0], values[1]});
+    plan.reset();
+    target = static_cast<MTLD3D12Resource *>(texture.ptr);
+    std::vector<D3D12_TILED_RESOURCE_COORDINATE> starts(3);
+    starts[1].X = 1;
+    starts[2].X = 1;
+    std::vector<D3D12_TILE_REGION_SIZE> sizes(3);
+    sizes[0].NumTiles = 1;
+    sizes[1].NumTiles = 1;
+    sizes[2].NumTiles = 2;
+    std::vector<D3D12_TILE_RANGE_FLAGS> flags{
+        D3D12_TILE_RANGE_FLAG_SKIP, D3D12_TILE_RANGE_FLAG_NONE,
+        D3D12_TILE_RANGE_FLAG_REUSE_SINGLE_TILE};
+    std::vector<UINT> offsets{0, 2, 1}, counts{1, 1, 2};
+    Check("prepare ranges", target->PrepareTextureTileUpdate(
+                                3, starts.data(), sizes.data(), heap.ptr, 3,
+                                flags.data(), offsets.data(), counts.data(),
+                                D3D12_TILE_MAPPING_FLAG_NONE, plan));
+    starts.clear();
+    sizes.clear();
+    flags.clear();
+    offsets.clear();
+    counts.clear();
+    execute_plan(*plan);
+    verify("intent ranges", {values[0], values[1], values[1]});
+    plan.reset();
+    Check("prepare self",
+          target->PrepareTextureTileCopy(target, &a, &b, &pair,
+                                         D3D12_TILE_MAPPING_FLAG_NONE, plan));
+    map_all();
+    Check("self source drain", queue->Signal(fence.ptr, ++serial));
+    Wait(fence.ptr, serial);
+    execute_plan(*plan);
+    verify("intent self live", {values[1], values[2], values[2]});
+    plan.reset();
+    D3D12_TILE_RANGE_FLAGS null_range = D3D12_TILE_RANGE_FLAG_NULL;
+    Check("prepare null", target->PrepareTextureTileUpdate(
+                              1, &zero, &all, nullptr, 1, &null_range, nullptr,
+                              nullptr, D3D12_TILE_MAPPING_FLAG_NONE, plan));
+    execute_plan(*plan);
+    verify("intent null", {0, 0, 0});
+    plan.reset();
+    require(target->PrepareTextureTileCopy(target, &b, &b, &all,
+                                           D3D12_TILE_MAPPING_FLAG_NONE,
+                                           plan) == E_INVALIDARG &&
+            !plan);
+    require(target->PrepareTextureTileUpdate(
+                1, &zero, &all, nullptr, 1, nullptr, nullptr, nullptr,
+                D3D12_TILE_MAPPING_FLAG_NONE, plan) == E_INVALIDARG &&
+            !plan);
+    std::cout << "TEXTURE_INTENT_RESULT gpu_readbacks=4 invalid=2 "
+                 "repeat_rejected=4 PASS\n";
+    return 0;
+  }
   D3D12_TILED_RESOURCE_COORDINATE src = {}, dst = {};
   D3D12_TILE_REGION_SIZE pair = {};
   pair.NumTiles = 2;
@@ -672,6 +999,9 @@ int main(int argc, char **argv) {
     return 2;
   const char *arg = argc == 2 ? argv[1] : "";
   const auto is = [&](const char *name) { return std::strcmp(arg, name) == 0; };
+  const bool intent = is("--intent") || is("--bad-intent");
+  if (intent)
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
   const bool rgba8 = is("--rgba8") || is("--bad-rgba8");
   const bool rg16 = is("--rg16");
   const bool rgb10a2 = is("--rgb10a2");
@@ -700,7 +1030,7 @@ int main(int argc, char **argv) {
   const bool bad_queue = is("--bad-rgba8") || is("--bad-r8") ||
                          is("--bad-queue-oracle") || is("--bad-early-work");
   if (argc == 2 && !bad && !cross && !bad_cross && !cross_queue &&
-      !multi_heap && !retirement)
+      !multi_heap && !retirement && !intent)
     return 2;
   const DXGI_FORMAT format = rgba8     ? DXGI_FORMAT_R8G8B8A8_UNORM
                              : rg16    ? DXGI_FORMAT_R16G16_UNORM
@@ -715,7 +1045,8 @@ int main(int argc, char **argv) {
     return Run(bad, cross || bad_cross || cross_queue, bad_cross || bad_queue,
                cross_queue, reverse_queue, early_work, format, bad_edge,
                bad_position, multi_heap, retirement,
-               is("--bad-handoff-retirement"), is("--bad-handoff-shader"));
+               is("--bad-handoff-retirement"), is("--bad-handoff-shader"),
+               intent, is("--bad-intent"));
   } catch (const std::exception &e) {
     std::cerr << e.what() << "\n";
     return 1;

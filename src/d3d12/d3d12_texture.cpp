@@ -35,10 +35,10 @@ static constexpr uint64_t kD3D12TileSize = 64ull * 1024;
 static constexpr UINT kD3D12PackedTile = ~static_cast<UINT>(0);
 
 static void
-FailTextureUpdatePreparationForTesting() {
+FailTextureUpdatePreparationForTesting(const char *point = "prepare") {
   char phase[16] = {}, at[16] = {};
   const DWORD length = GetEnvironmentVariableA("DXMT_TEST_SPARSE_TEXTURE_UPDATE_FAILURE", phase, sizeof(phase));
-  if (!length || length >= sizeof(phase) || std::strcmp(phase, "prepare"))
+  if (!length || length >= sizeof(phase) || std::strcmp(phase, point))
     return;
   const DWORD at_length = GetEnvironmentVariableA("DXMT_TEST_SPARSE_TEXTURE_UPDATE_FAIL_AT", at, sizeof(at));
   if (at_length >= sizeof(at) || (at_length && std::strcmp(at, "1") && std::strcmp(at, "2")))
@@ -47,7 +47,7 @@ FailTextureUpdatePreparationForTesting() {
   static std::atomic<uint64_t> calls{0};
   const auto call = calls.fetch_add(1, std::memory_order_relaxed) + 1;
   if (call == target) {
-    ERR("DXMT_TEST_SPARSE_TEXTURE_UPDATE_FAILURE phase=prepare call=", call);
+    ERR("DXMT_TEST_SPARSE_TEXTURE_UPDATE_FAILURE phase=", point, " call=", call);
     throw std::bad_alloc();
   }
 }
@@ -536,6 +536,28 @@ class MTLD3D12Texture : public MTLD3D12Pageable<MTLD3D12Resource> {
     UINT resource_tile = 0;
     Com<MTLD3D12Heap, false> heap;
     UINT heap_tile = 0;
+  };
+
+  struct MappingPlan final : D3D12SparseTextureMappingPlan {
+    MTLD3D12Texture *destination = nullptr;
+    MTLD3D12Texture *source = nullptr;
+    MTLD3D12Heap *update_heap = nullptr;
+    std::vector<TileUpdate> updates;
+    size_t first_packed_update = std::numeric_limits<size_t>::max();
+    std::vector<UINT> destination_tiles, source_tiles;
+    size_t destination_packed_start = 0;
+    std::vector<TileMapping> copied;
+    // Controlled intent retains objects, never a final mutable source snapshot.
+    Com<MTLD3D12Resource, false> destination_owner, source_owner;
+    bool attempted = false;
+
+    HRESULT
+    IssueLegacy(WMT::SparseMappingQueue queue) override {
+      if (attempted)
+        return E_INVALIDARG;
+      attempted = true;
+      return source ? destination->IssueCopyPlan(*this, queue) : destination->IssueUpdatePlan(*this, queue);
+    }
   };
 
   std::vector<TileMapping> tile_mappings_;
@@ -1940,13 +1962,14 @@ public:
     return tile_mappings_[tile_index].heap != nullptr;
   }
 
+private:
   HRESULT
-  UpdateTileMappings(
+  BuildUpdatePlan(
       UINT NumResourceRegions, const D3D12_TILED_RESOURCE_COORDINATE *pResourceRegionStartCoordinates,
       const D3D12_TILE_REGION_SIZE *pResourceRegionSizes, ID3D12Heap *pHeap, UINT NumRanges,
       const D3D12_TILE_RANGE_FLAGS *pRangeFlags, const UINT *pHeapRangeStartOffsets, const UINT *pRangeTileCounts,
-      D3D12_TILE_MAPPING_FLAGS Flags, WMT::SparseMappingQueue sparse_mapping_queue
-  ) override try {
+      D3D12_TILE_MAPPING_FLAGS Flags, MappingPlan &plan
+  ) {
     if (!reserved_ || (Flags & ~D3D12_TILE_MAPPING_FLAG_NO_HAZARD) || !NumRanges)
       return E_INVALIDARG;
 
@@ -1957,7 +1980,7 @@ public:
     if (FAILED(hr))
       return hr;
 
-    std::vector<TileUpdate> updates;
+    auto &updates = plan.updates;
     updates.reserve(resource_tiles.size());
     uint64_t resource_tile = 0;
     for (UINT range = 0; range < NumRanges; range++) {
@@ -2020,6 +2043,7 @@ public:
         packed_updates.push_back(&update);
     }
     if (!packed_updates.empty()) {
+      plan.first_packed_update = packed_updates.front() - updates.data();
       // Metal maps a sparse texture tail as one operation. D3D12 leaves
       // partial packed-tail mappings undefined, so only accept a complete,
       // contiguous tail whose physical tiles are contiguous as well.
@@ -2047,63 +2071,30 @@ public:
       }
     }
 
-    if (sparse_mapping_queue) {
-      if (!texture || !texture->current())
-        return E_OUTOFMEMORY;
-      if (!updates.empty())
-        FailTextureUpdatePreparationForTesting();
-      std::vector<WMTUpdateSparseTextureMappingOperation> mapping_operations;
-      mapping_operations.reserve(updates.size());
-      for (const auto &update : updates) {
-        if (IsPackedTile(update.resource_tile)) {
-          continue;
-        }
-        auto &operation = mapping_operations.emplace_back();
-        operation.mode = update.heap ? WMTSparseTextureMappingModeMap : WMTSparseTextureMappingModeUnmap;
-        if (!GetStandardTileRegion(update.resource_tile, operation.texture_region, operation.texture_level, operation.texture_slice))
-          return E_NOTIMPL;
-        operation.heap_offset = update.heap_tile;
-      }
-      if (!packed_updates.empty()) {
-        const bool mapped = packed_updates.front()->heap != nullptr;
-        const UINT heap_tile_start = packed_updates.front()->heap_tile;
-        auto &operation = mapping_operations.emplace_back();
-        operation.mode = mapped ? WMTSparseTextureMappingModeMap : WMTSparseTextureMappingModeUnmap;
-        operation.texture_region.origin = {0, 0, 0};
-        operation.texture_region.size = {1, 1, 1};
-        operation.texture_level = sparse_first_mipmap_in_tail_;
-        operation.texture_slice = 0;
-        operation.heap_offset = mapped ? heap_tile_start : 0;
-      }
-      if (!sparse_mapping_queue.tryUpdateTextureMappings(
-              texture->current()->texture(), pHeap ? static_cast<MTLD3D12Heap *>(pHeap)->GetMetalHeap() : WMT::Heap{},
-              mapping_operations.data(), mapping_operations.size()
-          ))
-        return DXGI_ERROR_DEVICE_REMOVED; // Do not publish a failed native update.
-    }
-
-    std::unique_lock<dxmt::mutex> lock(tile_mapping_mutex_);
+    plan.destination = this;
+    // Retain only a heap validated by a mapping range; NULL/SKIP may ignore pHeap.
     for (const auto &update : updates)
-      tile_mappings_[update.resource_tile] = {update.heap, update.heap_tile};
+      if (update.heap) {
+        plan.update_heap = update.heap.ptr();
+        break;
+      }
     return S_OK;
-  } catch (const std::bad_alloc &) {
-    return E_OUTOFMEMORY;
   }
 
   HRESULT
-  CopyTileMappingsFrom(
+  BuildCopyPlan(
       MTLD3D12Resource *pSourceResource, const D3D12_TILED_RESOURCE_COORDINATE *pDstRegionStartCoordinate,
       const D3D12_TILED_RESOURCE_COORDINATE *pSrcRegionStartCoordinate, const D3D12_TILE_REGION_SIZE *pRegionSize,
-      D3D12_TILE_MAPPING_FLAGS Flags, WMT::SparseMappingQueue sparse_mapping_queue
-  ) override try {
+      D3D12_TILE_MAPPING_FLAGS Flags, MappingPlan &plan
+  ) {
     if (!reserved_ || !pSourceResource || !pDstRegionStartCoordinate || !pSrcRegionStartCoordinate || !pRegionSize ||
         !pSourceResource->IsReservedTexture() ||
         !IsSameDevice(device_, pSourceResource) || (Flags & ~D3D12_TILE_MAPPING_FLAG_NO_HAZARD))
       return E_INVALIDARG;
 
     auto *source = static_cast<MTLD3D12Texture *>(pSourceResource);
-    std::vector<UINT> destination_tiles;
-    std::vector<UINT> source_tiles;
+    auto &destination_tiles = plan.destination_tiles;
+    auto &source_tiles = plan.source_tiles;
     const HRESULT destination_hr = BuildRegionTiles(
         1, pDstRegionStartCoordinate, pRegionSize, destination_tiles
     );
@@ -2147,6 +2138,73 @@ public:
          destination_packed_start != source_packed_start))
       return E_NOTIMPL;
 
+    plan.destination = this;
+    plan.source = source;
+    plan.destination_packed_start = destination_packed_start;
+    return S_OK;
+  }
+
+  HRESULT
+  IssueUpdatePlan(MappingPlan &plan, WMT::SparseMappingQueue sparse_mapping_queue) try {
+    auto &updates = plan.updates;
+    if (sparse_mapping_queue) {
+      if (!texture || !texture->current())
+        return E_OUTOFMEMORY;
+      if (!updates.empty())
+        FailTextureUpdatePreparationForTesting();
+      std::vector<WMTUpdateSparseTextureMappingOperation> mapping_operations;
+      mapping_operations.reserve(updates.size());
+      for (const auto &update : updates) {
+        if (IsPackedTile(update.resource_tile)) {
+          continue;
+        }
+        auto &operation = mapping_operations.emplace_back();
+        operation.mode = update.heap ? WMTSparseTextureMappingModeMap : WMTSparseTextureMappingModeUnmap;
+        if (!GetStandardTileRegion(
+                update.resource_tile, operation.texture_region, operation.texture_level, operation.texture_slice
+            ))
+          return E_NOTIMPL;
+        operation.heap_offset = update.heap_tile;
+      }
+      if (plan.first_packed_update != std::numeric_limits<size_t>::max()) {
+        const auto &packed = updates[plan.first_packed_update];
+        const bool mapped = packed.heap != nullptr;
+        const UINT heap_tile_start = packed.heap_tile;
+        auto &operation = mapping_operations.emplace_back();
+        operation.mode = mapped ? WMTSparseTextureMappingModeMap : WMTSparseTextureMappingModeUnmap;
+        operation.texture_region.origin = {0, 0, 0};
+        operation.texture_region.size = {1, 1, 1};
+        operation.texture_level = sparse_first_mipmap_in_tail_;
+        operation.texture_slice = 0;
+        operation.heap_offset = mapped ? heap_tile_start : 0;
+      }
+      if (!sparse_mapping_queue.tryUpdateTextureMappings(
+              texture->current()->texture(), plan.update_heap ? plan.update_heap->GetMetalHeap() : WMT::Heap{},
+              mapping_operations.data(), mapping_operations.size()
+          ))
+        return DXGI_ERROR_DEVICE_REMOVED; // Do not publish a failed native update.
+    }
+
+    {
+      std::unique_lock<dxmt::mutex> lock(tile_mapping_mutex_);
+      for (auto &update : updates) {
+        auto &mapping = tile_mappings_[update.resource_tile];
+        // Keep overwritten owners in the intent, released outside the lock.
+        std::swap(mapping.heap, update.heap);
+        std::swap(mapping.heap_tile, update.heap_tile);
+      }
+    }
+    return S_OK;
+  } catch (const std::bad_alloc &) {
+    return E_OUTOFMEMORY;
+  }
+
+  HRESULT
+  IssueCopyPlan(MappingPlan &plan, WMT::SparseMappingQueue sparse_mapping_queue) try {
+    auto *source = plan.source;
+    const auto &destination_tiles = plan.destination_tiles;
+    const auto &source_tiles = plan.source_tiles;
+    const auto destination_packed_start = plan.destination_packed_start;
     std::vector<WMTCopySparseTextureMappingOperation> mapping_operations;
     if (sparse_mapping_queue) {
       if (!texture || !texture->current() || !source->texture || !source->texture->current())
@@ -2184,7 +2242,7 @@ public:
 
     if (source != this)
       FailTextureCopyPreparationForTesting("snapshot");
-    std::vector<TileMapping> copied;
+    auto &copied = plan.copied;
     {
       std::unique_lock<dxmt::mutex> source_lock(source->tile_mapping_mutex_);
       copied.reserve(source_tiles.size());
@@ -2219,13 +2277,79 @@ public:
           return DXGI_ERROR_DEVICE_REMOVED;
       }
     }
-    // Publish only after all native operations succeed. A partial submission
-    // failure is terminal; do not continue or attempt to roll it back.
     {
-      std::unique_lock<dxmt::mutex> destination_lock(tile_mapping_mutex_);
-      for (size_t i = 0; i < destination_tiles.size(); i++)
-        tile_mappings_[destination_tiles[i]] = copied[i];
+      std::unique_lock<dxmt::mutex> lock(tile_mapping_mutex_);
+      for (size_t i = 0; i < destination_tiles.size(); ++i)
+        std::swap(tile_mappings_[destination_tiles[i]], copied[i]);
     }
+    return S_OK;
+  } catch (const std::bad_alloc &) {
+    return E_OUTOFMEMORY;
+  }
+
+public:
+  HRESULT
+  UpdateTileMappings(
+      UINT regions, const D3D12_TILED_RESOURCE_COORDINATE *starts, const D3D12_TILE_REGION_SIZE *sizes,
+      ID3D12Heap *heap, UINT ranges, const D3D12_TILE_RANGE_FLAGS *flags, const UINT *offsets, const UINT *counts,
+      D3D12_TILE_MAPPING_FLAGS mapping_flags, WMT::SparseMappingQueue queue
+  ) override try {
+    MappingPlan plan;
+    HRESULT hr = BuildUpdatePlan(regions, starts, sizes, heap, ranges, flags, offsets, counts, mapping_flags, plan);
+    return FAILED(hr) ? hr : plan.IssueLegacy(queue);
+  } catch (const std::bad_alloc &) {
+    return E_OUTOFMEMORY;
+  }
+
+  HRESULT
+  CopyTileMappingsFrom(
+      MTLD3D12Resource *source, const D3D12_TILED_RESOURCE_COORDINATE *dst, const D3D12_TILED_RESOURCE_COORDINATE *src,
+      const D3D12_TILE_REGION_SIZE *size, D3D12_TILE_MAPPING_FLAGS flags, WMT::SparseMappingQueue queue
+  ) override try {
+    MappingPlan plan;
+    HRESULT hr = BuildCopyPlan(source, dst, src, size, flags, plan);
+    return FAILED(hr) ? hr : plan.IssueLegacy(queue);
+  } catch (const std::bad_alloc &) {
+    return E_OUTOFMEMORY;
+  }
+
+  HRESULT
+  PrepareTextureTileUpdate(
+      UINT regions, const D3D12_TILED_RESOURCE_COORDINATE *starts, const D3D12_TILE_REGION_SIZE *sizes,
+      ID3D12Heap *heap, UINT ranges, const D3D12_TILE_RANGE_FLAGS *flags, const UINT *offsets, const UINT *counts,
+      D3D12_TILE_MAPPING_FLAGS mapping_flags, std::unique_ptr<D3D12SparseTextureMappingPlan> &out
+  ) override try {
+    if (out)
+      return E_INVALIDARG;
+    auto plan = std::make_unique<MappingPlan>();
+    HRESULT hr = BuildUpdatePlan(regions, starts, sizes, heap, ranges, flags, offsets, counts, mapping_flags, *plan);
+    if (FAILED(hr))
+      return hr;
+    FailTextureUpdatePreparationForTesting("intent");
+    plan->destination_owner = this;
+    out = std::move(plan);
+    return S_OK;
+  } catch (const std::bad_alloc &) {
+    return E_OUTOFMEMORY;
+  }
+
+  HRESULT
+  PrepareTextureTileCopy(
+      MTLD3D12Resource *source, const D3D12_TILED_RESOURCE_COORDINATE *dst, const D3D12_TILED_RESOURCE_COORDINATE *src,
+      const D3D12_TILE_REGION_SIZE *size, D3D12_TILE_MAPPING_FLAGS flags,
+      std::unique_ptr<D3D12SparseTextureMappingPlan> &out
+  ) override try {
+    if (out)
+      return E_INVALIDARG;
+    auto plan = std::make_unique<MappingPlan>();
+    HRESULT hr = BuildCopyPlan(source, dst, src, size, flags, *plan);
+    if (FAILED(hr))
+      return hr;
+    FailTextureCopyPreparationForTesting("intent");
+    plan->destination_owner = this;
+    if (source != this)
+      plan->source_owner = source;
+    out = std::move(plan);
     return S_OK;
   } catch (const std::bad_alloc &) {
     return E_OUTOFMEMORY;

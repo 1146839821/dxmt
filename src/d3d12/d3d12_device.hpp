@@ -62,6 +62,7 @@ class MTLD3D12Resource;
 class MTLD3D12CommandAllocator;
 struct D3D12SparseMappingPayload;
 class D3D12SparseBufferMappingPlan;
+class D3D12SparseTextureMappingPlan;
 
 // A placed resource owns a private reference to the heap that backs it.  Keep
 // this interface declaration before MTLD3D12Resource so resource
@@ -383,6 +384,35 @@ public:
   ) {
     return E_NOTIMPL;
   }
+
+  // Owned texture intent; preparation neither issues nor publishes mappings.
+  virtual HRESULT
+  PrepareTextureTileUpdate(
+      UINT regions, const D3D12_TILED_RESOURCE_COORDINATE *starts, const D3D12_TILE_REGION_SIZE *sizes,
+      ID3D12Heap *heap, UINT ranges, const D3D12_TILE_RANGE_FLAGS *flags, const UINT *offsets, const UINT *counts,
+      D3D12_TILE_MAPPING_FLAGS mapping_flags, std::unique_ptr<D3D12SparseTextureMappingPlan> &plan
+  ) {
+    return E_NOTIMPL;
+  }
+
+  virtual HRESULT
+  PrepareTextureTileCopy(
+      MTLD3D12Resource *source, const D3D12_TILED_RESOURCE_COORDINATE *destination_start,
+      const D3D12_TILED_RESOURCE_COORDINATE *source_start, const D3D12_TILE_REGION_SIZE *size,
+      D3D12_TILE_MAPPING_FLAGS flags, std::unique_ptr<D3D12SparseTextureMappingPlan> &plan
+  ) {
+    return E_NOTIMPL;
+  }
+};
+
+// Controlled preparation seam, not a queue submission/completion credential.
+// IssueLegacy executes once at the caller's serialized mapping point and resolves
+// live copy mappings then. Native acceptance is not GPU completion: the caller
+// must retain the plan and establish actual completion before releasing inputs.
+class D3D12SparseTextureMappingPlan {
+public:
+  virtual ~D3D12SparseTextureMappingPlan() = default;
+  virtual HRESULT IssueLegacy(WMT::SparseMappingQueue queue) = 0;
 };
 
 // Transient submission input ownership, not another logical tile map. Declare

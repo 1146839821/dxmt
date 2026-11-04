@@ -1477,7 +1477,12 @@ if python.found()
   )
 endif
 
-dx12_reserved_texture_overlap = executable('dx12_reserved_texture_overlap', 'dx12_reserved_texture_overlap.cpp', dependencies: [ d3d12_dep ])
+dx12_reserved_texture_overlap = executable('dx12_reserved_texture_overlap', 'dx12_reserved_texture_overlap.cpp',
+  include_directories: [include_directories('../../src/airconv'), include_directories('../../src/dxgi'),
+    include_directories('../../src/dxmt'), include_directories('../../src/winemetal'), include_directories('../../src/util')],
+  dependencies: [d3d12_dep, winemetal_dep],
+  link_args: ['-Wl,--delayload=winemetal.dll', '-ldelayimp'],
+)
 
 dx12_reserved_buffer_overlap = executable('dx12_reserved_buffer_overlap', 'dx12_reserved_buffer_overlap.cpp', dependencies: [ d3d12_dep ])
 
