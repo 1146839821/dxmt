@@ -18,6 +18,25 @@ def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def parse_process_memory(log):
+    memory = {}
+    for phase in ('before', 'concurrent', 'repeat'):
+        rows = re.findall(r'^PROCESS_MEMORY ' + phase + r' ([^\r\n]*)', log, re.M)
+        if len(rows) != 1:
+            raise AssertionError(f'expected one {phase} process-memory observation, got {len(rows)}')
+        row = rows[0].strip()
+        if row == 'NOT_AVAILABLE':
+            memory[phase] = None
+            continue
+        if not re.fullmatch(r'\d+ \d+', row):
+            raise AssertionError(f'invalid {phase} process-memory observation')
+        working_set, pagefile_usage = map(int, row.split())
+        if working_set == 0:
+            raise AssertionError(f'zero {phase} working set must be reported as NOT_AVAILABLE')
+        memory[phase] = {'working_set_bytes': working_set, 'pagefile_usage_bytes': pagefile_usage}
+    return memory
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("stage", "prefix", "build", "converter", "output"):
@@ -98,6 +117,7 @@ def main():
                                   "p95_nearest_rank_ns": ordered[-1],
                                   "min_ns": ordered[0], "max_ns": ordered[-1]}
     after_concurrent = log.split("PSO_CONCURRENT_NS 7 ", 1)[1]
+    memory = parse_process_memory(log)
     active = max_active = 0
     for line in log.splitlines():
         if line == "DXMT_MSC_TRACE_BEGIN":
@@ -117,6 +137,9 @@ def main():
         raise AssertionError(f"concurrent test failed: exit={result.returncode}, compile calls={calls}")
     (output / "summary.json").write_text(json.dumps({"compile_calls": calls, "max_overlapping_calls": max_active,
         "exit": result.returncode, "injected_delay": not args.no_delay, "pso_creation_timing": timings,
+        "process_memory": memory,
+        "process_memory_source": "GetProcessMemoryInfo / PROCESS_MEMORY_COUNTERS",
+        "process_memory_scope": "whole process; Wine-dependent counters, not MSC cache or GPU memory",
         "converter_sha256": sha(converter), "wrapper_sha256": sha(wrapper),
         "artifacts": {path: sha(stage / path) for _, path in pairs}}, indent=2) + "\n")
     print(f"eight concurrent PSOs: {calls} real MSC compilation calls")

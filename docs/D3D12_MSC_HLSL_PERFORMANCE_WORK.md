@@ -1409,3 +1409,15 @@ the link command used `llvm-current-patches-20261103/install/lib`. Results and
 identities are in `result-current-patches-debug-20261103/` outside the
 repository. This covers the current patch set on these x86_64 Wine fixtures;
 it does not establish arm64 Wine runtime or arbitrary metadata compatibility.
+
+The concurrent PSO probe now records three whole-process memory snapshots and
+preserves unavailable counters as JSON null. Five independent no-delay Wine
+processes and a forced-first-failure control passed; the median paired
+working-set increase after concurrent creation was 7,548,928 bytes. This
+includes Wine, thread, compiler and driver activity and is not an MSC cache
+allocation measurement. Wine's macOS `PagefileUsage` has different semantics
+from the Windows counter and is retained without treating it as physical or
+swapped memory. See the [memory observation design and results](msc-single-flight-design.md#process-memory-validation--2026-11-04)
+for raw artifacts, parser controls, timings and reproduction commands.
+Cache-attributed memory, representative growth workloads and GPU memory
+remain unmeasured; no cache policy or capability declaration changed.

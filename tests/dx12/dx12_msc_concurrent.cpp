@@ -1,5 +1,6 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <psapi.h>
 #include <d3d12.h>
 #include <atomic>
 #include <chrono>
@@ -10,6 +11,25 @@
 #include <thread>
 #include <utility>
 #include <vector>
+
+static void report_memory(const char *phase) {
+  using Query = BOOL(WINAPI *)(HANDLE, PPROCESS_MEMORY_COUNTERS, DWORD);
+  HMODULE psapi = LoadLibraryA("psapi.dll");
+  auto query = psapi ? reinterpret_cast<Query>(
+                           GetProcAddress(psapi, "GetProcessMemoryInfo"))
+                     : nullptr;
+  PROCESS_MEMORY_COUNTERS counters{};
+  counters.cb = sizeof(counters);
+  // These are whole-process Wine counters, not allocations owned by MSC.
+  if (query && query(GetCurrentProcess(), &counters, sizeof(counters)) &&
+      counters.WorkingSetSize)
+    std::cout << "PROCESS_MEMORY " << phase << " " << counters.WorkingSetSize
+              << " " << counters.PagefileUsage << "\n";
+  else
+    std::cout << "PROCESS_MEMORY " << phase << " NOT_AVAILABLE\n";
+  if (psapi)
+    FreeLibrary(psapi);
+}
 
 int main(int argc, char **argv) {
   if (argc != 2 && argc != 3 && argc != 4)
@@ -62,6 +82,7 @@ int main(int argc, char **argv) {
                                          IID_PPV_ARGS(&root))))
     return 5;
   blob->Release();
+  report_memory("before");
   constexpr unsigned thread_count = 8;
   std::atomic<unsigned> ready{0}, failures{0};
   uint64_t elapsed_ns[thread_count] = {};
@@ -91,6 +112,7 @@ int main(int argc, char **argv) {
   go = true;
   for (auto &thread : threads)
     thread.join();
+  report_memory("concurrent");
   for (unsigned i = 0; i < thread_count; ++i)
     std::cout << "PSO_CONCURRENT_NS " << i << " " << elapsed_ns[i] << "\n";
   for (unsigned i = 0; i < thread_count; ++i) {
@@ -108,6 +130,7 @@ int main(int argc, char **argv) {
       ++failures;
     std::cout << "PSO_REPEAT_NS " << i << " " << elapsed << "\n";
   }
+  report_memory("repeat");
   root->Release();
   device->Release();
   std::cout << "concurrent MSC PSOs=" << thread_count
