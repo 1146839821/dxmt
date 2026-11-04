@@ -4,10 +4,15 @@
 #include <d3d12.h>
 
 #include <cstring>
+#include <cstdio>
 #include <functional>
+#include <fstream>
+#include <vector>
 #include <array>
+#include <atomic>
 #include <iostream>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 
 namespace {
@@ -94,9 +99,158 @@ void CreateBuffer(ID3D12Device *device, Owned<ID3D12Resource> &resource,
                             state, nullptr, IID_PPV_ARGS(&resource.ptr)));
 }
 
+// Use the existing SM6 fixture through the normal descriptor/root/MSC path.
+// Nonzero output canaries make a skipped dispatch fail the NULL-read oracle.
+void CheckHandoffShader(ID3D12Device *device, ID3D12CommandQueue *queue,
+                        ID3D12Resource *texture, ID3D12Resource *upload,
+                        ID3D12Resource *readback, ID3D12Fence *fence,
+                        UINT64 &serial, const char *phase,
+                        std::array<UINT, 2> expected, bool bad_oracle) {
+  std::ifstream file("reserved_texture.read.cs.cso",
+                     std::ios::binary | std::ios::ate);
+  if (!file || file.tellg() <= 0)
+    throw std::runtime_error("cannot open handoff shader");
+  std::vector<char> shader(static_cast<size_t>(file.tellg()));
+  file.seekg(0);
+  file.read(shader.data(), shader.size());
+  if (!file)
+    throw std::runtime_error("cannot read handoff shader");
+
+  D3D12_DESCRIPTOR_RANGE ranges[2] = {
+      {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, 0},
+      {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0, 1}};
+  D3D12_ROOT_PARAMETER parameter = {};
+  parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+  parameter.DescriptorTable = {2, ranges};
+  D3D12_ROOT_SIGNATURE_DESC root_desc = {};
+  root_desc.NumParameters = 1;
+  root_desc.pParameters = &parameter;
+  Owned<ID3DBlob> blob, errors;
+  Check("handoff serialize root",
+        D3D12SerializeRootSignature(&root_desc, D3D_ROOT_SIGNATURE_VERSION_1,
+                                    &blob.ptr, &errors.ptr));
+  Owned<ID3D12RootSignature> root;
+  Check("handoff root", device->CreateRootSignature(0, blob->GetBufferPointer(),
+                                                    blob->GetBufferSize(),
+                                                    IID_PPV_ARGS(&root.ptr)));
+  D3D12_COMPUTE_PIPELINE_STATE_DESC pipeline_desc = {};
+  pipeline_desc.pRootSignature = root.ptr;
+  pipeline_desc.CS = {shader.data(), shader.size()};
+  Owned<ID3D12PipelineState> pipeline;
+  Check("handoff pipeline", device->CreateComputePipelineState(
+                                &pipeline_desc, IID_PPV_ARGS(&pipeline.ptr)));
+  Owned<ID3D12Resource> output;
+  CreateBuffer(device, output, 2 * sizeof(UINT), D3D12_HEAP_TYPE_DEFAULT,
+               D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+               D3D12_RESOURCE_STATE_COPY_DEST);
+  D3D12_DESCRIPTOR_HEAP_DESC descriptor_desc = {};
+  descriptor_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+  descriptor_desc.NumDescriptors = 2;
+  descriptor_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+  Owned<ID3D12DescriptorHeap> descriptors;
+  Check("handoff descriptors",
+        device->CreateDescriptorHeap(&descriptor_desc,
+                                     IID_PPV_ARGS(&descriptors.ptr)));
+  auto cpu = descriptors->GetCPUDescriptorHandleForHeapStart();
+  D3D12_SHADER_RESOURCE_VIEW_DESC srv = {};
+  srv.Format = DXGI_FORMAT_R32_UINT;
+  srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+  srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+  srv.Texture2D.MipLevels = 1;
+  device->CreateShaderResourceView(texture, &srv, cpu);
+  cpu.ptr += device->GetDescriptorHandleIncrementSize(descriptor_desc.Type);
+  D3D12_UNORDERED_ACCESS_VIEW_DESC uav = {};
+  uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+  uav.Buffer.NumElements = 2;
+  uav.Buffer.StructureByteStride = sizeof(UINT);
+  device->CreateUnorderedAccessView(output.ptr, nullptr, &uav, cpu);
+  Owned<ID3D12CommandAllocator> allocator;
+  Owned<ID3D12GraphicsCommandList> list;
+  Check("handoff shader allocator",
+        device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                       IID_PPV_ARGS(&allocator.ptr)));
+  Check("handoff shader list",
+        device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                  allocator.ptr, pipeline.ptr,
+                                  IID_PPV_ARGS(&list.ptr)));
+  list->CopyBufferRegion(output.ptr, 0, upload, 0, 2 * sizeof(UINT));
+  Transition(list.ptr, output.ptr, D3D12_RESOURCE_STATE_COPY_DEST,
+             D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+  Transition(list.ptr, texture, D3D12_RESOURCE_STATE_COMMON,
+             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+  list->SetComputeRootSignature(root.ptr);
+  ID3D12DescriptorHeap *heaps[] = {descriptors.ptr};
+  list->SetDescriptorHeaps(1, heaps);
+  list->SetComputeRootDescriptorTable(
+      0, descriptors->GetGPUDescriptorHandleForHeapStart());
+  list->Dispatch(1, 1, 1);
+  Transition(list.ptr, output.ptr, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+             D3D12_RESOURCE_STATE_COPY_SOURCE);
+  list->CopyBufferRegion(readback, 0, output.ptr, 0, 2 * sizeof(UINT));
+  Transition(list.ptr, texture, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+             D3D12_RESOURCE_STATE_COMMON);
+  Check("handoff shader close", list->Close());
+  ID3D12CommandList *lists[] = {list.ptr};
+  queue->ExecuteCommandLists(1, lists);
+  Check("handoff shader signal", queue->Signal(fence, ++serial));
+  Wait(fence, serial);
+  Check("handoff shader device", device->GetDeviceRemovedReason());
+  UINT *data = nullptr;
+  Check("handoff shader map",
+        readback->Map(0, nullptr, reinterpret_cast<void **>(&data)));
+  const std::array<UINT, 2> actual{data[0], data[1]};
+  readback->Unmap(0, nullptr);
+  if (bad_oracle)
+    expected[0] ^= 1u;
+  std::cout << "HANDOFF_SHADER phase=" << phase
+            << " words=2 actual=" << actual[0] << "," << actual[1]
+            << " expected=" << expected[0] << "," << expected[1]
+            << " canary=NONZERO\n";
+  if (actual != expected)
+    throw std::runtime_error("handoff shader mismatch");
+}
+
+struct GateWatchdog {
+  ID3D12Fence *gate;
+  HANDLE released = nullptr;
+  std::atomic<bool> timed_out{false};
+  std::thread worker;
+
+  explicit GateWatchdog(ID3D12Fence *fence) : gate(fence) {
+    released = CreateEventA(nullptr, TRUE, FALSE, nullptr);
+    if (!released)
+      throw std::runtime_error("gate watchdog event");
+    try {
+      worker = std::thread([this] {
+        if (WaitForSingleObject(released, 15000) != WAIT_OBJECT_0) {
+          timed_out.store(true);
+          gate->Signal(1);
+        }
+      });
+    } catch (...) {
+      CloseHandle(released);
+      throw;
+    }
+  }
+
+  HRESULT Release() {
+    const HRESULT hr = gate->Signal(1);
+    SetEvent(released);
+    if (worker.joinable())
+      worker.join();
+    return hr;
+  }
+
+  ~GateWatchdog() {
+    Release();
+    CloseHandle(released);
+  }
+};
+
 int Run(bool bad_oracle, bool cross_resource, bool bad_cross, bool cross_queue,
         bool reverse_queue, bool early_work, DXGI_FORMAT format, bool bad_edge,
-        bool bad_position, bool multi_heap) {
+        bool bad_position, bool multi_heap, bool retirement,
+        bool bad_retirement, bool bad_shader) {
   Owned<ID3D12Device> device;
   Check("device", D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
                                     IID_PPV_ARGS(&device.ptr)));
@@ -114,6 +268,8 @@ int Run(bool bad_oracle, bool cross_resource, bool bad_cross, bool cross_queue,
   }
   ID3D12CommandQueue *active_queue = queue.ptr;
   std::function<void()> after_submission;
+  std::function<void()> before_completion, drain_on_failure;
+  bool reset_in_flight = false;
   Owned<ID3D12Fence> fence;
   Check("fence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
                                      IID_PPV_ARGS(&fence.ptr)));
@@ -226,14 +382,37 @@ int Run(bool bad_oracle, bool cross_resource, bool bad_cross, bool cross_queue,
     Check("close", list->Close());
     ID3D12CommandList *lists[] = {list.ptr};
     active_queue->ExecuteCommandLists(1, lists);
-    if (after_submission) {
-      auto action = std::move(after_submission);
-      after_submission = {};
-      action();
+    try {
+      if (reset_in_flight) {
+        Owned<ID3D12CommandAllocator> fresh;
+        Check("fresh allocator",
+              device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                             IID_PPV_ARGS(&fresh.ptr)));
+        Check("in-flight list reset", list->Reset(fresh.ptr, nullptr));
+        Check("fresh list close", list->Close());
+        list.ptr->Release();
+        list.ptr = nullptr;
+        std::cout << "HANDOFF_RECORDING reset=PASS released=PASS "
+                     "original_allocator=LIVE\n";
+      }
+      if (after_submission) {
+        auto action = std::move(after_submission);
+        after_submission = {};
+        action();
+      }
+      Check("signal", active_queue->Signal(fence.ptr, ++serial));
+      if (before_completion) {
+        auto action = std::move(before_completion);
+        before_completion = {};
+        action();
+      }
+      Wait(fence.ptr, serial);
+      Check("device status", device->GetDeviceRemovedReason());
+    } catch (...) {
+      if (drain_on_failure)
+        drain_on_failure();
+      throw;
     }
-    Check("signal", active_queue->Signal(fence.ptr, ++serial));
-    Wait(fence.ptr, serial);
-    Check("device status", device->GetDeviceRemovedReason());
   };
   auto verify = [&](const char *name, std::array<UINT, 3> expected) {
     execute(false);
@@ -248,7 +427,10 @@ int Run(bool bad_oracle, bool cross_resource, bool bad_cross, bool cross_queue,
     }
     for (UINT tile = 0; tile < 2 && ok; ++tile) {
       for (UINT word = 0; word < kTileBytes / sizeof(UINT); ++word) {
-        const UINT wanted = expected[tile] ? TileWord(expected[tile], word) : 0;
+        UINT wanted = expected[tile] ? TileWord(expected[tile], word) : 0;
+        if (bad_retirement && std::strcmp(name, "handoff queued") == 0 &&
+            tile == 0 && word == kTileBytes / sizeof(UINT) - 1)
+          wanted ^= 1u;
         if (data[tile * (kTileBytes / sizeof(UINT)) + word] != wanted) {
           std::cerr << name << " full tile mismatch tile=" << tile
                     << " word=" << word << "\n";
@@ -301,6 +483,83 @@ int Run(bool bad_oracle, bool cross_resource, bool bad_cross, bool cross_queue,
   execute(true, true);
   map_all();
   execute(true);
+  if (retirement) {
+    for (const char *name : {"d3d12.dll", "winemetal.dll"}) {
+      const char *symbol = !std::strcmp(name, "d3d12.dll")
+                               ? "D3D12CreateDevice"
+                               : "SparseMappingQueue_tryUpdateTextureMappings";
+      const auto module = GetModuleHandleA(name);
+      const auto code = reinterpret_cast<const unsigned char *>(
+          GetProcAddress(module, symbol));
+      char path[2048] = {};
+      if (!module || !code || !GetModuleFileNameA(module, path, sizeof(path)))
+        throw std::runtime_error("missing handoff runtime identity");
+      std::cout << "LOADED_MODULE " << name << " " << path << "\n";
+      std::cout << "LOADED_CODE " << name << " " << symbol << " ";
+      for (UINT i = 0; i < 16; ++i)
+        std::printf("%02x", code[i]);
+      std::cout << "\n";
+    }
+    CheckHandoffShader(device.ptr, queue.ptr, texture.ptr, upload.ptr,
+                       readback.ptr, fence.ptr, serial, "mapped",
+                       {values[0], values[1]}, false);
+    Owned<ID3D12Fence> gate, retired;
+    Check("retirement gate", device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                                 IID_PPV_ARGS(&gate.ptr)));
+    Check("retirement fence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                                  IID_PPV_ARGS(&retired.ptr)));
+    GateWatchdog watchdog(gate.ptr);
+    drain_on_failure = [&] {
+      watchdog.Release();
+      if (SUCCEEDED(queue->Signal(retired.ptr, 2)))
+        Wait(retired.ptr, 2);
+    };
+    try {
+      Check("retirement GPU wait", queue->Wait(gate.ptr, 1));
+      D3D12_TILED_RESOURCE_COORDINATE destination = {};
+      destination.X = 1;
+      D3D12_TILE_REGION_SIZE pair = {};
+      pair.NumTiles = 2;
+      queue->CopyTileMappings(texture.ptr, &destination, texture.ptr, &zero,
+                              &pair, D3D12_TILE_MAPPING_FLAG_NONE);
+      Check("retirement copy status", device->GetDeviceRemovedReason());
+      reset_in_flight = true;
+      before_completion = [&] {
+        D3D12_TILE_RANGE_FLAGS null_range = D3D12_TILE_RANGE_FLAG_NULL;
+        queue->UpdateTileMappings(texture.ptr, 1, &zero, &all, nullptr, 1,
+                                  &null_range, &offset, nullptr,
+                                  D3D12_TILE_MAPPING_FLAG_NONE);
+        Check("retirement unmap status", device->GetDeviceRemovedReason());
+        Check("retirement signal", queue->Signal(retired.ptr, 1));
+        if (gate->GetCompletedValue() != 0 ||
+            fence->GetCompletedValue() >= serial ||
+            retired->GetCompletedValue() != 0 || watchdog.timed_out.load())
+          throw std::runtime_error("handoff completed behind closed GPU gate");
+        std::cout << "HANDOFF_PENDING readback=1 unmap=1 heap=LIVE\n";
+        Check("release retirement gate", watchdog.Release());
+        Wait(retired.ptr, 1);
+        if (watchdog.timed_out.load())
+          throw std::runtime_error("handoff gate watchdog released");
+      };
+      verify("handoff queued", {values[0], values[0], values[1]});
+    } catch (...) {
+      drain_on_failure();
+      throw;
+    }
+    reset_in_flight = false;
+    drain_on_failure = {};
+    // Caller memory stays alive through its final GPU use and unmap. Do not
+    // use a premature last Release as a purported D3D12 conformance test.
+    heap.ptr->Release();
+    heap.ptr = nullptr;
+    std::cout << "HANDOFF_RETIRE heap_app_release=AFTER_FENCE\n";
+    verify("handoff retired", {0, 0, 0});
+    CheckHandoffShader(device.ptr, queue.ptr, texture.ptr, upload.ptr,
+                       readback.ptr, fence.ptr, serial, "retired", {0, 0},
+                       bad_shader);
+    std::cout << "Sparse handoff retirement readback passed\n";
+    return 0;
+  }
   D3D12_TILED_RESOURCE_COORDINATE src = {}, dst = {};
   D3D12_TILE_REGION_SIZE pair = {};
   pair.NumTiles = 2;
@@ -427,6 +686,9 @@ int main(int argc, char **argv) {
       rgba8 || rg16 || rgb10a2 || bgrx || r8 || r16 || rg32 || rgba32;
   const bool multi_heap =
       is("--multiheap") || is("--bad-multiheap") || is("--multiheap-queue");
+  const bool retirement = is("--handoff-retirement") ||
+                          is("--bad-handoff-retirement") ||
+                          is("--bad-handoff-shader");
   const bool bad = is("--bad-oracle") || is("--bad-multiheap");
   const bool cross = is("--cross-resource");
   const bool bad_cross = is("--bad-cross-oracle");
@@ -437,7 +699,8 @@ int main(int argc, char **argv) {
                            is("--multiheap-queue") || is("--bad-queue-oracle");
   const bool bad_queue = is("--bad-rgba8") || is("--bad-r8") ||
                          is("--bad-queue-oracle") || is("--bad-early-work");
-  if (argc == 2 && !bad && !cross && !bad_cross && !cross_queue && !multi_heap)
+  if (argc == 2 && !bad && !cross && !bad_cross && !cross_queue &&
+      !multi_heap && !retirement)
     return 2;
   const DXGI_FORMAT format = rgba8     ? DXGI_FORMAT_R8G8B8A8_UNORM
                              : rg16    ? DXGI_FORMAT_R16G16_UNORM
@@ -451,7 +714,8 @@ int main(int argc, char **argv) {
   try {
     return Run(bad, cross || bad_cross || cross_queue, bad_cross || bad_queue,
                cross_queue, reverse_queue, early_work, format, bad_edge,
-               bad_position, multi_heap);
+               bad_position, multi_heap, retirement,
+               is("--bad-handoff-retirement"), is("--bad-handoff-shader"));
   } catch (const std::exception &e) {
     std::cerr << e.what() << "\n";
     return 1;
