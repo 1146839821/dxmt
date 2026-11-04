@@ -291,8 +291,13 @@ disabled sentinel remains valid for either or both features. Native tests
 cover collisions at zero and the test space, distinct spaces, disabled spaces
 and unavailable optional setters. Existing `build` and `build-X86` builds and
 native tests passed. A Wine test was prepared with a paired bridge, but its
-positive control remained stuck before completing and was terminated; Wine
-thunk and GPU verification for this change are NOT_RUN. This does not prove
+positive control remained stuck before completing and was terminated. A new
+isolated Wine prefix subsequently passed valid-DXIL and same-space collision
+thunk controls, with paired PE/Unix files and loaded PE export bytes checked.
+The function-constant and framebuffer-fetch GPU tests also passed positive,
+explicit-zero, legacy-zero and wrong-oracle controls with Metal API and GPU
+validation. Logs are under `result-msc-space-fresh-20261104/` and
+`result-msc-space-gpu-20261104/` outside the repository. This does not prove
 that special spaces cannot collide with ordinary application bindings; normal
 D3D12 conversion continues to disable both extension spaces.
 
