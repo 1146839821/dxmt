@@ -27,5 +27,10 @@ void IRCompilerSetValidationFlags(IRCompiler *compiler,
     real(compiler, IRCompilerValidationFlagValidateAllResourcesBound);
     return;
   }
+  if (!strcmp(mode, "dxil")) {
+    fprintf(stderr, "VALIDATION_SET dxil %u\n", (unsigned)flags);
+    real(compiler, IRCompilerValidationFlagValidateDXIL);
+    return;
+  }
   abort();
 }

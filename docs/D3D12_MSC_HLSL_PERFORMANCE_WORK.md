@@ -268,6 +268,21 @@ validation flag would alter the caller's requested configuration, and
 rejecting all non-container input would require a proven API compatibility
 contract. No production configuration is changed by this experiment.
 
+The root-validation comparison now includes `ValidateDXIL`, alongside unset,
+zero and bound-resource validation. Three processes per mode each compiled six
+valid and six missing-resource instances. All valid roots compiled and all
+missing-resource roots failed; excluding the first call per root, valid-root
+median/P95 were 1.0676/4.276 ms for zero and 1.627/4.4479 ms for DXIL
+validation (15 pooled samples each). Fixed ordering, small sample count and
+wide variation do not establish an overhead estimate. A separate test-only
+wrapper enabled DXIL validation for the Metal HLSL GPU probe: function
+constants and framebuffer fetch passed pixel checks and the wrong-oracle
+control with Metal API/GPU validation. Raw results are under
+`result-msc-dxil-validation-20261103/` and
+`result-msc-dxil-validation-gpu-20261104/` outside the repository. These tests
+do not establish production compatibility for arbitrary shaders or justify
+changing default validation flags.
+
 At `c24cfbb1`, the current patched-LLVM x86_64 build also passed the existing
 MSC triangle geometry differential test in isolated Wine with Metal API and
 GPU validation. Both baseline and injected stage-in buffer-growth modes

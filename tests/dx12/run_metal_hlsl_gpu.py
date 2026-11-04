@@ -21,7 +21,10 @@ def main():
         parser.add_argument('--' + name, type=Path, required=True)
     parser.add_argument('--repeats', type=int, default=3)
     parser.add_argument('--trace-config', action='store_true', help='trace real compatibility flags through a forwarding dylib')
+    parser.add_argument('--trace-dxil-validation', action='store_true', help='enable DXIL validation through a test wrapper')
     args = parser.parse_args()
+    if args.trace_config and args.trace_dxil_validation:
+        parser.error('trace options are mutually exclusive')
     if not 1 <= args.repeats <= 20:
         parser.error('--repeats must be in 1..20')
     stage, prefix, build, converter = (getattr(args, name).resolve(strict=True)
@@ -36,11 +39,12 @@ def main():
     output = args.output.absolute()
     output.mkdir(parents=True, exist_ok=False)
     wrapper = None
-    if args.trace_config:
+    if args.trace_config or args.trace_dxil_validation:
         repo = Path(__file__).resolve().parents[2]
-        wrapper = output / 'compatibility-trace.dylib'
+        wrapper = output / 'msc-trace.dylib'
+        source = 'msc_validation_trace.c' if args.trace_dxil_validation else 'msc_compatibility_trace.c'
         subprocess.run(['xcrun', 'clang', '-arch', 'x86_64', '-dynamiclib', '-I', str(repo / 'include'),
-                        str(repo / 'tests/dx12/msc_compatibility_trace.c'), str(converter),
+                        str(repo / 'tests/dx12' / source), str(converter),
                         '-Wl,-rpath,' + str(converter.parent), '-o', str(wrapper)], check=True, timeout=30)
     sha = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
     identity = 'LOADED_CODE winemetal.dll DXMTMSCCompileDXIL ' + pe_export_bytes(stage / 'winemetal.dll', 'DXMTMSCCompileDXIL')
@@ -49,6 +53,8 @@ def main():
                WINEDLLOVERRIDES='winemetal=b', WINEDEBUG='+loaddll',
                DXMT_METALIRCONVERTER_PATH=str(wrapper or converter), DYLD_PRINT_LIBRARIES='1',
                MTL_DEBUG_LAYER='1', MTL_SHADER_VALIDATION='1', MTL_SHADER_VALIDATION_REPORT_TO_STDERR='1')
+    if args.trace_dxil_validation:
+        env['DXMT_TEST_VALIDATION_MODE'] = 'dxil'
     command = [str(stage / 'wine/bin/wine'), 'dx12_metal_hlsl_gpu.exe',
                'metal_hlsl_constants.ps.cso', 'metal_hlsl_framebuffer.ps.cso']
     results = []
@@ -73,10 +79,12 @@ def main():
             checks += ['PIXEL 0,255,0,255' in log, 'PIXEL 64,64,0,128' in log,
                        'MULTIPASS_PIXEL 64,64,0,128' in log,
                        'Metal HLSL function constants and framebuffer fetch GPU passed' in log]
-        if wrapper:
+        if args.trace_config:
             flags = re.findall(r'^DXMT_TEST_COMPATIBILITY_FLAGS (\d+)\s*$', log, re.M)
             checks += [str(wrapper) in log, len(flags) == 4,
                        all(int(value) == (0 if name.startswith('explicit-zero-') else 4) for value in flags)]
+        if args.trace_dxil_validation:
+            checks += [str(wrapper) in log, len(re.findall(r'^VALIDATION_SET dxil 0\s*$', log, re.M)) >= 2]
         if result.returncode != expected or not all(checks):
             raise SystemExit(f'{name}: failed (exit {result.returncode}, checks {checks}); see {output / (name + ".log")}')
         timings = re.findall(r'^MSC_(SIZING|OUTPUT)_MS (constants|fetch) ([0-9.eE+-]+)(?: (\d+))?\s*$', log, re.M)

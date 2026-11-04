@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare omitted, zero and bound-resource MSC validation on two root signatures."""
+"""Compare MSC validation settings on two root signatures."""
 import argparse
 import hashlib
 import json
@@ -42,7 +42,7 @@ def main():
     cmd=[str(stage/'wine/bin/wine'),'dx12_msc_root_validation_compare.exe','metal_hlsl_dynamic_main.ps.cso']
     samples=[]
     for n in range(args.processes):
-        for mode in ('unset','zero','bound'):
+        for mode in ('unset','zero','bound','dxil'):
             result=subprocess.run(cmd,cwd=stage,env={**env,'DXMT_TEST_VALIDATION_MODE':mode},stdout=subprocess.PIPE,
                                   stderr=subprocess.STDOUT,timeout=180,text=True,errors='replace')
             log=result.stdout; (root/f'{mode}-{n}.log').write_text(log)
@@ -68,7 +68,7 @@ def main():
     def stats(v):
         v=sorted(v); return {'n':len(v),'median_ms':statistics.median(v),'p95_ms':v[math.ceil(.95*len(v))-1],'min_ms':v[0],'max_ms':v[-1]}
     summaries={}
-    for mode in ('unset','zero','bound'):
+    for mode in ('unset','zero','bound','dxil'):
         for valid in (0,1):
             summaries[f'{mode}_{"valid" if valid else "missing_b0"}']=stats([f for o in samples if o['mode']==mode for a,b,c,d,e,f in o['rows'] if a==valid and b>0])
     sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
