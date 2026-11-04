@@ -2504,6 +2504,59 @@ WINEMETAL_API uint32_t SparseBarrierCompletion_submit(obj_handle_t completion);
 WINEMETAL_API uint32_t
 SparseBarrierCompletion_wait(obj_handle_t completion, uint64_t timeout_ms, struct WMTSparseBarrierResult *result);
 
+// Controlled buffer mapping batches. Callers own D3D12 legality, residency and
+// preceding ResourceState synchronization. No production queue integration yet.
+enum WMTSparseMappingState : uint32_t {
+  WMTSparseMappingPrepared = 0,
+  WMTSparseMappingIssuing = 1,
+  WMTSparseMappingSealedPending = 2,
+  WMTSparseMappingGPUComplete = 3,
+  WMTSparseMappingNotIssued = 4,
+};
+enum WMTSparseMappingHostOutcome : uint32_t {
+  WMTSparseMappingHostUnset = 0,
+  WMTSparseMappingHostAccepted = 1,
+  WMTSparseMappingHostRejected = 2,
+  WMTSparseMappingHostFailedAfterIssue = 3,
+};
+struct WMTSparseBufferBatchOperation {
+  uint32_t kind;       // 0 update, 1 copy; no texture operations
+  uint32_t mode;       // WMTSparseTextureMappingMode for update; zero for copy
+  obj_handle_t source; // copy only
+  obj_handle_t destination;
+  obj_handle_t heap; // update map only
+  uint64_t location; // update buffer location or copy source, in pages
+  uint64_t length;   // pages
+  uint64_t offset;   // heap page offset or copy destination page
+  uint64_t reserved; // must be zero
+};
+STATIC_ASSERT(sizeof(WMTSparseBufferBatchOperation) == 64);
+struct WMTSparseMappingResult {
+  enum WMTSparseMappingState state;
+  enum WMTSparseMappingHostOutcome host_outcome;
+  uint64_t possibly_issued_calls;
+  uint64_t event_value;
+  uint32_t seals;
+  uint32_t inputs_retired;
+};
+STATIC_ASSERT(sizeof(WMTSparseMappingResult) == 32);
+// Owned credential; copies/retains native inputs, submits nothing. Native refs
+// do not replace the caller's residency/COM owner. Caller must validate device,
+// resource bounds/page sizes and ordering; unmap requires zero heap/offset.
+// Release after retire; an early
+// final release of issued work seals/drains and may block forever on GPU loss.
+WINEMETAL_API obj_handle_t SparseMappingQueue_prepareBufferBatch(
+    obj_handle_t queue, const struct WMTSparseBufferBatchOperation *operations, uint64_t count
+);
+WINEMETAL_API uint32_t SparseMappingCompletion_issueNext(obj_handle_t completion);
+// Exactly once. Host outcome is independent of GPU completion/error coverage.
+WINEMETAL_API uint32_t SparseMappingCompletion_seal(obj_handle_t completion, enum WMTSparseMappingHostOutcome outcome);
+// Transport result only. Timeout remains pending; UINT64_MAX waits indefinitely.
+WINEMETAL_API uint32_t
+SparseMappingCompletion_wait(obj_handle_t completion, uint64_t timeout_ms, struct WMTSparseMappingResult *result);
+// Rejects before NotIssued/GPUComplete and after first retirement.
+WINEMETAL_API uint32_t SparseMappingCompletion_retireInputs(obj_handle_t completion);
+
 WINEMETAL_API void SparseMappingQueue_updateBufferMappings(
     obj_handle_t queue, obj_handle_t buffer, obj_handle_t heap,
     const struct WMTUpdateSparseBufferMappingOperation *operations, uint64_t count

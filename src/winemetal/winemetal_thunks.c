@@ -1627,6 +1627,48 @@ SparseBarrierCompletion_wait(obj_handle_t completion, uint64_t timeout_ms, struc
   return 1;
 }
 
+WINEMETAL_API obj_handle_t
+SparseMappingQueue_prepareBufferBatch(
+    obj_handle_t queue, const struct WMTSparseBufferBatchOperation *operations, uint64_t count
+) {
+  if (!queue || (count && !operations))
+    return 0;
+  struct unixcall_sparsemappingcompletion_prepare params = {0};
+  params.queue = queue;
+  WMT_MEMPTR_SET(params.operations, operations);
+  params.count = count;
+  if (WINE_UNIX_CALL(unix_sparsemappingqueue_preparebufferbatch, &params))
+    return 0;
+  return params.ret;
+}
+WINEMETAL_API uint32_t
+SparseMappingCompletion_issueNext(obj_handle_t completion) {
+  struct unixcall_generic_obj_noret params = {completion};
+  return WINE_UNIX_CALL(unix_sparsemappingcompletion_issuenext, &params) == 0;
+}
+WINEMETAL_API uint32_t
+SparseMappingCompletion_seal(obj_handle_t completion, enum WMTSparseMappingHostOutcome outcome) {
+  struct unixcall_sparsemappingcompletion_seal params = {completion, outcome, 0};
+  return WINE_UNIX_CALL(unix_sparsemappingcompletion_seal, &params) == 0;
+}
+WINEMETAL_API uint32_t
+SparseMappingCompletion_wait(obj_handle_t completion, uint64_t timeout_ms, struct WMTSparseMappingResult *result) {
+  if (!result)
+    return 0;
+  struct unixcall_sparsemappingcompletion_wait params = {0};
+  params.completion = completion;
+  params.timeout_ms = timeout_ms;
+  if (WINE_UNIX_CALL(unix_sparsemappingcompletion_wait, &params))
+    return 0;
+  *result = params.result;
+  return 1;
+}
+WINEMETAL_API uint32_t
+SparseMappingCompletion_retireInputs(obj_handle_t completion) {
+  struct unixcall_generic_obj_noret params = {completion};
+  return WINE_UNIX_CALL(unix_sparsemappingcompletion_retireinputs, &params) == 0;
+}
+
 WINEMETAL_API void
 SparseMappingQueue_updateBufferMappings(
     obj_handle_t queue, obj_handle_t buffer, obj_handle_t heap,

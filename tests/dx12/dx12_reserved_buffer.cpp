@@ -13,6 +13,8 @@
 #include <chrono>
 #include <cstddef>
 #include <memory>
+#include <algorithm>
+#include <cstdlib>
 #include "../../src/winemetal/winemetal.h"
 
 namespace {
@@ -33,6 +35,461 @@ void Check(const char *operation, HRESULT hr) {
     throw std::runtime_error(operation);
   }
 }
+int CheckSparseMappingCredential(const char *mode, uint32_t seed) {
+  static_assert(sizeof(WMTSparseBufferBatchOperation) == 64);
+  static_assert(offsetof(WMTSparseBufferBatchOperation, source) == 8);
+  static_assert(offsetof(WMTSparseBufferBatchOperation, offset) == 48);
+  static_assert(sizeof(WMTSparseMappingResult) == 32);
+  static_assert(offsetof(WMTSparseMappingResult, event_value) == 16);
+  auto require = [](bool ok, const char *message) {
+    if (!ok) {
+      std::fprintf(stderr, "MAPPING_FATAL %s\n", message);
+      std::fflush(nullptr);
+      std::_Exit(3);
+    }
+  };
+  HMODULE bridge = GetModuleHandleA("winemetal.dll");
+  require(bridge != nullptr, "WineMetal not loaded");
+#define MAP_BIND(name)                                                         \
+  auto name =                                                                  \
+      reinterpret_cast<decltype(&::name)>(GetProcAddress(bridge, #name));      \
+  require(name != nullptr, "missing " #name)
+  MAP_BIND(NSObject_release);
+  MAP_BIND(NSAutoreleasePool_alloc_init);
+  MAP_BIND(WMTCopyAllDevices);
+  MAP_BIND(NSArray_count);
+  MAP_BIND(NSArray_object);
+  MAP_BIND(MTLDevice_supportsFamily);
+  MAP_BIND(MTLDevice_supportsPlacementSparse);
+  MAP_BIND(MTLDevice_newSparseMappingQueue);
+  MAP_BIND(MTLDevice_newCommandQueue);
+  MAP_BIND(MTLDevice_newBuffer);
+  MAP_BIND(MTLDevice_newPlacementSparseBuffer);
+  MAP_BIND(MTLDevice_newHeap);
+  MAP_BIND(MTLHeap_newBuffer);
+  MAP_BIND(MTLDevice_newResidencySet);
+  MAP_BIND(MTLResidencySet_addAllocations);
+  MAP_BIND(MTLResidencySet_commit);
+  MAP_BIND(MTLCommandQueue_addResidencySet);
+  MAP_BIND(SparseMappingQueue_addResidencySet);
+  MAP_BIND(MTLDevice_newSharedEvent);
+  MAP_BIND(MTLSharedEvent_signalValue);
+  MAP_BIND(MTLSharedEvent_signaledValue);
+  MAP_BIND(MTLSharedEvent_waitUntilSignaledValue);
+  MAP_BIND(SparseMappingQueue_waitForEvent);
+  MAP_BIND(SparseMappingQueue_signalEvent);
+  MAP_BIND(SparseMappingQueue_prepareBarrierBeforeResourceState);
+  MAP_BIND(SparseBarrierCompletion_submit);
+  MAP_BIND(SparseBarrierCompletion_wait);
+  MAP_BIND(SparseMappingQueue_prepareBufferBatch);
+  MAP_BIND(SparseMappingCompletion_issueNext);
+  MAP_BIND(SparseMappingCompletion_seal);
+  MAP_BIND(SparseMappingCompletion_wait);
+  MAP_BIND(SparseMappingCompletion_retireInputs);
+  MAP_BIND(MTLCommandQueue_commandBuffer);
+  MAP_BIND(MTLCommandBuffer_blitCommandEncoder);
+  MAP_BIND(MTLBlitCommandEncoder_encodeCommands);
+  MAP_BIND(MTLCommandEncoder_endEncoding);
+  MAP_BIND(MTLCommandBuffer_commit);
+  MAP_BIND(MTLCommandBuffer_waitUntilCompleted);
+  MAP_BIND(MTLCommandBuffer_status);
+  MAP_BIND(MTLCommandBuffer_encodeWaitForEvent);
+  MAP_BIND(MTLCommandBuffer_encodeSignalEvent);
+#undef MAP_BIND
+  for (const char *symbol :
+       {"SparseMappingQueue_prepareBufferBatch",
+        "SparseMappingCompletion_issueNext", "SparseMappingCompletion_seal",
+        "SparseMappingCompletion_wait",
+        "SparseMappingCompletion_retireInputs"}) {
+    auto code =
+        reinterpret_cast<const unsigned char *>(GetProcAddress(bridge, symbol));
+    std::printf("LOADED_CODE winemetal.dll %s ", symbol);
+    for (unsigned i = 0; i < 16; ++i)
+      std::printf("%02x", code[i]);
+    std::printf("\n");
+  }
+  char module[MAX_PATH] = {};
+  GetModuleFileNameA(bridge, module, MAX_PATH);
+  std::printf("MAPPING_MODULE %s\n", module);
+  std::vector<obj_handle_t> owned;
+  auto own = [&](obj_handle_t h) {
+    require(h != 0, "native creation failed");
+    owned.push_back(h);
+    return h;
+  };
+  own(NSAutoreleasePool_alloc_init());
+  obj_handle_t devices = own(WMTCopyAllDevices());
+  require(NSArray_count(devices) > 0, "no device");
+  obj_handle_t device = NSArray_object(devices, 0);
+  require(MTLDevice_supportsFamily(device, WMTGPUFamilyMetal4) &&
+              MTLDevice_supportsPlacementSparse(device),
+          "real sparse unavailable");
+  std::printf("MAPPING_DEVICE apple7=%u apple8=%u apple9=%u metal4=%u "
+              "placement=%u seed=%u\n",
+              MTLDevice_supportsFamily(device, WMTGPUFamilyApple7),
+              MTLDevice_supportsFamily(device, WMTGPUFamilyApple8),
+              MTLDevice_supportsFamily(device, WMTGPUFamilyApple9),
+              MTLDevice_supportsFamily(device, WMTGPUFamilyMetal4),
+              MTLDevice_supportsPlacementSparse(device), seed);
+  obj_handle_t sparse = own(MTLDevice_newSparseMappingQueue(device)),
+               classic = own(MTLDevice_newCommandQueue(device, 32));
+  constexpr uint64_t bytes = 131072, words = bytes / 4, page_words = 65536 / 4,
+                     guards = 32;
+  const auto options = static_cast<WMTResourceOptions>(
+      WMTResourceStorageModePrivate | WMTResourceHazardTrackingModeUntracked);
+  WMTHeapInfo hi = {};
+  hi.size = bytes;
+  hi.options = options;
+  hi.type = WMTHeapTypePlacement;
+  hi.sparse_page_size = WMTSparsePageSize64;
+  obj_handle_t heaps[2], placed[2], upload[2];
+  WMTBufferInfo ui[2] = {};
+  auto pattern = [&](unsigned h, uint64_t i) {
+    return (seed ^ (h ? 0x13579bdfu : 0x2468ace0u)) +
+           uint32_t(i / page_words) * 0x27101983u +
+           uint32_t(i % page_words) * 0x9e3779b9u;
+  };
+  for (unsigned h = 0; h < 2; ++h) {
+    heaps[h] = own(MTLDevice_newHeap(device, &hi));
+    WMTBufferInfo pi = {};
+    pi.length = bytes;
+    pi.options = options;
+    placed[h] = own(MTLHeap_newBuffer(heaps[h], &pi, 0));
+    ui[h].length = bytes;
+    ui[h].options = WMTResourceStorageModeShared;
+    upload[h] = own(MTLDevice_newBuffer(device, &ui[h]));
+    require(ui[h].memory.ptr != nullptr, "upload memory");
+    auto data = static_cast<uint32_t *>(ui[h].memory.ptr);
+    for (uint64_t i = 0; i < words; ++i)
+      data[i] = pattern(h, i);
+  }
+  WMTBufferInfo info = {};
+  info.length = bytes;
+  info.options = options;
+  obj_handle_t source = own(
+      MTLDevice_newPlacementSparseBuffer(device, &info, WMTSparsePageSize64));
+  obj_handle_t dest = own(
+      MTLDevice_newPlacementSparseBuffer(device, &info, WMTSparsePageSize64));
+  WMTBufferInfo oi = {};
+  oi.length = (2 * words + guards) * 4;
+  oi.options = WMTResourceStorageModeShared;
+  obj_handle_t output = own(MTLDevice_newBuffer(device, &oi));
+  auto out = static_cast<uint32_t *>(oi.memory.ptr);
+  require(out != nullptr, "readback memory");
+  obj_handle_t error = 0,
+               resident = own(MTLDevice_newResidencySet(device, 9, &error));
+  require(!error, "residency error");
+  obj_handle_t allocations[] = {heaps[0],  heaps[1],  placed[0],
+                                placed[1], upload[0], upload[1],
+                                source,    dest,      output};
+  MTLResidencySet_addAllocations(resident, allocations, 9);
+  MTLResidencySet_commit(resident);
+  MTLCommandQueue_addResidencySet(classic, resident);
+  SparseMappingQueue_addResidencySet(sparse, resident);
+  auto blitcopy = [&](obj_handle_t encoder, obj_handle_t src, obj_handle_t dst,
+                      uint64_t offset) {
+    wmtcmd_blit_copy_from_buffer_to_buffer cmd = {};
+    cmd.type = WMTBlitCommandCopyFromBufferToBuffer;
+    cmd.src = src;
+    cmd.dst = dst;
+    cmd.dst_offset = offset;
+    cmd.copy_length = bytes;
+    MTLBlitCommandEncoder_encodeCommands(
+        encoder, reinterpret_cast<const wmtcmd_base *>(&cmd));
+  };
+  obj_handle_t init = MTLCommandQueue_commandBuffer(classic),
+               enc = MTLCommandBuffer_blitCommandEncoder(init);
+  require(init && enc, "producer objects");
+  for (unsigned h = 0; h < 2; ++h)
+    blitcopy(enc, upload[h], placed[h], 0);
+  MTLCommandEncoder_endEncoding(enc);
+  obj_handle_t produced = own(MTLDevice_newSharedEvent(device));
+  MTLCommandBuffer_encodeSignalEvent(init, produced, 1);
+  MTLCommandBuffer_commit(init);
+  MTLCommandBuffer_waitUntilCompleted(init);
+  SparseMappingQueue_waitForEvent(sparse, produced, 1);
+  require(MTLCommandBuffer_status(init) == WMTCommandBufferStatusCompleted,
+          "producer failed");
+  const bool partial = !std::strcmp(mode, "mapping-partial"),
+             wrong_event = !std::strcmp(mode, "mapping-wrong-event"),
+             wrong_word = !std::strcmp(mode, "mapping-wrong-word");
+  WMTSparseMappingResult result = {};
+  require(!SparseMappingQueue_prepareBufferBatch(0, nullptr, 0) &&
+              !SparseMappingQueue_prepareBufferBatch(sparse, nullptr, 1) &&
+              !SparseMappingCompletion_issueNext(0) &&
+              !SparseMappingCompletion_seal(0, WMTSparseMappingHostAccepted) &&
+              !SparseMappingCompletion_wait(0, 0, &result) &&
+              !SparseMappingCompletion_retireInputs(0),
+          "null transport accepted");
+  if (!std::strcmp(mode, "mapping-prepare-failure")) {
+    require(!SparseMappingQueue_prepareBufferBatch(sparse, nullptr, 0),
+            "prepare injection did not reject");
+    for (auto i = owned.rbegin(); i != owned.rend(); ++i)
+      NSObject_release(*i);
+    std::printf("MAPPING_PREPARE_FAILURE PASS calls=0 drained=1\n");
+    return 0;
+  }
+  auto zero = own(SparseMappingQueue_prepareBufferBatch(sparse, nullptr, 0));
+  require(
+      !SparseMappingCompletion_wait(zero, 0, nullptr) &&
+          !SparseMappingCompletion_issueNext(zero) &&
+          !SparseMappingCompletion_seal(zero,
+                                        WMTSparseMappingHostFailedAfterIssue) &&
+          SparseMappingCompletion_seal(zero, WMTSparseMappingHostAccepted) &&
+          SparseMappingCompletion_wait(zero, 0, &result) &&
+          result.state == WMTSparseMappingNotIssued &&
+          !result.possibly_issued_calls &&
+          SparseMappingCompletion_retireInputs(zero),
+      "empty contract");
+  WMTSparseBufferBatchOperation valid = {};
+  valid.destination = dest;
+  valid.heap = heaps[1];
+  valid.length = 2;
+  for (unsigned invalid_case = 0; invalid_case < 8; ++invalid_case) {
+    auto invalid = valid;
+    switch (invalid_case) {
+    case 0:
+      invalid.kind = 2;
+      break;
+    case 1:
+      invalid.length = 0;
+      break;
+    case 2:
+      invalid.location = UINT64_MAX;
+      break;
+    case 3:
+      invalid.offset = UINT64_MAX;
+      break;
+    case 4:
+      invalid.mode = 1;
+      break; // Unmap cannot carry a heap.
+    case 5:
+      invalid.kind = 1;
+      invalid.source = source;
+      break; // Copy cannot carry a heap.
+    case 6:
+      invalid.destination = 0;
+      break;
+    case 7:
+      invalid.mode = 2;
+      break;
+    }
+    require(!SparseMappingQueue_prepareBufferBatch(sparse, &invalid, 1),
+            "invalid shape accepted");
+  }
+  require(!SparseMappingQueue_prepareBufferBatch(sparse, &valid, UINT64_MAX),
+          "overflow count accepted");
+  auto rejected = SparseMappingQueue_prepareBufferBatch(sparse, &valid, 1);
+  require(rejected != 0, "rejected prepare");
+  require(
+      !SparseMappingCompletion_seal(rejected, WMTSparseMappingHostUnset) &&
+          !SparseMappingCompletion_seal(
+              rejected, static_cast<WMTSparseMappingHostOutcome>(4)) &&
+          SparseMappingCompletion_seal(rejected,
+                                       WMTSparseMappingHostRejected) &&
+          SparseMappingCompletion_wait(rejected, UINT64_MAX, &result) &&
+          result.state == WMTSparseMappingNotIssued &&
+          result.host_outcome == WMTSparseMappingHostRejected &&
+          !result.possibly_issued_calls &&
+          !SparseMappingCompletion_issueNext(rejected) &&
+          SparseMappingCompletion_retireInputs(rejected) &&
+          !SparseMappingCompletion_seal(rejected, WMTSparseMappingHostRejected),
+      "rejected contract");
+  NSObject_release(rejected);
+  auto abandoned = SparseMappingQueue_prepareBufferBatch(sparse, &valid, 1);
+  require(abandoned != 0, "unissued release prepare");
+  NSObject_release(abandoned);
+  std::printf(
+      "MAPPING_HOST_CONTRACT invalid=9 rejected=1 abandoned=1 calls=0\n");
+  unsigned failures = 0, readbacks = 0;
+  uint64_t checked = 0;
+  for (unsigned step = 0; step < 5; ++step) {
+    WMTSparseBufferBatchOperation ops[2] = {};
+    ops[0].kind = step == 1 ? 1 : 0;
+    ops[0].mode = step == 3 ? 1 : 0;
+    ops[0].source = step == 1 ? source : 0;
+    ops[0].destination = step == 0 ? source : dest;
+    ops[0].heap = step == 1 || step == 3 ? 0 : heaps[step == 0 ? 0 : 1];
+    ops[0].location = step == 2 ? 1 : 0;
+    ops[0].length = step == 2 ? 1 : 2;
+    ops[0].offset = step == 2 ? 1 : 0;
+    ops[1] = ops[0];
+    ops[1].kind = 0;
+    ops[1].mode = 0;
+    ops[1].source = 0;
+    ops[1].heap = heaps[step == 0 || step == 1 ? 1 : 0];
+    ops[1].location = 0;
+    ops[1].length = 2;
+    ops[1].offset = 0;
+    auto invalid = ops[0];
+    invalid.reserved = 1;
+    require(!SparseMappingQueue_prepareBufferBatch(sparse, &invalid, 1),
+            "reserved input accepted");
+    const bool paired = !partial && step == 0;
+    if (paired) {
+      ops[0].length = 1;
+      ops[1] = ops[0];
+      ops[1].location = 1;
+      ops[1].offset = 1;
+    }
+    obj_handle_t c = SparseMappingQueue_prepareBufferBatch(
+        sparse, ops, partial || paired ? 2 : 1);
+    require(c != 0, "prepare batch");
+    ops[0] = ops[1];
+    ops[0].heap = heaps[step == 0 || step == 1 ? 1 : 0];
+    require(SparseMappingCompletion_wait(c, UINT64_MAX, &result) &&
+                result.state == WMTSparseMappingPrepared &&
+                !result.possibly_issued_calls &&
+                !SparseMappingCompletion_retireInputs(c) &&
+                !SparseMappingCompletion_seal(c, WMTSparseMappingHostAccepted),
+            "prepared contract");
+    obj_handle_t gate = own(MTLDevice_newSharedEvent(device)),
+                 cancel = own(MTLDevice_newSharedEvent(device)),
+                 done = own(MTLDevice_newSharedEvent(device));
+    obj_handle_t barrier =
+        own(SparseMappingQueue_prepareBarrierBeforeResourceState(sparse));
+    SparseMappingQueue_waitForEvent(sparse, gate, 1);
+    require(SparseBarrierCompletion_submit(barrier), "barrier submit");
+    require(SparseMappingCompletion_issueNext(c) &&
+                SparseMappingCompletion_wait(c, 0, &result) &&
+                result.state == WMTSparseMappingIssuing &&
+                result.possibly_issued_calls == 1 &&
+                !SparseMappingCompletion_retireInputs(c),
+            "issue contract");
+    require(!SparseMappingCompletion_seal(c, WMTSparseMappingHostRejected) &&
+                !SparseMappingCompletion_seal(c, WMTSparseMappingHostUnset),
+            "issuing outcome accepted");
+    if (paired)
+      require(!SparseMappingCompletion_seal(c, WMTSparseMappingHostAccepted) &&
+                  SparseMappingCompletion_issueNext(c),
+              "full batch issue");
+    const uint64_t issued = paired ? 2 : 1;
+    auto host = partial ? WMTSparseMappingHostFailedAfterIssue
+                        : WMTSparseMappingHostAccepted;
+    require(SparseMappingCompletion_seal(c, host) &&
+                !SparseMappingCompletion_seal(c, host) &&
+                !SparseMappingCompletion_issueNext(c),
+            "single close");
+    SparseMappingQueue_signalEvent(sparse, done, 1);
+    MTLSharedEvent_signalValue(cancel, UINT64_MAX);
+    std::fill(out, out + 2 * words + guards, 0xa5a55a5au);
+    require(SparseMappingCompletion_wait(c, 40, &result), "pending transport");
+    uint64_t observed = wrong_event && step == 0
+                            ? MTLSharedEvent_signaledValue(cancel)
+                            : result.event_value;
+    bool pending = result.state == WMTSparseMappingSealedPending &&
+                   result.event_value == 0 && observed == 0 &&
+                   !SparseMappingCompletion_retireInputs(c) &&
+                   MTLSharedEvent_signaledValue(done) == 0;
+    if (!pending)
+      ++failures;
+    std::printf("MAPPING_PENDING step=%u state=%u private=%llu observed=%llu "
+                "host=%u pass=%u\n",
+                step, result.state, (unsigned long long)result.event_value,
+                (unsigned long long)observed, result.host_outcome, pending);
+    MTLSharedEvent_signalValue(gate, 1);
+    require(SparseMappingCompletion_wait(c, 10000, &result) &&
+                result.state == WMTSparseMappingGPUComplete &&
+                result.event_value == 1 && result.host_outcome == host &&
+                result.possibly_issued_calls == issued && result.seals == 1,
+            "mapping completion");
+    require(MTLSharedEvent_waitUntilSignaledValue(done, 1, 10000),
+            "ordered completion");
+    WMTSparseBarrierResult feedback = {};
+    require(SparseBarrierCompletion_wait(barrier, 10000, &feedback) &&
+                feedback.state == WMTSparseBarrierCompleted &&
+                feedback.native_feedback_received,
+            "barrier feedback");
+    unsigned reads = step == 0 ? 1 : (step == 3 ? 0 : 2);
+    obj_handle_t read = MTLCommandQueue_commandBuffer(classic);
+    MTLCommandBuffer_encodeWaitForEvent(read, done, 1);
+    enc = MTLCommandBuffer_blitCommandEncoder(read);
+    require(read && enc, "readback objects");
+    for (unsigned n = 0; n < reads; ++n)
+      blitcopy(enc, n ? dest : source, output, n * bytes);
+    MTLCommandEncoder_endEncoding(enc);
+    MTLCommandBuffer_commit(read);
+    MTLCommandBuffer_waitUntilCompleted(read);
+    require(MTLCommandBuffer_status(read) == WMTCommandBufferStatusCompleted,
+            "readback failure");
+    unsigned bad = 0, guard = 0;
+    for (unsigned n = 0; n < reads; ++n) {
+      for (uint64_t i = 0; i < words; ++i) {
+        unsigned h =
+            n ? (step == 1 ? 0 : (step == 2 ? (i >= page_words) : 1)) : 0;
+        uint32_t want = pattern(h, i);
+        if (wrong_word && step == 0 && i == words - 1)
+          want ^= 1;
+        bad += out[n * words + i] != want;
+      }
+      ++readbacks;
+      checked += words;
+    }
+    for (uint64_t i = reads * words; i < 2 * words + guards; ++i)
+      guard += out[i] != 0xa5a55a5au;
+    if (bad || guard)
+      ++failures;
+    require(SparseMappingCompletion_retireInputs(c) &&
+                !SparseMappingCompletion_retireInputs(c) &&
+                SparseMappingCompletion_wait(c, 0, &result) &&
+                result.inputs_retired == 1,
+            "retire contract");
+    NSObject_release(c);
+    std::printf("MAPPING_COMPLETE step=%u reads=%u bad=%u guard=%u host=%u "
+                "partial=%u state=%u issued=%llu seals=%u retired=%u\n",
+                step, reads, bad, guard, result.host_outcome, partial,
+                result.state, (unsigned long long)result.possibly_issued_calls,
+                result.seals, result.inputs_retired);
+  }
+  // Final native release cannot free inputs while the gate still holds work.
+  // Exercise both explicitly sealed and destructor-sealed valid prefixes.
+  for (unsigned sealed = 0; sealed < 2; ++sealed) {
+    WMTSparseBufferBatchOperation op = {};
+    op.destination = dest;
+    op.heap = heaps[1];
+    op.length = 2;
+    auto c = SparseMappingQueue_prepareBufferBatch(sparse, &op, 1);
+    require(c != 0, "release prepare");
+    auto gate = own(MTLDevice_newSharedEvent(device));
+    auto barrier =
+        own(SparseMappingQueue_prepareBarrierBeforeResourceState(sparse));
+    SparseMappingQueue_waitForEvent(sparse, gate, 1);
+    require(SparseBarrierCompletion_submit(barrier) &&
+                SparseMappingCompletion_issueNext(c),
+            "release issue");
+    if (sealed)
+      require(SparseMappingCompletion_seal(c, WMTSparseMappingHostAccepted),
+              "release seal");
+    auto release = std::async(std::launch::async, [=] {
+      auto pool = NSAutoreleasePool_alloc_init();
+      NSObject_release(c);
+      NSObject_release(pool);
+    });
+    require(release.wait_for(std::chrono::milliseconds(40)) ==
+                std::future_status::timeout,
+            "early final release returned");
+    MTLSharedEvent_signalValue(gate, 1);
+    require(release.wait_for(std::chrono::seconds(10)) ==
+                std::future_status::ready,
+            "release drain timeout");
+    release.get();
+    WMTSparseBarrierResult feedback = {};
+    require(SparseBarrierCompletion_wait(barrier, 10000, &feedback) &&
+                feedback.state == WMTSparseBarrierCompleted,
+            "release barrier feedback");
+    std::printf("MAPPING_RELEASE sealed=%u waited=1 actual_drained=1\n",
+                sealed);
+  }
+  // All actual mapping and readback work drained before native refs/residency
+  // die.
+  for (auto i = owned.rbegin(); i != owned.rend(); ++i)
+    NSObject_release(*i);
+  std::printf(
+      "MAPPING_RESULT seed=%u readbacks=%u words=%llu failures=%u drained=1\n",
+      seed, readbacks, (unsigned long long)checked, failures);
+  return failures ? 1 : 0;
+}
+
 void CheckSparseFeedback(const char *mode) {
   using namespace std::chrono_literals;
   static_assert(sizeof(WMTSparseBarrierResult) == 56);
@@ -1139,6 +1596,14 @@ int Run(const char *read_path, const char *write_path, UINT seed,
 }
 } // namespace
 int main(int argc, char **argv) {
+  if (argc == 3 && (!std::strcmp(argv[1], "mapping-normal") ||
+                    !std::strcmp(argv[1], "mapping-partial") ||
+                    !std::strcmp(argv[1], "mapping-wrong-event") ||
+                    !std::strcmp(argv[1], "mapping-wrong-word") ||
+                    !std::strcmp(argv[1], "mapping-prepare-failure")))
+    return CheckSparseMappingCredential(
+        argv[1], static_cast<uint32_t>(std::strtoul(argv[2], nullptr, 0)));
+
   if (argc != 3 && argc != 5 && argc != 6) {
     std::cerr
         << "usage: dx12_reserved_buffer <probe_read.cso> "

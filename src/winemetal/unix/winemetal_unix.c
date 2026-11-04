@@ -4382,6 +4382,258 @@ _SparseBarrierCompletion_wait(void *obj) {
   return STATUS_UNSUCCESSFUL;
 }
 
+_Static_assert(sizeof(struct WMTSparseBufferBatchOperation) == 64, "Sparse batch input ABI");
+_Static_assert(sizeof(struct WMTSparseMappingResult) == 32, "Sparse batch result ABI");
+_Static_assert(sizeof(struct unixcall_sparsemappingcompletion_prepare) == 32, "Sparse batch prepare ABI");
+_Static_assert(sizeof(struct unixcall_sparsemappingcompletion_seal) == 16, "Sparse batch seal ABI");
+_Static_assert(sizeof(struct unixcall_sparsemappingcompletion_wait) == 48, "Sparse batch wait ABI");
+
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000
+struct wmt_prepared_buffer_operation {
+  uint32_t kind;
+  id<MTLBuffer> source, destination;
+  id<MTLHeap> heap;
+  MTL4UpdateSparseBufferMappingOperation update;
+  MTL4CopySparseBufferMappingOperation copy;
+};
+API_AVAILABLE(macos(26.0))
+@interface WMTSparseMappingCompletion : NSObject {
+  id<MTL4CommandQueue> queue_;
+  id<MTLSharedEvent> event_;
+  NSLock *lock_;
+  struct wmt_prepared_buffer_operation *operations_;
+  uint64_t count_, next_;
+  struct WMTSparseMappingResult result_;
+  BOOL trace_;
+}
+- (id)initWithQueue:(id<MTL4CommandQueue>)queue
+         operations:(const struct WMTSparseBufferBatchOperation *)ops
+              count:(uint64_t)count;
+- (BOOL)issueNext;
+- (BOOL)seal:(uint32_t)outcome;
+- (void)wait:(uint64_t)timeout result:(struct WMTSparseMappingResult *)result;
+- (BOOL)retireInputs;
+@end
+@implementation WMTSparseMappingCompletion
+- (id)initWithQueue:(id<MTL4CommandQueue>)queue
+         operations:(const struct WMTSparseBufferBatchOperation *)ops
+              count:(uint64_t)count {
+  if (!(self = [super init]))
+    return nil;
+  if (!queue || (count && !ops) || count > SIZE_MAX / sizeof(*operations_)) {
+    [self release];
+    return nil;
+  }
+  for (uint64_t i = 0; i < count; ++i) {
+    if (ops[i].kind > 1 || ops[i].reserved || !ops[i].destination || !ops[i].length ||
+        ops[i].location > UINT64_MAX - ops[i].length ||
+        (ops[i].kind == 0 && (ops[i].source || ops[i].mode > 1 ||
+                              (ops[i].mode == 0 ? (!ops[i].heap || ops[i].offset > UINT64_MAX - ops[i].length)
+                                                : (!!ops[i].heap || ops[i].offset)))) ||
+        (ops[i].kind == 1 &&
+         (!ops[i].source || ops[i].heap || ops[i].mode || ops[i].offset > UINT64_MAX - ops[i].length))) {
+      [self release];
+      return nil;
+    }
+  }
+  queue_ = [queue retain];
+  lock_ = [[NSLock alloc] init];
+  const char *failure = getenv("DXMT_TEST_SPARSE_MAPPING_PREPARE_FAILURE");
+  event_ = failure && !strcmp(failure, "event") ? nil : [[queue device] newSharedEvent];
+  operations_ = failure && !strcmp(failure, "operations") ? NULL : calloc(count ? count : 1, sizeof(*operations_));
+  if (!lock_ || !event_ || !operations_) {
+    [self release];
+    return nil;
+  }
+  for (uint64_t i = 0; i < count; ++i) {
+    struct wmt_prepared_buffer_operation *op = &operations_[i];
+    op->kind = ops[i].kind;
+    op->source = [(id)ops[i].source retain];
+    op->destination = [(id)ops[i].destination retain];
+    op->heap = [(id)ops[i].heap retain];
+    if (op->kind == 0) {
+      op->update.mode = ops[i].mode;
+      op->update.bufferRange = NSMakeRange(ops[i].location, ops[i].length);
+      op->update.heapOffset = ops[i].offset;
+    } else {
+      op->copy.sourceRange = NSMakeRange(ops[i].location, ops[i].length);
+      op->copy.destinationOffset = ops[i].offset;
+    }
+    ++count_;
+  }
+  trace_ = getenv("DXMT_TEST_SPARSE_MAPPING_TRACE") != NULL;
+  if (trace_)
+    fprintf(stderr, "SPARSE_MAPPING_OWNER create=%p planned=%llu\n", self, (unsigned long long)count_);
+  return self;
+}
+- (BOOL)issueNext {
+  [lock_ lock];
+  if ((result_.state != WMTSparseMappingPrepared && result_.state != WMTSparseMappingIssuing) || next_ == count_ ||
+      result_.inputs_retired) {
+    [lock_ unlock];
+    return NO;
+  }
+  struct wmt_prepared_buffer_operation *op = &operations_[next_++];
+  result_.state = WMTSparseMappingIssuing;
+  ++result_.possibly_issued_calls; // Before the void invocation: ambiguous issue is retained.
+  if (op->kind == 0)
+    [queue_ updateBufferMappings:op->destination heap:op->heap operations:&op->update count:1];
+  else
+    [queue_ copyBufferMappingsFromBuffer:op->source toBuffer:op->destination operations:&op->copy count:1];
+  [lock_ unlock];
+  return YES;
+}
+- (BOOL)seal:(uint32_t)outcome {
+  [lock_ lock];
+  if (result_.seals || result_.inputs_retired || outcome < WMTSparseMappingHostAccepted ||
+      outcome > WMTSparseMappingHostFailedAfterIssue ||
+      (result_.state != WMTSparseMappingPrepared && result_.state != WMTSparseMappingIssuing) ||
+      (outcome == WMTSparseMappingHostAccepted && next_ != count_) ||
+      (outcome == WMTSparseMappingHostRejected && result_.possibly_issued_calls) ||
+      (outcome == WMTSparseMappingHostFailedAfterIssue && !result_.possibly_issued_calls)) {
+    [lock_ unlock];
+    return NO;
+  }
+  result_.host_outcome = outcome;
+  result_.seals = 1;
+  if (result_.possibly_issued_calls) {
+    // All wrapper storage and the GPU-only event were prepared before issue.
+    [queue_ signalEvent:event_ value:1];
+    result_.state = WMTSparseMappingSealedPending;
+  } else
+    result_.state = WMTSparseMappingNotIssued;
+  [lock_ unlock];
+  return YES;
+}
+- (void)wait:(uint64_t)timeout result:(struct WMTSparseMappingResult *)result {
+  [lock_ lock];
+  BOOL pending = result_.state == WMTSparseMappingSealedPending;
+  id<MTLSharedEvent> event = [event_ retain];
+  [lock_ unlock];
+  if (pending && timeout)
+    [event waitUntilSignaledValue:1 timeoutMS:timeout];
+  [lock_ lock];
+  result_.event_value = event.signaledValue;
+  if (result_.state == WMTSparseMappingSealedPending && result_.event_value >= 1)
+    result_.state = WMTSparseMappingGPUComplete;
+  *result = result_;
+  [lock_ unlock];
+  [event release];
+}
+- (BOOL)retireInputs {
+  [lock_ lock];
+  if (result_.inputs_retired ||
+      (result_.state != WMTSparseMappingNotIssued && result_.state != WMTSparseMappingGPUComplete)) {
+    [lock_ unlock];
+    return NO;
+  }
+  result_.inputs_retired = 1;
+  struct wmt_prepared_buffer_operation *ops = operations_;
+  uint64_t count = count_;
+  operations_ = NULL;
+  count_ = 0;
+  const struct WMTSparseMappingResult retired = result_;
+  [lock_ unlock];
+  for (uint64_t i = 0; i < count; ++i) {
+    [ops[i].source release];
+    [ops[i].destination release];
+    [ops[i].heap release];
+  }
+  free(ops);
+  if (trace_)
+    fprintf(
+        stderr, "SPARSE_MAPPING_OWNER retire=%p state=%u host=%u issued=%llu event=%llu\n", self, retired.state,
+        retired.host_outcome, (unsigned long long)retired.possibly_issued_calls, (unsigned long long)retired.event_value
+    );
+  return YES;
+}
+- (void)dealloc {
+  // No self-retention/quarantine. Last release must drain possible GPU access;
+  // missing-event teardown remains an availability limitation, not completion.
+  if (result_.possibly_issued_calls && result_.state != WMTSparseMappingGPUComplete) {
+    if (!result_.seals)
+      [self seal:WMTSparseMappingHostFailedAfterIssue];
+    struct WMTSparseMappingResult result;
+    do {
+      [self wait:1000 result:&result];
+    } while (result.state != WMTSparseMappingGPUComplete);
+  }
+  for (uint64_t i = 0; i < count_; ++i) {
+    [operations_[i].source release];
+    [operations_[i].destination release];
+    [operations_[i].heap release];
+  }
+  free(operations_);
+  if (trace_)
+    fprintf(
+        stderr, "SPARSE_MAPPING_OWNER destroy=%p state=%u host=%u issued=%llu event=%llu retired=%u\n", self,
+        result_.state, result_.host_outcome, (unsigned long long)result_.possibly_issued_calls,
+        (unsigned long long)result_.event_value, result_.inputs_retired
+    );
+  [event_ release];
+  [queue_ release];
+  [lock_ release];
+  [super dealloc];
+}
+@end
+#endif
+
+static NTSTATUS
+_SparseMappingQueue_prepareBufferBatch(void *obj) {
+  struct unixcall_sparsemappingcompletion_prepare *p = obj;
+  p->ret = 0;
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000
+  if (@available(macOS 26.0, *)) {
+    p->ret = (obj_handle_t)
+        [[WMTSparseMappingCompletion alloc] initWithQueue:(id)p->queue operations:p->operations.ptr count:p->count];
+    return p->ret ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+  }
+#endif
+  return STATUS_UNSUCCESSFUL;
+}
+static NTSTATUS
+_SparseMappingCompletion_issueNext(void *obj) {
+  struct unixcall_generic_obj_noret *p = obj;
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000
+  if (@available(macOS 26.0, *))
+    return p->handle && [(WMTSparseMappingCompletion *)p->handle issueNext] ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+#endif
+  return STATUS_UNSUCCESSFUL;
+}
+static NTSTATUS
+_SparseMappingCompletion_seal(void *obj) {
+  struct unixcall_sparsemappingcompletion_seal *p = obj;
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000
+  if (@available(macOS 26.0, *))
+    return p->completion && !p->reserved && [(WMTSparseMappingCompletion *)p->completion seal:p->outcome]
+               ? STATUS_SUCCESS
+               : STATUS_UNSUCCESSFUL;
+#endif
+  return STATUS_UNSUCCESSFUL;
+}
+static NTSTATUS
+_SparseMappingCompletion_wait(void *obj) {
+  struct unixcall_sparsemappingcompletion_wait *p = obj;
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000
+  if (@available(macOS 26.0, *)) {
+    if (p->completion) {
+      [(WMTSparseMappingCompletion *)p->completion wait:p->timeout_ms result:&p->result];
+      return STATUS_SUCCESS;
+    }
+  }
+#endif
+  return STATUS_UNSUCCESSFUL;
+}
+static NTSTATUS
+_SparseMappingCompletion_retireInputs(void *obj) {
+  struct unixcall_generic_obj_noret *p = obj;
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000
+  if (@available(macOS 26.0, *))
+    return p->handle && [(WMTSparseMappingCompletion *)p->handle retireInputs] ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+#endif
+  return STATUS_UNSUCCESSFUL;
+}
+
 static const char *
 sparse_buffer_update_failure_for_testing(void) {
   const char *phase = getenv("DXMT_TEST_SPARSE_BUFFER_UPDATE_FAILURE");
@@ -5063,9 +5315,14 @@ const void *__wine_unix_call_funcs[] = {
     &_SparseMappingQueue_prepareBarrier,
     &_SparseBarrierCompletion_submit,
     &_SparseBarrierCompletion_wait,
+    &_SparseMappingQueue_prepareBufferBatch,
+    &_SparseMappingCompletion_issueNext,
+    &_SparseMappingCompletion_seal,
+    &_SparseMappingCompletion_wait,
+    &_SparseMappingCompletion_retireInputs,
 };
 _Static_assert(
-    sizeof(__wine_unix_call_funcs) / sizeof(__wine_unix_call_funcs[0]) == unix_sparsebarriercompletion_wait + 1,
+    sizeof(__wine_unix_call_funcs) / sizeof(__wine_unix_call_funcs[0]) == unix_sparsemappingcompletion_retireinputs + 1,
     "Sparse completion Unix-call ordinal mismatch"
 );
 
@@ -5274,10 +5531,15 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_SparseMappingQueue_prepareBarrier,
     &_SparseBarrierCompletion_submit,
     &_SparseBarrierCompletion_wait,
+    &_SparseMappingQueue_prepareBufferBatch,
+    &_SparseMappingCompletion_issueNext,
+    &_SparseMappingCompletion_seal,
+    &_SparseMappingCompletion_wait,
+    &_SparseMappingCompletion_retireInputs,
 };
 _Static_assert(
     sizeof(__wine_unix_call_wow64_funcs) / sizeof(__wine_unix_call_wow64_funcs[0]) ==
-        unix_sparsebarriercompletion_wait + 1,
+        unix_sparsemappingcompletion_retireinputs + 1,
     "Sparse completion WOW64 ordinal mismatch"
 );
 #endif

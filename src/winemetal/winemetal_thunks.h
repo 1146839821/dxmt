@@ -56,7 +56,32 @@ enum winemetal_unixcall {
   unix_sparsemappingqueue_preparebarrier = 200,
   unix_sparsebarriercompletion_submit,
   unix_sparsebarriercompletion_wait,
+  unix_sparsemappingqueue_preparebufferbatch = 203,
+  unix_sparsemappingcompletion_issuenext,
+  unix_sparsemappingcompletion_seal,
+  unix_sparsemappingcompletion_wait,
+  unix_sparsemappingcompletion_retireinputs,
 };
+
+struct unixcall_sparsemappingcompletion_prepare {
+  obj_handle_t queue;
+  struct WMTConstMemoryPointer operations;
+  uint64_t count;
+  obj_handle_t ret;
+};
+struct unixcall_sparsemappingcompletion_seal {
+  obj_handle_t completion;
+  uint32_t outcome;
+  uint32_t reserved;
+};
+struct unixcall_sparsemappingcompletion_wait {
+  obj_handle_t completion;
+  uint64_t timeout_ms;
+  struct WMTSparseMappingResult result;
+};
+STATIC_ASSERT(sizeof(struct unixcall_sparsemappingcompletion_prepare) == 32);
+STATIC_ASSERT(sizeof(struct unixcall_sparsemappingcompletion_seal) == 16);
+STATIC_ASSERT(sizeof(struct unixcall_sparsemappingcompletion_wait) == 48);
 
 struct unixcall_sparsebarriercompletion_wait {
   obj_handle_t completion;

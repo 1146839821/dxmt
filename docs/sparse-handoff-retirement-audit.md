@@ -860,3 +860,100 @@ Focused docs(d3d12) commit/no push; original .gitignore preserved and excluded f
 ### 10. Next Recommended Slice
 
 Transport this controlled mapping credential through the **existing WineMetal boundary** with additive paired ABI and a controlled test caller, preserving production queue/resource callers disconnected. Validate PE↔Unix state/host-outcome separation, prepare-before-issue, partial-prefix close and real GPU completion/retains using the same oracle, paired runtime identities and applicable32/64-bit layout checks. This tests the actual boundary instead of repeating native-only evidence. Production Submission/resource integration remains a separate gate with COM residency ownership and unresolved no-event teardown explicitly addressed; do not broaden this next slice to device teardown or capability promotion.
+
+
+## N13 mapping credential WineMetal transport — Execution card, 2026-11-05
+
+- GOAL / BASELINE: at6152e245 implement controlled buffer credential through existing PE↔Unix boundary; one N13 slice. Original .gitignore preserved; production resource/queue callers disconnected.
+- EVIDENCE: prior E9 native GPU protocol plus current WineMetal prepare/submit/wait owner and dispatch tables; native event completion distinct from cancellation/barrier error. Microsoft Update/Copy logical semantics remain resource-owner responsibility.
+- SCOPE / MODULES: additive fixed-layout buffer operation/result and five ordinals203–207, existing thunk/header/WMT/native files, one mode in existing reserved-buffer probe. Native private inputs/event prepared before issue; host and lifecycle result separate. No texture or public capability expansion.
+- DESIGN: copied prevalidated native input/retains; issue-one supports controlled valid prefix; seal once without wrapper operation allocation; wait observes private GPU-only event; retirement only NotIssued/GPUComplete. Normal final release drains any possibly issued work before native refs release; missing event may block destructor, explicitly not resolved production teardown.
+- PROOF: x64 full build per script options,32-bit layout/PE build where available, isolated matched WineMetal DLL/Unix image, real seeded mapping/copy/remap/unmap GPU readbacks, partial-host-failure/timeout/cancel/mutated-input/invalid-transport controls, existing reserved/barrier/D3D11 nearby checks.
+- NON-SCOPE / RISKS: production Submission/COM snapshot integration, no-event recovery, mapping NSError attribution, scheduler, second tile table, new src/d3d12 files, MSC or D3D11 semantic changes, Tier/FL promotion. Credential assumes caller supplies valid resource mapping/barrier synchronization; never equates event with mapping-success result.
+- COST / ROLLBACK / DoD: one event plus prepared operation/native refs and a lock per credential; no new production hot-path caller or repeated heap scan. Fixed ABI paired deployment, preissue validation/failure cleanup, exact negative oracles and identities; focused commit/no push. Revert focused files; overall goal active.
+
+## N13 mapping credential WineMetal transport — Delivery, 2026-11-05
+
+### 1. Task Summary / Gate outcome
+
+Gate0 current baseline and boundary/source contracts rechecked; Gate1 execution card fixed to one controlled buffer slice; Gate2 additive WineMetal transport, native owner and existing reserved-buffer probe implemented; Gate3 final x64/x86 builds and real paired-runtime GPU matrix PASS within the stated scope; Gate4 scope, dispatch-prefix, identities and negative controls checked. Production D3D12 queue/resource callers remain disconnected from the new credential. This completes the boundary-validation slice, not production sparse lifetime/error support. Overall goal remains active.
+
+### 2. Baseline Evidence
+
+Baseline feat/d3d12 at6152e245704e0f5d5be78c564afaa72219f495fe, local origin reference0 behind/4 ahead before this commit; remote not refreshed. Original .gitignore SHA256764aac09922db4654ca6de63fd20cf014739d9292623eb979f448f38e609b759 preserved and excluded. Rechecked macOS27.2/26B123, Xcode27.2/27B52, Apple clang21.0.0, Metal32023.922. Actual launches report Apple7=1, Apple8=0, Apple9=0, Metal4=1, PlacementSparse=1 on the M1 Max. The probe creates and exercises genuine64-KiB sparse buffers/placement heaps; it does not forge capabilities or promote a D3D12 Tier.
+
+E10 = /Users/zhangbo/Documents/Vibe-Codeding/dxmt-test/n95-capability-gate/result-sparse-mapping-credential-bridge-20261105. Final executable evidence is exclusively final-gpu/; earlier root and initial-gpu/ runs are supplemental and excluded from final totals. E10 retains baseline/before source snapshots, environment.txt, build-options.json, SDK headers, fresh official Apple signal/feedback JSON, pinned Mullion queue bytes and sources.json hashes, build logs, ABI source/objects/commands, final run commands/env/logs/artifacts, scope and final delivery audits. Existing isolated build dxmt-metal272-identity-audit-20261104 uses release + D3D12/tests/NVAPI/NVNGX, patched LLVM installation llvm-current-patches-20261103/install and the repository LLVM-MinGW compiler. The x86 release build has D3D12/tests disabled as the script's x86 configuration; the entire new probe is additionally compile-checked for i686. No meson install to /usr/local or user Wine deployment occurred; copies go only to stage-sparse-mapping-credential-20261105 and prefix-sparse-mapping-credential-20261105.
+
+### 3. Findings / source and reference evidence
+
+| Evidence type | Conclusion / exact anchor |
+| --- | --- |
+| SDK_CONTRACT | E10/MTL4CommandQueue.h:261–276 orders a queue event after prior GPU work;395–431 exposes void update/copy mapping. MTL4CommitFeedback.h:19–40 concerns committed-buffer feedback. Fresh official signal/feedback JSON is hashed in sources.json. The new private event proves observed completion ordering, not a mapping NSError channel or acceptance of an entire host batch. |
+| REFERENCE_SOURCE | Pinned Mullion93de32b9145885ceb2e45be7d445e56d62499b3c, E10/mullion-queue:593–625 retains the captured update, settles predecessors, commits residency, signals/waits its mapping event and orders subsequent readers. SHA256641a21ad8fce6aa6f3f6f0cb02e0b0e3ae162a97a0eb7740d738c5f70ece6492 matches the retained reference. Source reference only; no code copied and no Mullion runtime claim. Microsoft void Update/Copy resource contracts and logical mapping ownership remain those audited in the preceding Design Card. |
+| SOURCE_AUDIT / ABI | winemetal.h:2508–2559 separates lifecycle state, host outcome and fixed64-byte native input/32-byte result. winemetal_thunks.h:59–84 appends ordinals203–207 with32/16/48-byte requests. The first203 entries of both normal/WOW64 native dispatch arrays are byte-token equivalent to baseline; existing ordinals are preserved. |
+| LOCAL_PASS / transport | winemetal_thunks.c:1631–1672 transports fixed-width handles and input pointer, checks Unix-call status and copies results only on successful transport. Five actual loaded PE export prefixes, module paths and the paired Unix image's actual path/UUID are verified in every final core launch, including prepare-failure cases. Transport success never means mapping success. |
+| LOCAL_PASS / private inputs | unix/winemetal_unix.c:4418–4466 validates shapes/overflow, allocates the event/native array and retains resources before any mapping issue. Caller mutates its input after prepare; GPU data follows the private original. Invalid kind/mode/zero length/overflow/heap/handle shape and huge count fail before issue. This validates the trusted internal ABI's structure, not arbitrary hostile native-object handles or all device/resource bounds. |
+| LOCAL_PASS / completion | unix/winemetal_unix.c:4468–4549 increments possibly-issued count before each void call, seals exactly once, observes the private GPU-only event, and rejects retirement until NotIssued/GPUComplete. tests/dx12/dx12_reserved_buffer.cpp:307–439 checks full two-call acceptance, incomplete-prefix acceptance rejection, host-failed partial prefix, timeouts, cancellation separation, duplicate close/reuse rejection and exact mapping data. HostFailedAfterIssue remains unchanged after GPUComplete. |
+| LOCAL_PASS / final release | unix/winemetal_unix.c:4550–4577 seals/drains issued work on final credential release. Probe:444–481 releases the last credential from another host thread under a closed GPU gate, observes that release cannot return, then opens the gate and verifies destruction only after actual completion. Both explicitly sealed and destructor-sealed paths pass. The fixture still owns native resources/residency: this does not prove final heap/COM destruction or page reclamation. |
+
+### 4. Design Decisions
+
+The credential follows existing MRC NSObject ownership. It owns one native queue, private shared event, lock and copied operation/native refs; no callbacks into PE, new scheduler, global registry, second tile table or per-call operation allocation after prepare. Each issue holds the credential lock only while enqueueing the native operation; event waits and native input releases occur outside it. Host state is independent of native completion. Prepared/Issuing cannot retire; a planned rejected or empty batch becomes NotIssued; partial issue must close as HostFailedAfterIssue. Native completion cannot overwrite that failure. Caller supplies valid device/resource/page bounds, residency and legal mapping/alias ordering. Unmap's internal input shape requires zero heap and offset.
+
+Normal final release drains possibly issued work instead of freeing live native refs. This is intentionally not production fault recovery: if a private event never arrives, release may block indefinitely. No timeout/cancellation/preceding barrier callback is converted to completion; no self-retain cycle, quarantine or process-wide leak is introduced. Production queue/resource callers remain disconnected pending the existing terminal-boundary gate. The controlled test always opens valid GPU gates and drains work; its fatal _Exit is confined to the isolated test executable, not the bridge.
+
+The existing standalone reserved-buffer probe gains native-WineMetal-only modes selected before its unchanged D3D12 fixture argument path. Every data step has a real preceding barrier, separate completion/read-order event and seeded per-heap/page/word pattern. A sparse unmap checkpoint is not read until valid remapping. A wrong expected word and unrelated CPU-cancelled event independently reject broken oracles. Empty, planned-rejected, abandoned-before-issue and injected event/array-preparation failures exercise zero-call cleanup. The injected failures are deterministic host controls, not real OOM or GPU failures.
+
+### 5. Changed Files / reproduction
+
+| File | Change |
+| --- | --- |
+| src/winemetal/winemetal.h | Add buffer operation/result/state contract and five C exports. |
+| src/winemetal/winemetal_thunks.h | Append fixed-layout request ABI/ordinals; existing ordinals unchanged. |
+| src/winemetal/winemetal_thunks.c | PE request/result transport with failure returns. |
+| src/winemetal/Metal.hpp:922–948 | Existing WMT ownership wrapper for prepare/issue/seal/wait/retire. |
+| src/winemetal/unix/winemetal_unix.c | Native prepared credential, state/retirement protocol, normal+WOW64 dispatch entries and opt-in test controls. |
+| tests/dx12/dx12_reserved_buffer.cpp:38–491,1598–1605 | Existing test gains mapping-normal/partial/wrong-event/wrong-word/prepare-failure modes; no new repository runner/target. |
+| docs/sparse-handoff-retirement-audit.md | Execution card, evidence, gate/remaining blocker and delivery record. |
+
+Use E10/final-gpu/run_bridge.py to reproduce core cases against a freshly paired isolated stage; E10/final-gpu/regressions.py records adjacent cases. Exact command/env, seed, timeout, file SHA256, actual loaded code bytes and Unix UUID are in each process record/log. The external evidence runner is not a repository test-runner architecture. x64/x86 builds use meson compile -C with the correct LLVM-MinGW directory prepended; all default targets complete. E10/abi-builds.json contains both standalone fixed-ABI builds and the full i686 probe compilation. No new source under src/d3d12 or vendored headers is introduced.
+
+### 6. Validation Results
+
+| Check | Result / scope |
+| --- | --- |
+| Final x64 complete release build | PASS; all default targets, tests and native Unix library. Existing deprecation/override warnings remain; not a warning-free or clean-from-empty build claim. |
+| Final x86 complete release build | PASS; D3D10/11/WineMetal configuration, D3D12 disabled. Full new probe i686 compile and fixed ABI i686/x64 compile also PASS. x86 runtime NOT_RUN. |
+| Final normal-a/b, partial-a/b | LOCAL_PASS;4 seeded real-GPU positive data processes. Normal step0 admits two mapping calls; partial prepares two different operations but issues exactly one and preserves host failure. |
+| Wrong-event / wrong-word controls | Expected exit1 each, exactly one rejected observation/mismatch, all real GPU work drained. Neither is a GPU/driver fault. |
+| Event / native-array prepare failures |2 positive rejection processes; nil before any mapping call. No fake event completion. |
+| Core totals |8 processes:6 expected exit0 and2 expected exit1. Six data processes perform42 mapping batches (30 data +12 final-release cases),46 native mapping calls,42 full buffer readbacks and1376256 compared DWORDs.60 native credentials created/destroyed with matched pointers;12 NotIssued,6 abandoned Prepared,30 explicitly retired GPUComplete and12 destructor-drained GPUComplete. |
+| Existing reserved buffer + wrong oracle | PASS / expected exit1; remap, NULL, UAV, CopyTiles, descriptor-before-map and cross-queue fixture retains exact311296-word positive oracle. |
+| Existing feedback / submitted barrier failure | PASS; preceding feedback still distinct; injected submission failure keeps removal/fence/signal rejection checks. Mapping credential never activated in these production paths. |
+| Texture handoff retirement + negative | PASS / expected exit1; exact queued/retired readback and shader oracles preserved. |
+| Packed-tail full mips + CopyTileMappings | PASS; mapping/remap/unmap, alias inheritance and copied NULL mapping retain existing readback oracles. |
+| D3D11 nearby smoke | PASS;256-word CopyResource/Map readback through actual staged D3D11 and DXGI export prefixes and paths, paired Unix UUID checked. Original probe plus an identity-instrumented repeat, both successful; broader D3D11 rendering NOT_RUN. Wine reports DXGI.DLL uppercase, so identity path comparison uses Windows case-insensitive semantics. |
+| Final delivery total / validation |17 processes =8 core +9 nearby (two D3D11 probes);13 expected exit0 +4 expected exit1. All actual API/GPU validation enabled notices present; no unexpected Metal diagnostic or GPU fault. Deliberate barrier failure/negative-oracle diagnostics are retained. final-gpu/audit.json verifies logs/exit codes and hashes. |
+| Metal3-only / Windows / other GPUs / fault recovery | NOT_RUN. M1 Max Metal4 PlacementSparse is available, not BLOCKED_BY_HARDWARE. No forced Metal3-only runtime or Windows native mapping path tested. Natural mapping error, absent-event/device loss, teardown under full FIFO, multithread stress and ASan Wine runtime NOT_RUN. Prior native ASan evidence is historical, not counted. |
+
+Retained non-GPU corrections: an initial build missed the WOW64 table-size assertion and was fixed; a build with the wrong shell PATH selected GCC and rejected -fblocks, fixed by prepending the repository LLVM-MinGW path. An external dispatch-audit parser initially counted only underscored handlers, fixed to include every table entry. D3D11 identity collection initially compared DXGI.DLL path case-sensitively, corrected using the same successful run. No failed GPU result is hidden by those collector/build corrections. Earlier root/initial-gpu runs use earlier source identities and are excluded from the final totals.
+
+### 7. Capability / cost impact
+
+No Feature Level, Shader Model, Tiled Resources Tier, Metal3 shadow backing, MSC flags/runtime requirements, Airconv, D3D11 behavior or production Fence policy changed. The native credential has no production caller and therefore adds no active production mapping allocation/lock path. If activated later, it costs one event/owner/lock plus an operation array and native retains per batch and a paired Unix call per issue/observation; driver/Foundation internal allocations are not instrumented. No throughput, overlap, zero-overhead or no-performance-regression claim. Existing shader/residency/COM semantics are not inferred from these native input retains.
+
+### 8. Remaining Blockers / Regression Risks
+
+- BACKEND_NOT_IMPLEMENTED: production resource-private-COM snapshot ownership, resource prepare/issue split, bounded Submission payload and final residency retirement. Buffer transport is now implemented/tested; texture/packed/self-overlap credential transport and actual production use are outside this slice.
+- SPEC_UNVERIFIED: void mapping asynchronous NSError attribution and a safe alternate terminal boundary when the private event does not arrive. Current drain-on-release may stall forever; therefore it is not an approved production device-loss/teardown policy. Completion observation and host batch acceptance remain separate.
+- MSC_SEMANTIC_GAP: no new gap established by this buffer/bridge slice; prior texture/shader/sparse semantic gates remain. Existing MSC fixtures pass but do not establish all sparse shader guarantees.
+- TARGET_DEVICE_NOT_AVAILABLE: Windows native/other GPU comparison only. The actual M1 Max target was exercised; Apple7 is not used as a placement-sparse hardware blocker.
+- ABI: additive ordinals require matched WineMetal PE/Unix deployment; no cross-version negotiation was added. Invalid raw NSObject handles and illegal device/resource ranges are outside this trusted internal interface's checks. Retaining native objects alone does not keep COM destructor-driven residency membership alive.
+
+### 9. Git State / Rollback
+
+Focused feat(winemetal) commit under the repository's recent subject style; no push. Original .gitignore excluded; no staged/untracked work remains after commit. E10/delivery-manifest.json records the resulting commit, tracking state and exact source/build/stage/log hashes. The first203 dispatch entries on both ABIs are preserved. Revert this focused commit to remove the five exports/wrappers/native owner/test mode/report; paired deployment must revert together. No public capability needs rollback and no user Wine installation was changed.
+
+### 10. Next Recommended Slice
+
+Perform one **resource-private-COM payload preparation and controlled lifetime slice**, in the existing buffer/resource and Submission ownership boundaries, with the new bridge still disconnected from automatic production issue. Materialize the old/new/source heap/resource snapshot before publication, retain the COM/residency owner rather than only native handles, drop public refs in a controlled test, and prove destruction/residency retirement only after the exact credential boundary. Keep production no-event integration gated; do not activate the new blocking final-release policy in ordinary queue teardown or add a scheduler/second mapping table. Scope the Design Card to prepared ownership and testable healthy completion, explicitly carry the unresolved alternate terminal-boundary requirement forward.

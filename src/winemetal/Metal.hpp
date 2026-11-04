@@ -919,8 +919,33 @@ public:
   }
 };
 
+class SparseMappingCompletion : public Object {
+public:
+  bool
+  issueNext() {
+    return SparseMappingCompletion_issueNext(handle) != 0;
+  }
+  bool
+  seal(WMTSparseMappingHostOutcome outcome) {
+    return SparseMappingCompletion_seal(handle, outcome) != 0;
+  }
+  bool
+  wait(uint64_t timeout_ms, WMTSparseMappingResult &result) {
+    return SparseMappingCompletion_wait(handle, timeout_ms, &result) != 0;
+  }
+  bool
+  retireInputs() {
+    return SparseMappingCompletion_retireInputs(handle) != 0;
+  }
+};
+
 class SparseMappingQueue : public Object {
 public:
+  Reference<SparseMappingCompletion>
+  prepareBufferBatch(const WMTSparseBufferBatchOperation *operations, uint64_t count) {
+    return Reference<SparseMappingCompletion>(SparseMappingQueue_prepareBufferBatch(handle, operations, count));
+  }
+
   Reference<SparseBarrierCompletion>
   prepareBarrierBeforeResourceState() {
     return Reference<SparseBarrierCompletion>(SparseMappingQueue_prepareBarrierBeforeResourceState(handle));
