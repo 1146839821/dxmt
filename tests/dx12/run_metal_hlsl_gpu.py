@@ -22,6 +22,7 @@ def main():
     parser.add_argument('--repeats', type=int, default=3)
     parser.add_argument('--trace-config', action='store_true', help='trace real compatibility flags through a forwarding dylib')
     parser.add_argument('--trace-dxil-validation', action='store_true', help='enable DXIL validation through a test wrapper')
+    parser.add_argument('--both-spaces', action='store_true', help='enable both distinct extension spaces')
     args = parser.parse_args()
     if args.trace_config and args.trace_dxil_validation:
         parser.error('trace options are mutually exclusive')
@@ -59,10 +60,14 @@ def main():
                'metal_hlsl_constants.ps.cso', 'metal_hlsl_framebuffer.ps.cso']
     results = []
     cases = []
-    for i in range(args.repeats):
-        cases += [(f'positive-{i}', [], 0), (f'explicit-zero-{i}', ['--zero-flags'], 0),
-                  (f'legacy-zero-{i}', ['--legacy-zero'], 0)]
-    cases += [('wrong-oracle', ['--wrong'], 10)]
+    if args.both_spaces:
+        cases = [(f'positive-{i}', ['--both-spaces'], 0) for i in range(args.repeats)]
+        cases += [('wrong-oracle', ['--both-spaces-wrong'], 10)]
+    else:
+        for i in range(args.repeats):
+            cases += [(f'positive-{i}', [], 0), (f'explicit-zero-{i}', ['--zero-flags'], 0),
+                      (f'legacy-zero-{i}', ['--legacy-zero'], 0)]
+        cases += [('wrong-oracle', ['--wrong'], 10)]
     for name, extra, expected in cases:
         result = subprocess.run(command + extra, cwd=stage, env=env, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, timeout=180, text=True, errors='replace')
@@ -93,7 +98,7 @@ def main():
         results.append({'case': name, 'exit': result.returncode, 'timings': timings})
         print(name + ': passed', flush=True)
     summaries = {}
-    for case in ('positive', 'explicit-zero', 'legacy-zero'):
+    for case in (('positive',) if args.both_spaces else ('positive', 'explicit-zero', 'legacy-zero')):
         for stage_name in ('SIZING', 'OUTPUT'):
             for shader in ('constants', 'fetch'):
                 values = [float(value) for result in results if result['case'].startswith(case + '-')

@@ -17,7 +17,7 @@ struct Converted {
 };
 
 static bool convert(const char *path, bool constants, bool explicit_zero,
-                    bool legacy_zero, uint32_t gpu_family, Converted &out) {
+                    bool legacy_zero, uint32_t gpu_family, Converted &out, bool both_spaces = false) {
   std::ifstream file(path, std::ios::binary);
   std::vector<char> dxil((std::istreambuf_iterator<char>(file)), {});
   if (dxil.empty())
@@ -33,9 +33,9 @@ static bool convert(const char *path, bool constants, bool explicit_zero,
   else if (!legacy_zero)
     p.compatibility_flags = DXMT_MSC_COMPATIBILITY_FLAG_TEXTURE_MIN_LOD_CLAMP;
   p.function_constant_resource_space =
-      constants ? 2147420894u : DXMT_MSC_RESOURCE_SPACE_DISABLED;
+      constants || both_spaces ? 2147420894u : DXMT_MSC_RESOURCE_SPACE_DISABLED;
   p.framebuffer_fetch_resource_space =
-      constants ? DXMT_MSC_RESOURCE_SPACE_DISABLED : 2147420893u;
+      !constants || both_spaces ? 2147420893u : DXMT_MSC_RESOURCE_SPACE_DISABLED;
   p.error_message = error;
   p.error_message_capacity = sizeof(error);
   LARGE_INTEGER frequency{}, start{}, finish{};
@@ -231,6 +231,8 @@ int main(int argc, char **argv) {
                                    std::strcmp(argv[3], "--benchmark") == 0 ||
                                    std::strcmp(argv[3], "--gpu6") == 0 ||
                                    std::strcmp(argv[3], "--gpu7") == 0 ||
+                                   std::strcmp(argv[3], "--both-spaces") == 0 ||
+                                   std::strcmp(argv[3], "--both-spaces-wrong") == 0 ||
                                    std::strcmp(argv[3], "--gpu9") == 0)))
     return 2;
   auto module = GetModuleHandleA("winemetal.dll");
@@ -244,7 +246,8 @@ int main(int argc, char **argv) {
   for (unsigned i = 0; i < 16; ++i)
     std::cout << hex[code[i] >> 4] << hex[code[i] & 15];
   std::cout << "\n";
-  const bool wrong = argc == 4 && std::strcmp(argv[3], "--wrong") == 0;
+  const bool wrong = argc == 4 && (!std::strcmp(argv[3], "--wrong") || !std::strcmp(argv[3], "--both-spaces-wrong"));
+  const bool both_spaces = argc == 4 && (!std::strcmp(argv[3], "--both-spaces") || !std::strcmp(argv[3], "--both-spaces-wrong"));
   const bool explicit_zero =
       argc == 4 && std::strcmp(argv[3], "--zero-flags") == 0;
   const bool legacy_zero =
@@ -276,8 +279,8 @@ int main(int argc, char **argv) {
     std::cout << "GPU_TARGET " << gpu_family << "\n";
   }
   Converted fc, fetch;
-  if (!convert(argv[1], true, explicit_zero, legacy_zero, gpu_family, fc) ||
-      !convert(argv[2], false, explicit_zero, legacy_zero, gpu_family, fetch))
+  if (!convert(argv[1], true, explicit_zero, legacy_zero, gpu_family, fc, both_spaces) ||
+      !convert(argv[2], false, explicit_zero, legacy_zero, gpu_family, fetch, both_spaces))
     return 3;
   if (!fc.reflection.needs_function_constants ||
       fc.reflection.function_constant_count != 1 ||

@@ -301,6 +301,15 @@ validation. Logs are under `result-msc-space-fresh-20261104/` and
 that special spaces cannot collide with ordinary application bindings; normal
 D3D12 conversion continues to disable both extension spaces.
 
+The Metal HLSL GPU probe also supports `--both-spaces`, configuring both
+distinct special spaces on each of the two existing conversions. Two Wine
+processes passed the function-constant and framebuffer-fetch pixel checks;
+the deliberately wrong oracle was rejected, with Metal API and GPU validation
+enabled. The runner verifies the staged bridge and fixtures against the build
+and records loaded runtime paths. Evidence is in
+`result-msc-both-spaces-20261104/` outside the repository. The two extensions
+were exercised by separate shaders; a single shader using both is not covered.
+
 The root-validation comparison now includes `ValidateDXIL`, alongside unset,
 zero and bound-resource validation. Three processes per mode each compiled six
 valid and six missing-resource instances. All valid roots compiled and all
