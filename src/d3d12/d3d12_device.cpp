@@ -18,6 +18,7 @@
 
 #include <stdexcept>
 #include "d3d12_device.hpp"
+#include "util_env.hpp"
 #include "d3d12_device_child.hpp"
 #include "d3d12_raytracing.hpp"
 #include "d3d12_raytracing_pipeline.hpp"
@@ -2116,6 +2117,9 @@ public:
     std::unique_lock<dxmt::mutex> lock(residency_lock_);
     residency_set_.removeAllocations(&allocation, 1);
     residency_set_.commit();
+    static const bool trace_sparse_payload = dxmt::env::getEnvVar("DXMT_TEST_SPARSE_PAYLOAD_TRACE") == "1";
+    if (trace_sparse_payload)
+      ERR("SPARSE_PAYLOAD_UNREGISTER heap_allocation=", allocation.handle);
     return S_OK;
   }
 
@@ -2143,6 +2147,9 @@ public:
     auto buffer = allocation->buffer();
     residency_set_.removeAllocations(&buffer, 1);
     residency_set_.commit();
+    static const bool trace_sparse_payload = dxmt::env::getEnvVar("DXMT_TEST_SPARSE_PAYLOAD_TRACE") == "1";
+    if (trace_sparse_payload)
+      ERR("SPARSE_PAYLOAD_UNREGISTER resource=", reinterpret_cast<uintptr_t>(resource), " allocation=", buffer.handle);
     return S_OK;
   }
 

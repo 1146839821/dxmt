@@ -562,6 +562,28 @@ public:
   }
 
   HRESULT
+  CaptureTileMappingOwners(const std::vector<UINT> &tiles, D3D12SparseMappingPayload &payload) const override try {
+    if (!reserved_ || payload.completion || payload.resources.size() == payload.resources.max_size() ||
+        tiles.size() > payload.heaps.max_size() - payload.heaps.size())
+      return E_INVALIDARG;
+    for (const auto tile : tiles)
+      if (tile >= tile_count_)
+        return E_INVALIDARG;
+    // Collect before the native credential exists or work can be issued. Keep
+    // overwritten/source heaps even after tile_mappings_ publishes newer refs.
+    std::unique_lock<dxmt::mutex> lock(tile_mapping_mutex_);
+    payload.resources.reserve(payload.resources.size() + 1);
+    payload.heaps.reserve(payload.heaps.size() + tiles.size());
+    payload.resources.emplace_back(const_cast<MTLD3D12Buffer *>(this));
+    for (const auto tile : tiles)
+      if (tile_mappings_[tile].heap)
+        payload.heaps.push_back(tile_mappings_[tile].heap);
+    return S_OK;
+  } catch (const std::bad_alloc &) {
+    return E_OUTOFMEMORY;
+  }
+
+  HRESULT
   UpdateTileMappings(
       UINT NumResourceRegions, const D3D12_TILED_RESOURCE_COORDINATE *pResourceRegionStartCoordinates,
       const D3D12_TILE_REGION_SIZE *pResourceRegionSizes, ID3D12Heap *pHeap, UINT NumRanges,

@@ -16,6 +16,8 @@
 #include <algorithm>
 #include <cstdlib>
 #include "../../src/winemetal/winemetal.h"
+#include "../../src/d3d12/d3d12_device.hpp"
+#include <array>
 
 namespace {
 constexpr UINT TileBytes = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
@@ -35,6 +37,401 @@ void Check(const char *operation, HRESULT hr) {
     throw std::runtime_error(operation);
   }
 }
+class SparsePayloadSentinel : public IUnknown {
+  std::atomic<ULONG> refs_{1};
+  std::atomic<unsigned> &destroyed_;
+  unsigned id_;
+
+public:
+  SparsePayloadSentinel(std::atomic<unsigned> &destroyed, unsigned id)
+      : destroyed_(destroyed), id_(id) {}
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void **out) override {
+    if (!out)
+      return E_POINTER;
+    *out = nullptr;
+    if (iid != __uuidof(IUnknown))
+      return E_NOINTERFACE;
+    *out = this;
+    AddRef();
+    return S_OK;
+  }
+  ULONG STDMETHODCALLTYPE AddRef() override { return ++refs_; }
+  ULONG STDMETHODCALLTYPE Release() override {
+    auto refs = --refs_;
+    if (!refs) {
+      ++destroyed_;
+      std::printf("PAYLOAD_COM_DESTROY id=%u\n", id_);
+      std::fflush(stdout);
+      delete this;
+    }
+    return refs;
+  }
+};
+
+int CheckSparseMappingPayload(const char *mode, uint32_t seed) {
+  using namespace dxmt;
+  auto require = [](bool ok, const char *why) {
+    if (!ok) {
+      std::fprintf(stderr, "PAYLOAD_FATAL %s\n", why);
+      std::fflush(nullptr);
+      std::_Exit(3);
+    }
+  };
+  const bool native_only = !std::strcmp(mode, "payload-native-only"),
+             release_pending = !std::strcmp(mode, "payload-release"),
+             wrong_word = !std::strcmp(mode, "payload-wrong-word");
+  auto pool = WMT::MakeAutoreleasePool();
+  ID3D12Device *public_device = nullptr;
+  require(SUCCEEDED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+                                      IID_PPV_ARGS(&public_device))),
+          "device");
+  auto device = static_cast<MTLD3D12Device *>(public_device);
+  auto metal = device->GetMTLDevice();
+  require(metal.supportsPlacementSparse() &&
+              metal.supportsFamily(WMTGPUFamilyMetal4),
+          "actual sparse device");
+  std::printf("PAYLOAD_DEVICE apple7=%u apple8=%u apple9=%u metal4=%u "
+              "placement=%u seed=%u\n",
+              metal.supportsFamily(WMTGPUFamilyApple7),
+              metal.supportsFamily(WMTGPUFamilyApple8),
+              metal.supportsFamily(WMTGPUFamilyApple9),
+              metal.supportsFamily(WMTGPUFamilyMetal4),
+              metal.supportsPlacementSparse(), seed);
+  auto bridge = GetModuleHandleA("winemetal.dll");
+  require(bridge != nullptr, "bridge");
+  for (auto pair :
+       {std::pair{"d3d12.dll", "D3D12CreateDevice"},
+        std::pair{"winemetal.dll", "SparseMappingQueue_prepareBufferBatch"},
+        std::pair{"winemetal.dll", "SparseMappingCompletion_wait"}}) {
+    auto module = GetModuleHandleA(pair.first);
+    auto code = reinterpret_cast<const unsigned char *>(
+        GetProcAddress(module, pair.second));
+    require(code != nullptr, "export");
+    char path[32768] = {};
+    GetModuleFileNameA(module, path, sizeof(path));
+    std::printf("PAYLOAD_MODULE %s %s\n", pair.first, path);
+    std::printf("LOADED_CODE %s %s ", pair.first, pair.second);
+    for (unsigned i = 0; i < 16; ++i)
+      std::printf("%02x", code[i]);
+    std::printf("\n");
+  }
+  constexpr uint64_t bytes = 131072, words = bytes / 4, page_words = 65536 / 4,
+                     guards = 32;
+  std::array<std::atomic<unsigned>, 5> destroyed{};
+  const GUID sentinel_guid = {0xaed22c31,
+                              0xcaba,
+                              0x4421,
+                              {0x98, 0x11, 0x72, 0x58, 0x03, 0x64, 0x05, 0x12}};
+  auto sentinel = [&](ID3D12Object *obj, unsigned id) {
+    auto s = new SparsePayloadSentinel(destroyed[id], id);
+    require(SUCCEEDED(obj->SetPrivateDataInterface(sentinel_guid, s)),
+            "sentinel attach");
+    s->Release();
+  };
+  auto deaths = [&] {
+    unsigned n = 0;
+    for (auto &v : destroyed)
+      n += v.load();
+    return n;
+  };
+  ID3D12Resource *public_resources[2] = {};
+  MTLD3D12Resource *resources[2] = {};
+  D3D12_RESOURCE_DESC desc = {};
+  desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  desc.Width = bytes;
+  desc.Height = 1;
+  desc.DepthOrArraySize = 1;
+  desc.MipLevels = 1;
+  desc.SampleDesc.Count = 1;
+  desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  for (unsigned i = 0; i < 2; ++i) {
+    require(SUCCEEDED(public_device->CreateReservedResource(
+                &desc, D3D12_RESOURCE_STATE_COMMON, nullptr,
+                IID_PPV_ARGS(&public_resources[i]))),
+            "reserved buffer");
+    resources[i] = static_cast<MTLD3D12Resource *>(public_resources[i]);
+    sentinel(public_resources[i], i);
+  }
+  ID3D12Heap *public_heaps[3] = {};
+  MTLD3D12Heap *heaps[3] = {};
+  D3D12_HEAP_DESC hd = {};
+  hd.SizeInBytes = bytes;
+  hd.Properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+  hd.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS;
+  for (unsigned i = 0; i < 3; ++i) {
+    require(SUCCEEDED(
+                public_device->CreateHeap(&hd, IID_PPV_ARGS(&public_heaps[i]))),
+            "heap");
+    heaps[i] = static_cast<MTLD3D12Heap *>(public_heaps[i]);
+    sentinel(public_heaps[i], i + 2);
+    std::printf("PAYLOAD_HEAP id=%u allocation=%llu\n", i + 2,
+                (unsigned long long)heaps[i]->GetMetalHeap().handle);
+  }
+  WMT::Buffer source = resources[0]->GetMetalBuffer(),
+              dest = resources[1]->GetMetalBuffer();
+  for (unsigned i = 0; i < 2; ++i)
+    std::printf("PAYLOAD_RESOURCE id=%u resource=%llu allocation=%llu\n", i,
+                (unsigned long long)reinterpret_cast<uintptr_t>(resources[i]),
+                (unsigned long long)resources[i]->GetMetalBuffer().handle);
+  D3D12_TILED_RESOURCE_COORDINATE start = {};
+  D3D12_TILE_REGION_SIZE region = {};
+  region.NumTiles = 2;
+  UINT offset = 0, count = 2;
+  for (unsigned i = 0; i < 2; ++i)
+    require(SUCCEEDED(resources[i]->UpdateTileMappings(
+                1, &start, &region, public_heaps[i], 1, nullptr, &offset,
+                &count, D3D12_TILE_MAPPING_FLAG_NONE, {})),
+            "logical fixture map");
+  auto payload = std::make_unique<D3D12SparseMappingPayload>();
+  require(resources[0]->CaptureTileMappingOwners({2}, *payload) ==
+                  E_INVALIDARG &&
+              payload->resources.empty() && payload->heaps.empty(),
+          "invalid range changed payload");
+  if (!native_only) {
+    for (auto r : resources)
+      require(SUCCEEDED(r->CaptureTileMappingOwners({0, 1}, *payload)),
+              "capture owners");
+    payload->heaps.emplace_back(heaps[2]);
+  }
+  require(payload->resources.size() == (native_only ? 0 : 2) &&
+              payload->heaps.size() == (native_only ? 0 : 5),
+          "owner snapshot size");
+  WMT::Reference<WMT::CommandQueue> classic{
+      MTLDevice_newCommandQueue(metal.handle, 32)};
+  auto sparse = metal.newSparseMappingQueue();
+  require(classic && sparse, "queues");
+  classic.addResidencySet(device->GetGlobalResidencySet());
+  sparse.addResidencySet(device->GetGlobalResidencySet());
+  WMT::Reference<WMT::Buffer> placed[2], upload[2];
+  auto pattern = [&](unsigned h, uint64_t i) {
+    return (seed ^ (h ? 0x13579bdfu : 0x2468ace0u)) +
+           uint32_t(i / page_words) * 0x27101983u +
+           uint32_t(i % page_words) * 0x9e3779b9u;
+  };
+  for (unsigned i = 0; i < 2; ++i) {
+    WMTBufferInfo pi = {};
+    pi.length = bytes;
+    pi.options = static_cast<WMTResourceOptions>(
+        WMTResourceStorageModePrivate | WMTResourceHazardTrackingModeUntracked);
+    placed[i] = WMT::Reference<WMT::Buffer>{
+        MTLHeap_newBuffer(heaps[i ? 2 : 0]->GetMetalHeap().handle, &pi, 0)};
+    WMTBufferInfo ui = {};
+    ui.length = bytes;
+    ui.options = WMTResourceStorageModeShared;
+    upload[i] =
+        WMT::Reference<WMT::Buffer>{MTLDevice_newBuffer(metal.handle, &ui)};
+    require(placed[i] && upload[i] && ui.memory.ptr, "producer allocations");
+    auto data = static_cast<uint32_t *>(ui.memory.ptr);
+    for (uint64_t w = 0; w < words; ++w)
+      data[w] = pattern(i, w);
+  }
+  WMTBufferInfo oi = {};
+  oi.length = (2 * words + guards) * 4;
+  oi.options = WMTResourceStorageModeShared;
+  WMT::Reference<WMT::Buffer> output{MTLDevice_newBuffer(metal.handle, &oi)};
+  auto out = static_cast<uint32_t *>(oi.memory.ptr);
+  require(output && out, "output");
+  obj_handle_t error = 0;
+  WMT::Reference<WMT::ResidencySet> fixture{
+      MTLDevice_newResidencySet(metal.handle, 5, &error)};
+  require(fixture && !error, "fixture residency");
+  obj_handle_t allocations[] = {placed[0].handle, placed[1].handle,
+                                upload[0].handle, upload[1].handle,
+                                output.handle};
+  MTLResidencySet_addAllocations(fixture.handle, allocations, 5);
+  fixture.commit();
+  classic.addResidencySet(fixture);
+  sparse.addResidencySet(fixture);
+  auto blit = [&](obj_handle_t enc, obj_handle_t src, obj_handle_t dst,
+                  uint64_t dst_offset) {
+    wmtcmd_blit_copy_from_buffer_to_buffer c = {};
+    c.type = WMTBlitCommandCopyFromBufferToBuffer;
+    c.src = src;
+    c.dst = dst;
+    c.dst_offset = dst_offset;
+    c.copy_length = bytes;
+    MTLBlitCommandEncoder_encodeCommands(enc,
+                                         reinterpret_cast<wmtcmd_base *>(&c));
+  };
+  auto init = MTLCommandQueue_commandBuffer(classic.handle),
+       enc = MTLCommandBuffer_blitCommandEncoder(init);
+  require(init && enc, "init objects");
+  for (unsigned i = 0; i < 2; ++i)
+    blit(enc, upload[i].handle, placed[i].handle, 0);
+  MTLCommandEncoder_endEncoding(enc);
+  MTLCommandBuffer_commit(init);
+  MTLCommandBuffer_waitUntilCompleted(init);
+  require(MTLCommandBuffer_status(init) == WMTCommandBufferStatusCompleted,
+          "init failed");
+  WMTSparseBufferBatchOperation ops[3] = {};
+  ops[0].destination = source.handle;
+  ops[0].heap = heaps[0]->GetMetalHeap().handle;
+  ops[0].length = 2;
+  ops[1].destination = dest.handle;
+  ops[1].heap = heaps[2]->GetMetalHeap().handle;
+  ops[1].length = 2;
+  ops[2].kind = 1;
+  ops[2].source = source.handle;
+  ops[2].destination = dest.handle;
+  ops[2].length = 1;
+  payload->completion = sparse.prepareBufferBatch(ops, 3);
+  const bool prepare_failure = !std::strcmp(mode, "payload-prepare-failure");
+  require(prepare_failure ? payload->completion == nullptr
+                          : payload->completion != nullptr,
+          "prepare native");
+  if (!native_only && !prepare_failure)
+    require(resources[0]->CaptureTileMappingOwners({0}, *payload) ==
+                    E_INVALIDARG &&
+                payload->resources.size() == 2 && payload->heaps.size() == 5,
+            "sealed capture");
+  // Remove all logical/public ownership; only the private payload may keep COM
+  // destructors from unregistering the global residency allocations.
+  D3D12_TILE_RANGE_FLAGS nullflag = D3D12_TILE_RANGE_FLAG_NULL;
+  for (auto r : resources)
+    require(SUCCEEDED(r->UpdateTileMappings(1, &start, &region, nullptr, 1,
+                                            &nullflag, nullptr, &count,
+                                            D3D12_TILE_MAPPING_FLAG_NONE, {})),
+            "logical fixture clear");
+  bool public_zero = true;
+  for (auto r : public_resources)
+    public_zero &= r->Release() == 0;
+  for (auto h : public_heaps)
+    public_zero &= h->Release() == 0;
+  require(public_zero, "private retains changed public count");
+  unsigned failures = 0;
+  std::printf("PAYLOAD_DROPPED public_zero=1 destroyed=%u resources=%zu "
+              "heaps=%zu native_only=%u\n",
+              deaths(), payload->resources.size(), payload->heaps.size(),
+              native_only);
+  std::fflush(stdout);
+  if (native_only) {
+    require(deaths() == 5, "native-only counter oracle");
+    payload.reset();
+    public_device->Release();
+    std::printf("PAYLOAD_RESULT negative=native-only missing_owner=1 issued=0 "
+                "failures=1 drained=1\n");
+    return 1;
+  }
+  require(!deaths(), "premature COM destruction");
+  if (prepare_failure || !std::strcmp(mode, "payload-rejected")) {
+    WMTSparseMappingResult result = {};
+    if (prepare_failure)
+      require(!payload->Retire(result),
+              "failed preparation retired as complete");
+    else
+      require(payload->completion.seal(WMTSparseMappingHostRejected) &&
+                  payload->Retire(result) &&
+                  result.state == WMTSparseMappingNotIssued &&
+                  !result.possibly_issued_calls,
+              "rejected payload retirement");
+    payload.reset();
+    require(deaths() == 5, "zero-issue cleanup");
+    std::printf("PAYLOAD_ZERO prepare_failure=%u rejected=%u issued=0 "
+                "destroyed=%u drained=1\n",
+                prepare_failure, !prepare_failure, deaths());
+    public_device->Release();
+    return 0;
+  }
+  auto gate = metal.newSharedEvent(), cancel = metal.newSharedEvent(),
+       done = metal.newSharedEvent();
+  require(gate && cancel && done, "events");
+  auto barrier = sparse.prepareBarrierBeforeResourceState();
+  require(barrier != nullptr, "barrier");
+  sparse.waitForEvent(gate, 1);
+  require(barrier.submit(), "barrier submit");
+  for (unsigned i = 0; i < 3; ++i)
+    require(payload->completion.issueNext(), "issue");
+  require(payload->completion.seal(WMTSparseMappingHostAccepted), "seal");
+  sparse.signalEvent(done, 1);
+  cancel.signalValue(UINT64_MAX);
+  WMTSparseMappingResult result = {};
+  require(payload->completion.wait(40, result) &&
+              result.state == WMTSparseMappingSealedPending &&
+              result.event_value == 0 && result.possibly_issued_calls == 3 &&
+              !payload->Retire(result) && !deaths(),
+          "pending ownership");
+  std::printf(
+      "PAYLOAD_PENDING state=%u private=%llu cancel=%llu destroyed=%u\n",
+      result.state, (unsigned long long)result.event_value,
+      (unsigned long long)cancel.signaledValue(), deaths());
+  std::fflush(stdout);
+  if (release_pending) {
+    std::promise<void> entered;
+    auto started = entered.get_future();
+    auto release = std::async(std::launch::async,
+                              [owned = std::move(payload), &entered]() mutable {
+                                auto worker_pool = WMT::MakeAutoreleasePool();
+                                entered.set_value();
+                                owned.reset();
+                              });
+    require(started.wait_for(std::chrono::seconds(10)) ==
+                std::future_status::ready,
+            "release worker not started");
+    require(release.wait_for(std::chrono::milliseconds(40)) ==
+                    std::future_status::timeout &&
+                !deaths(),
+            "early payload final release");
+    gate.signalValue(1);
+    require(release.wait_for(std::chrono::seconds(10)) ==
+                std::future_status::ready,
+            "payload release drain");
+    release.get();
+    require(deaths() == 5, "payload destructor missed COM refs");
+  } else {
+    gate.signalValue(1);
+    require(payload->completion.wait(10000, result) &&
+                result.state == WMTSparseMappingGPUComplete &&
+                result.event_value == 1 && !deaths(),
+            "GPU boundary");
+    std::fill(out, out + 2 * words + guards, 0xa5a55a5au);
+    auto read = MTLCommandQueue_commandBuffer(classic.handle);
+    MTLCommandBuffer_encodeWaitForEvent(read, done.handle, 1);
+    enc = MTLCommandBuffer_blitCommandEncoder(read);
+    require(read && enc, "read objects");
+    blit(enc, source.handle, output.handle, 0);
+    blit(enc, dest.handle, output.handle, bytes);
+    MTLCommandEncoder_endEncoding(enc);
+    MTLCommandBuffer_commit(read);
+    MTLCommandBuffer_waitUntilCompleted(read);
+    require(MTLCommandBuffer_status(read) == WMTCommandBufferStatusCompleted,
+            "read failed");
+    unsigned bad = 0, guard = 0;
+    for (unsigned n = 0; n < 2; ++n)
+      for (uint64_t w = 0; w < words; ++w) {
+        unsigned h = n && w >= page_words;
+        auto want = pattern(h, w);
+        if (wrong_word && !n && w == words - 1)
+          want ^= 1;
+        bad += out[n * words + w] != want;
+      }
+    for (uint64_t w = 2 * words; w < 2 * words + guards; ++w)
+      guard += out[w] != 0xa5a55a5au;
+    failures = bad || guard;
+    std::printf("PAYLOAD_READBACK words=%llu bad=%u guard=%u destroyed=%u\n",
+                (unsigned long long)(2 * words), bad, guard, deaths());
+    std::fflush(stdout);
+    require(payload->Retire(result) && !payload->Retire(result) &&
+                payload->resources.empty() && payload->heaps.empty() &&
+                deaths() == 5,
+            "exact payload retirement");
+    payload.reset();
+  }
+  WMTSparseBarrierResult feedback = {};
+  require(barrier.wait(10000, feedback) &&
+              feedback.state == WMTSparseBarrierCompleted,
+          "feedback");
+  for (auto &n : destroyed)
+    require(n.load() == 1, "duplicate COM destruction");
+  std::printf("PAYLOAD_RESULT seed=%u release=%u words=%llu destroyed=%u "
+              "failures=%u drained=1\n",
+              seed, release_pending,
+              (unsigned long long)(release_pending ? 0 : 2 * words), deaths(),
+              failures);
+  std::fflush(stdout);
+  public_device->Release();
+  return failures ? 1 : 0;
+}
+
 int CheckSparseMappingCredential(const char *mode, uint32_t seed) {
   static_assert(sizeof(WMTSparseBufferBatchOperation) == 64);
   static_assert(offsetof(WMTSparseBufferBatchOperation, source) == 8);
@@ -1596,6 +1993,15 @@ int Run(const char *read_path, const char *write_path, UINT seed,
 }
 } // namespace
 int main(int argc, char **argv) {
+  if (argc == 3 && (!std::strcmp(argv[1], "payload-normal") ||
+                    !std::strcmp(argv[1], "payload-release") ||
+                    !std::strcmp(argv[1], "payload-native-only") ||
+                    !std::strcmp(argv[1], "payload-prepare-failure") ||
+                    !std::strcmp(argv[1], "payload-rejected") ||
+                    !std::strcmp(argv[1], "payload-wrong-word")))
+    return CheckSparseMappingPayload(
+        argv[1], static_cast<uint32_t>(std::strtoul(argv[2], nullptr, 0)));
+
   if (argc == 3 && (!std::strcmp(argv[1], "mapping-normal") ||
                     !std::strcmp(argv[1], "mapping-partial") ||
                     !std::strcmp(argv[1], "mapping-wrong-event") ||

@@ -1414,7 +1414,13 @@ if dxc_command.length() > 0
   )
 endif
 
-dx12_reserved_buffer = executable('dx12_reserved_buffer', 'dx12_reserved_buffer.cpp', dependencies: [ d3d12_dep ])
+dx12_reserved_buffer = executable('dx12_reserved_buffer', 'dx12_reserved_buffer.cpp',
+  include_directories: [include_directories('../../src/airconv'), include_directories('../../src/dxgi'),
+    include_directories('../../src/dxmt'), include_directories('../../src/winemetal'), include_directories('../../src/util')],
+  dependencies: [ d3d12_dep, winemetal_dep ],
+  # Native Windows default modes must not require the controlled WineMetal probe.
+  link_args: ['-Wl,--delayload=winemetal.dll', '-ldelayimp'],
+)
 dx12_reserved_texture = executable('dx12_reserved_texture', 'dx12_reserved_texture.cpp', dependencies: [ d3d12_dep ])
 dx12_reserved_texture_mip_array = executable('dx12_reserved_texture_mip_array', 'dx12_reserved_texture_mip_array.cpp', dependencies: [ d3d12_dep ])
 dx12_reserved_texture_packed = executable('dx12_reserved_texture_packed', 'dx12_reserved_texture_packed.cpp', dependencies: [ d3d12_dep ])

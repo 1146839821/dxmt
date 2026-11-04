@@ -60,6 +60,7 @@ namespace dxmt {
 
 class MTLD3D12Resource;
 class MTLD3D12CommandAllocator;
+struct D3D12SparseMappingPayload;
 
 // A placed resource owns a private reference to the heap that backs it.  Keep
 // this interface declaration before MTLD3D12Resource so resource
@@ -347,6 +348,38 @@ public:
   // view remains valid for the resource's lifetime; it does not retain a heap.
   // Append internal queries so existing resource virtual slots stay fixed.
   virtual const D3D12_HEAP_PROPERTIES *GetHeapPropertiesView() const = 0;
+
+  // Prepared ownership only; no mapping issue or logical state publication.
+  virtual HRESULT
+  CaptureTileMappingOwners(const std::vector<UINT> &tiles, D3D12SparseMappingPayload &payload) const {
+    return E_NOTIMPL;
+  }
+};
+
+// Transient submission input ownership, not another logical tile map. Declare
+// completion last so native final release drains before private COM refs die.
+// No automatic production queue caller until missing-event teardown is settled.
+struct D3D12SparseMappingPayload {
+  std::vector<Com<MTLD3D12Resource, false>> resources;
+  std::vector<Com<MTLD3D12Heap, false>> heaps;
+  WMT::Reference<WMT::SparseMappingCompletion> completion;
+
+  D3D12SparseMappingPayload() = default;
+  D3D12SparseMappingPayload(const D3D12SparseMappingPayload &) = delete;
+  D3D12SparseMappingPayload &operator=(const D3D12SparseMappingPayload &) = delete;
+
+  bool
+  Retire(WMTSparseMappingResult &result) {
+    if (!completion || !completion.wait(0, result) ||
+        (result.state != WMTSparseMappingNotIssued && result.state != WMTSparseMappingGPUComplete) ||
+        !completion.retireInputs())
+      return false;
+    // Native inputs retire first; no resource/tile/submission lock is held.
+    completion = nullptr;
+    resources.clear();
+    heaps.clear();
+    return true;
+  }
 };
 
 inline bool
