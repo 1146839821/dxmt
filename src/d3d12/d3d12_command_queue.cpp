@@ -604,7 +604,14 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
       return false;
     sparse_event_value_ = main_queue_signal;
     sparse_mapping_queue_.waitForEvent(sparse_event_, main_queue_signal);
-    sparse_mapping_queue_.barrierBeforeResourceState();
+    if (!sparse_mapping_queue_.tryBarrierBeforeResourceState()) {
+      // The main signal/mapping wait are already submitted. Close that pair
+      // before terminal cancellation, and never publish resource mappings.
+      EndSparseMapping(main_queue_signal);
+      ERR("D3D12 sparse ResourceState barrier submission failed");
+      device_->MarkDeviceRemoved(DXGI_ERROR_DEVICE_REMOVED);
+      return false;
+    }
     return true;
   }
 

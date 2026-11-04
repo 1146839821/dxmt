@@ -143,16 +143,12 @@ UINT Pattern(UINT seed, UINT page, UINT index) {
     return 0;
   return base ^ (seed * 0x9e3779b9u) ^ (index * 0x85ebca6bu);
 }
-int Run(const char *read_path, const char *write_path, UINT seed,
-        bool wrong_oracle, bool queue_failure) {
-  auto read_shader = ReadShader(read_path),
-       write_shader = ReadShader(write_path);
-  Owned<ID3D12Device> device;
-  Check("device", D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
-                                    IID_PPV_ARGS(&device.ptr)));
+void LogRuntimeIdentity() {
   for (auto [dll, symbol] :
        {std::pair{"d3d12.dll", "D3D12CreateDevice"},
-        std::pair{"winemetal.dll", "DXMTMSCGetCapabilities"}}) {
+        std::pair{"winemetal.dll", "DXMTMSCGetCapabilities"},
+        std::pair{"winemetal.dll",
+                  "SparseMappingQueue_tryBarrierBeforeResourceState"}}) {
     auto module = GetModuleHandleA(dll);
     auto code =
         module
@@ -171,6 +167,103 @@ int Run(const char *read_path, const char *write_path, UINT seed,
       std::printf("%02x", code[i]);
     std::printf("\n");
   }
+}
+int CheckSparseBarrierFailure(bool copy) {
+  Owned<ID3D12Device> device;
+  Check("device", D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+                                    IID_PPV_ARGS(&device.ptr)));
+  LogRuntimeIdentity();
+  if (!GetModuleHandleA("winemetal.dll"))
+    throw std::runtime_error("barrier fault requires DXMT");
+  char at[16] = {};
+  DWORD length = GetEnvironmentVariableA("DXMT_TEST_SPARSE_BARRIER_FAIL_AT", at,
+                                         sizeof(at));
+  if (length >= sizeof(at) ||
+      (length && std::strcmp(at, "1") && std::strcmp(at, "2")))
+    throw std::runtime_error("barrier fault requires call1 or call2");
+  const bool prior = length && !std::strcmp(at, "2");
+  Owned<ID3D12CommandQueue> queue;
+  D3D12_COMMAND_QUEUE_DESC q = {};
+  Check("fault queue",
+        device->CreateCommandQueue(&q, IID_PPV_ARGS(&queue.ptr)));
+  Owned<ID3D12Heap> heap;
+  D3D12_HEAP_DESC hd = {};
+  hd.SizeInBytes = 2 * TileBytes;
+  hd.Properties = Properties(D3D12_HEAP_TYPE_DEFAULT);
+  hd.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS;
+  Check("fault heap", device->CreateHeap(&hd, IID_PPV_ARGS(&heap.ptr)));
+  Owned<ID3D12Resource> source, destination;
+  auto desc = BufferDesc(2 * TileBytes);
+  Check("fault source",
+        device->CreateReservedResource(&desc, D3D12_RESOURCE_STATE_COMMON,
+                                       nullptr, IID_PPV_ARGS(&source.ptr)));
+  Check("fault destination", device->CreateReservedResource(
+                                 &desc, D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                 IID_PPV_ARGS(&destination.ptr)));
+  if (!source->GetGPUVirtualAddress() || !destination->GetGPUVirtualAddress())
+    return 77;
+  Owned<ID3D12Fence> fence;
+  Check("fault fence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                           IID_PPV_ARGS(&fence.ptr)));
+  D3D12_TILED_RESOURCE_COORDINATE coordinate = {};
+  D3D12_TILE_REGION_SIZE region = {};
+  region.NumTiles = 1;
+  UINT offset = 0;
+  if (prior) {
+    queue->UpdateTileMappings(source.ptr, 1, &coordinate, &region, heap.ptr, 1,
+                              nullptr, &offset, nullptr,
+                              D3D12_TILE_MAPPING_FLAG_NONE);
+    Check("healthy prior mapping", device->GetDeviceRemovedReason());
+    Check("prior signal", queue->Signal(fence.ptr, 1));
+    Wait(fence.ptr, 1);
+  }
+  struct PendingEvent {
+    HANDLE handle = CreateEventA(nullptr, FALSE, FALSE, nullptr);
+    ~PendingEvent() {
+      if (handle)
+        CloseHandle(handle);
+    }
+  } event;
+  if (!event.handle)
+    throw std::runtime_error("pending removal event");
+  Check("pending removal fence", fence->SetEventOnCompletion(2, event.handle));
+  if (copy) {
+    queue->CopyTileMappings(destination.ptr, &coordinate, source.ptr,
+                            &coordinate, &region, D3D12_TILE_MAPPING_FLAG_NONE);
+  } else {
+    offset = 1;
+    queue->UpdateTileMappings(source.ptr, 1, &coordinate, &region, heap.ptr, 1,
+                              nullptr, &offset, nullptr,
+                              D3D12_TILE_MAPPING_FLAG_NONE);
+  }
+  if (device->GetDeviceRemovedReason() != DXGI_ERROR_DEVICE_REMOVED) {
+    // A control may have issued a valid mapping after a real barrier. Drain
+    // it before reporting failure and releasing resources used by the GPU.
+    if (SUCCEEDED(device->GetDeviceRemovedReason())) {
+      Check("unexpected healthy queue drain", queue->Signal(fence.ptr, 3));
+      Wait(fence.ptr, 3);
+    }
+    throw std::runtime_error(
+        "barrier failure was not reported as device removal");
+  }
+  if (WaitForSingleObject(event.handle, 5000) != WAIT_OBJECT_0 ||
+      fence->GetCompletedValue() != UINT64_MAX)
+    throw std::runtime_error("barrier failure stranded pending fence");
+  if (queue->Signal(fence.ptr, 2) != DXGI_ERROR_DEVICE_REMOVED)
+    throw std::runtime_error("barrier failure allowed later submission");
+  std::cout << "SPARSE_BARRIER_FAILURE api=" << (copy ? "copy" : "update")
+            << " call=" << (prior ? 2 : 1)
+            << " removed=PASS fence=PASS signal_rejected=PASS\n";
+  return 0;
+}
+int Run(const char *read_path, const char *write_path, UINT seed,
+        bool wrong_oracle, bool queue_failure) {
+  auto read_shader = ReadShader(read_path),
+       write_shader = ReadShader(write_path);
+  Owned<ID3D12Device> device;
+  Check("device", D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+                                    IID_PPV_ARGS(&device.ptr)));
+  LogRuntimeIdentity();
   Owned<ID3D12CommandQueue> direct, compute;
   D3D12_COMMAND_QUEUE_DESC q = {};
   q.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
@@ -437,7 +530,7 @@ int Run(const char *read_path, const char *write_path, UINT seed,
 int main(int argc, char **argv) {
   if (argc != 3 && argc != 5 && argc != 6) {
     std::cerr << "usage: dx12_reserved_buffer <probe_read.cso> "
-                 "<probe_write.cso> [seed rounds [wrong-oracle|queue-init-failure]]\n";
+                 "<probe_write.cso> [seed rounds [wrong-oracle|queue-init-failure|barrier-update|barrier-copy]]\n";
     return 2;
   }
   try {
@@ -445,8 +538,13 @@ int main(int argc, char **argv) {
     const UINT rounds = argc >= 5 ? std::stoul(argv[4]) : 1;
     if (rounds == 0 || rounds > 64 ||
         (argc == 6 && std::strcmp(argv[5], "wrong-oracle") &&
-         std::strcmp(argv[5], "queue-init-failure")))
+         std::strcmp(argv[5], "queue-init-failure") && std::strcmp(argv[5], "barrier-update") &&
+         std::strcmp(argv[5], "barrier-copy")))
       return 2;
+    if (argc == 6 && (!std::strcmp(argv[5], "barrier-update") || !std::strcmp(argv[5], "barrier-copy"))) {
+      if (rounds != 1) return 2; // Fault counters and removal are process-local.
+      return CheckSparseBarrierFailure(!std::strcmp(argv[5], "barrier-copy"));
+    }
     for (UINT round = 0; round < rounds; ++round) {
       int result =
           Run(argv[1], argv[2], seed + round,

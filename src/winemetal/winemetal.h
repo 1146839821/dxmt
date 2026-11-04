@@ -2472,6 +2472,9 @@ WINEMETAL_API void SparseMappingQueue_waitForEvent(obj_handle_t queue, obj_handl
 
 WINEMETAL_API void SparseMappingQueue_barrierBeforeResourceState(obj_handle_t queue);
 
+// Checked additive entry: 1 means synchronous submission succeeded, 0 means failure.
+WINEMETAL_API uint32_t SparseMappingQueue_tryBarrierBeforeResourceState(obj_handle_t queue);
+
 WINEMETAL_API void SparseMappingQueue_updateBufferMappings(
     obj_handle_t queue, obj_handle_t buffer, obj_handle_t heap,
     const struct WMTUpdateSparseBufferMappingOperation *operations, uint64_t count

@@ -4107,6 +4107,26 @@ _SparseMappingQueue_waitForEvent(void *obj) {
   return STATUS_UNSUCCESSFUL;
 }
 
+// Opt-in synchronous fault injection. Never changes feature queries or normal status.
+static const char *
+sparse_barrier_failure_for_testing(void) {
+  const char *phase = getenv("DXMT_TEST_SPARSE_BARRIER_FAILURE");
+  if (!phase || (strcmp(phase, "command_buffer") && strcmp(phase, "allocator") && strcmp(phase, "encoder") &&
+                 strcmp(phase, "submitted")))
+    return NULL;
+  const char *at = getenv("DXMT_TEST_SPARSE_BARRIER_FAIL_AT");
+  char *end = NULL;
+  unsigned long long target = at ? strtoull(at, &end, 10) : 1;
+  if (!target || (at && (!end || *end)))
+    return NULL;
+  static atomic_uint_fast64_t calls = 0;
+  uint64_t call = atomic_fetch_add_explicit(&calls, 1, memory_order_relaxed) + 1;
+  if (call != target)
+    return NULL;
+  fprintf(stderr, "DXMT_TEST_SPARSE_BARRIER_FAILURE phase=%s call=%llu\n", phase, (unsigned long long)call);
+  return phase;
+}
+
 static NTSTATUS
 _SparseMappingQueue_barrierBeforeResourceState(void *obj) {
   struct unixcall_generic_obj_noret *params = obj;
@@ -4114,8 +4134,10 @@ _SparseMappingQueue_barrierBeforeResourceState(void *obj) {
   if (@available(macOS 26.0, *)) {
     id<MTL4CommandQueue> queue = (id<MTL4CommandQueue>)params->handle;
     id<MTLDevice> device = [queue device];
-    id<MTL4CommandBuffer> command_buffer = [device newCommandBuffer];
-    id<MTL4CommandAllocator> allocator = [device newCommandAllocator];
+    const char *failure = sparse_barrier_failure_for_testing();
+    id<MTL4CommandBuffer> command_buffer =
+        failure && !strcmp(failure, "command_buffer") ? nil : [device newCommandBuffer];
+    id<MTL4CommandAllocator> allocator = failure && !strcmp(failure, "allocator") ? nil : [device newCommandAllocator];
     if (!command_buffer || !allocator) {
       [command_buffer release];
       [allocator release];
@@ -4123,15 +4145,16 @@ _SparseMappingQueue_barrierBeforeResourceState(void *obj) {
     }
 
     [command_buffer beginCommandBufferWithAllocator:allocator];
-    id<MTL4ComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+    id<MTL4ComputeCommandEncoder> encoder =
+        failure && !strcmp(failure, "encoder") ? nil : [command_buffer computeCommandEncoder];
     if (!encoder) {
       [command_buffer release];
       [allocator release];
       return STATUS_UNSUCCESSFUL;
     }
     [encoder barrierAfterStages:MTLStageAll
-             beforeQueueStages:MTLStageResourceState
-             visibilityOptions:MTL4VisibilityOptionResourceAlias];
+              beforeQueueStages:MTLStageResourceState
+              visibilityOptions:MTL4VisibilityOptionResourceAlias];
     [encoder endEncoding];
     [command_buffer endCommandBuffer];
 
@@ -4139,7 +4162,9 @@ _SparseMappingQueue_barrierBeforeResourceState(void *obj) {
     [queue commit:command_buffers count:1];
     [command_buffer release];
     [allocator release];
-    return STATUS_SUCCESS;
+    // A real barrier exists in this test case, allowing an ignore-result control
+    // to proceed without issuing an unsynchronized mapping operation.
+    return failure && !strcmp(failure, "submitted") ? STATUS_UNSUCCESSFUL : STATUS_SUCCESS;
   }
 #endif
   return STATUS_UNSUCCESSFUL;

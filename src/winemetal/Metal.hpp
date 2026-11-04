@@ -928,6 +928,11 @@ public:
     SparseMappingQueue_barrierBeforeResourceState(handle);
   }
 
+  bool
+  tryBarrierBeforeResourceState() {
+    return SparseMappingQueue_tryBarrierBeforeResourceState(handle) != 0;
+  }
+
   void
   updateBufferMappings(
       Buffer buffer, Heap heap, const WMTUpdateSparseBufferMappingOperation *operations, uint64_t count

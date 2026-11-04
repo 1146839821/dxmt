@@ -1592,6 +1592,14 @@ SparseMappingQueue_barrierBeforeResourceState(obj_handle_t queue) {
   UNIX_CALL(unix_sparsemappingqueue_barrierbeforeresourcestate, &params);
 }
 
+WINEMETAL_API uint32_t
+SparseMappingQueue_tryBarrierBeforeResourceState(obj_handle_t queue) {
+  struct unixcall_generic_obj_noret params;
+  params.handle = queue;
+  // Failure is an expected result for this checked entry, including debug builds.
+  return WINE_UNIX_CALL(unix_sparsemappingqueue_barrierbeforeresourcestate, &params) == 0;
+}
+
 WINEMETAL_API void
 SparseMappingQueue_updateBufferMappings(
     obj_handle_t queue, obj_handle_t buffer, obj_handle_t heap,
