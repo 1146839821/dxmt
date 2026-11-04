@@ -66,6 +66,10 @@ and does not justify another unchanged local MS_LOAD or Submit timing matrix.
   self/capacity/retry/lifetime and MSC regressions pass within its documented
   scope. Public activation and general cross-queue ownership remain open. See
   [implementation delivery](sparse-handoff-retirement-audit.md#controlled-admission-time-buffer-mapping-resolution--delivery-2026-11-05).
+  A subsequent two-queue audit proves future CPU remaps can violate native
+  copy order, and later producers can leave logical/native mappings unequal.
+  Both remain OPEN; a deferred-issue Design Card uses the existing bounded FIFO.
+  See [cross-queue audit](sparse-handoff-retirement-audit.md#cross-queue-mapping-publication-and-native-copy--n15-audit-2026-11-05).
 
 - [x] N09 typed-buffer format admission rejects unsupported native SRV/UAV
   formats before publication. See the 2026-10-27 slice below; BGRA SRV usage,
