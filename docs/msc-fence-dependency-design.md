@@ -2,8 +2,8 @@
 
 The N13 dependency audit is complete. Keep the current Vertex/PreRaster fence
 wait. Current residency records cannot prove that moving it to Fragment is safe.
-The next implementation slice should add a producer-to-vertex regression with
-an intervening unrelated compute encoder. This report does not implement a
+The producer-to-vertex regression now covers direct, transitive and split-list
+dependencies; its results are recorded below. This report does not implement a
 scheduling optimization or establish a performance gain.
 
 ## Design card — 2026-11-04
@@ -208,3 +208,151 @@ Commit only these two files using `docs(d3d12): ...`; preserve the user's
 `.gitignore` edit and do not push. The next recommended slice is the **CS→VB
 transitive-dependency regression**, extending the existing overlap C++/HLSL
 probe while preserving production scheduling. This design round stops here.
+
+## CS-to-VB regression — 2026-11-04
+
+**Design card:** Baseline `bb7dda451805fcfc919f7533dc6b1479e0cf1973`;
+extend the existing overlap probe, HLSL, Meson fixtures and runner. A compute
+shader writes per-vertex integer attributes into a DEFAULT UAV buffer; the
+ordinary MSC vertex stage fetches them through IA and forwards them to an
+R32_UINT target. Preserve UAV-to-VB transitions and exact changing-seed output.
+Test direct consumption, a single-list transitive chain separated by an
+unrelated copy, and two lists in one Execute call. The unrelated compute writes
+a distinct scratch buffer whose contents are independently checked. Inspect
+recorded encoder order to reject accidentally merged compute work. No CPU wait
+is allowed inside a workload. Reuse isolated build/Wine identity checks and
+API/shader validation, and require wrong-oracle controls to fail. Production
+scheduling/ABI/capabilities stay unchanged. Rollback removes only test/report
+changes. Done requires correct images, scratch output, encoder topology and
+preserved original texture-mode results; passing does not prove a relaxed
+schedule safe or demonstrate overlap.
+
+### Implementation and evidence
+
+This N13 test slice is complete. The branch remains `feat/d3d12`; before this
+slice it was 50 commits ahead / 0 behind the locally stored remote-tracking
+reference, which was not refreshed. The pre-existing `.gitignore` edit is
+excluded. No production file, public capability or runtime Fence policy changes.
+
+| Changed file / source anchor | Purpose / evidence type |
+| --- | --- |
+| `tests/dx12/dx12_msc_execution_overlap.cpp:72`, `:403`, `:476`, `:510` | SOURCE_AUDIT: add three opt-in workloads, recorded encoder topology checks, exact image and scratch oracles. The producer and consumer have no intervening CPU wait. |
+| `tests/dx12/msc_execution_overlap.hlsl:16`, `:36`, `:61` | SOURCE_AUDIT: CS writes 6,144 uint attributes; ordinary MSC VS fetches `TEXCOORD0` using a 4-byte IA stride; PS forwards the flat checksum. Original texture fixture bytes remain identical. |
+| `tests/dx12/meson.build:280` | SOURCE_AUDIT: three opt-in SM6.0 VB fixtures extend existing targets. |
+| `tests/dx12/run_msc_execution_overlap.py:49`, `:81`, `:119`, `:147` | SOURCE_AUDIT: `--vertex-dependency` validates configuration, topology/list boundaries, scratch sequence, loaded runtime identity and validation state. It performs no VB performance comparison. |
+| `tests/dx12/test_msc_execution_overlap_trace.py:161` | LOCAL_PASS (synthetic log tests): reject missing configuration, merged compute, wrong list boundaries/counts and missing/duplicate/truncated scratch records. These tests are separate from GPU evidence. |
+| `docs/msc-fence-dependency-design.md`; `docs/D3D12_MSC_HLSL_PERFORMANCE_WORK.md` | Design, retained failures, results, limitations and next slice. |
+
+The specification and pinned Mullion evidence in the preceding audit remain
+the design inputs. No Mullion implementation was copied. `CR`, `CBCR` and
+`C|CR` describe recorded Compute/Blit/Render encoders; `|` marks the command-list
+boundary. They do not measure GPU execution intervals. The transitive workload
+copies an upload sentinel into a separate scratch resource between the two
+compute encoders. The second compute rewrites the scratch, whose entire 24,576
+bytes are independently checked after submission. The split-list case submits
+both lists through one `ExecuteCommandLists(2, ...)` call. Every successful
+image checks all 65,536 bytes of the 128×128 R32_UINT target against a changing
+seed. Negative controls flip one expected bit at sample 2, pixel (0,0).
+
+Environment: Apple M1 Max, macOS 27.2 `26B123`, Xcode 27.2 `27B52`, Metal
+`32023.922`, Wine 11.0, compiled MSC SDK API 4.0.3. The loaded MSC product
+version is not queried; its path and content hash identify this run. Build
+configuration follows the x64 release section of `.github/build_dxmt.sh`, with
+tests enabled and the already validated patched LLVM installation. The script's
+installation into the user's Wine/prefix is not executed. This slice performs
+an incremental full-default-target build in the isolated Metal 27.2 build tree;
+the earlier clean-build evidence retains its original scope.
+
+All paths below are under
+`/Users/zhangbo/Documents/Vibe-Codeding/dxmt-test/n95-capability-gate/`:
+
+- Build: `dxmt-metal272-identity-audit-20261104`.
+- LLVM: `llvm-current-patches-20261103/install`.
+- DXC build prefix: `prefix-dxc-build-cache-gpu-20261104`.
+- Runtime stage/prefix: `stage-msc-vb-dependency-20261104` and `prefix-msc-vb-dependency-20261104`.
+- Evidence: `result-msc-vb-dependency-20261104`; final batches are `vb-verified/` and `texture-verified/`.
+
+Reproduction commands from the repository root (use new output directories):
+
+```sh
+base=/Users/zhangbo/Documents/Vibe-Codeding/dxmt-test/n95-capability-gate
+export PATH="$PWD/toolchains/llvm-mingw-20260908-ucrt-macos-universal/bin:$PATH"
+export WINEPREFIX="$base/prefix-dxc-build-cache-gpu-20261104"
+meson compile -C "$base/dxmt-metal272-identity-audit-20261104" \
+  dx12_msc_execution_overlap \
+  dx12_msc_execution_overlap_vb_cs dx12_msc_execution_overlap_vb_vs \
+  dx12_msc_execution_overlap_vb_ps dx12_msc_execution_overlap_cs \
+  dx12_msc_execution_overlap_vs dx12_msc_execution_overlap_ps
+meson compile -C "$base/dxmt-metal272-identity-audit-20261104"
+python3 -B tests/dx12/run_msc_execution_overlap.py \
+  --stage "$base/stage-msc-vb-dependency-20261104" \
+  --prefix "$base/prefix-msc-vb-dependency-20261104" \
+  --build "$base/dxmt-metal272-identity-audit-20261104" \
+  --converter /usr/local/lib/libmetalirconverter.dylib \
+  --processes 2 --iterations 1024 --vertex-dependency --samples 10 \
+  --output "$base/result-msc-vb-dependency-20261104/vb-verified"
+# Original texture regression: omit --vertex-dependency, use --samples 2,
+# and use the separate texture-verified output directory.
+python3 -B tests/dx12/test_msc_execution_overlap_trace.py -v
+```
+
+Deployment uses final postprocessed build artifacts. For D3D12/DXGI native
+overrides only, replace the `Wine builtin DLL` marker at bytes 64:80 with spaces;
+the runner requires every other byte to match the build. WineMetal PE and Unix
+artifacts remain byte-identical to their build outputs. The runner also checks
+PE export bytes in the loaded process, native/builtin load modes, and the
+actual dyld paths for WineMetal Unix and MSC. `delivery-audit.json` rechecks
+those identities, stage/build pairing, all output sequences and fixture hashes.
+
+### Validation and delivery audit
+
+| Gate / check | Result | Evidence / limits |
+| --- | --- | --- |
+| Gate 0 / Gate 1 | PASS | Baseline, prior source/specification contract and scoped test design above. |
+| Gate 2 | PASS | Existing probe/fixtures/runner extended; no production scheduler change. |
+| x64 full default-target build and six shader fixtures | LOCAL_PASS | `build-manifest.json`, `build-final.log`, `full-build-result.json`, `delivery-build.log`. |
+| Three VB modes | LOCAL_PASS | 12 processes: three validated normal runs, three validated negative controls, and two repeat processes per mode. 90 successful full-image readbacks and 60 full-scratch readbacks, including warmups. All recorded topologies match. |
+| Original texture modes | LOCAL_PASS | Eight processes, 28 successful full-image readbacks including warmups, and two expected negative exits. Original CS/VS/PS DXIL SHA-256 values unchanged. |
+| Metal API / shader validation | LOCAL_PASS | Enabled and clean in all validation and negative-control processes; intentionally disabled in repeat/timing processes. |
+| Wrong-oracle controls | LOCAL_PASS | Five total expected exit-1 results, each at sample 2 / (0,0) with exactly one differing bit. They validate the oracle, not hardware race detection. |
+| Log/trace parser regression | LOCAL_PASS | `parser-tests.log`: 22 tests, including six dependency-log tests. |
+| Formatting / diff | PASS | `clang-format --dry-run --Werror` for the C++ probe; `git diff --check`. |
+| x86 / Windows native / Mullion runtime / new GPU trace | NOT_RUN | No execution or performance claim for these environments or traces. |
+| Gate 3 / Gate 4 | PASS within test scope | Final pairing and loaded identities checked; only seven slice files staged. Existing user edit preserved; commit locally, do not push. |
+| Scheduling relaxation / performance improvement | BLOCKED / UNVERIFIED | Full early-access/barrier/alias proof is still absent. Successful conservative runs do not close that gap. |
+
+Retained intermediate failures are not counted as passes: new target names
+initially required Meson regeneration; the first topology check rejected the
+allocator's `Null` sentinel before submit (`vertex/validation-vb-direct.log`),
+then was corrected; an early texture run rejected a pre-postprocessing stage
+after the full build rewrote PE headers. Final artifacts were redeployed and
+both complete batches rerun. `vertex-final/` is the earlier successful VB
+batch; the delivery conclusions use only `vb-verified/` and `texture-verified/`.
+
+Final MSC SHA-256 is
+`cc487a757f431c83483346c06a3ae8558910ecc510ce59b1e4f905d5d6d72bd4`.
+WineMetal Unix SHA-256 is
+`c9e20da27632144651fd744d01ddb26445800ea4baa1fbd36a0257188f1fbd8c`;
+WineMetal PE SHA-256 is
+`9a2f272f352ca831db8f9ec574f5d8faaa50f7c146b5b3856af57f4a7948d6f6`.
+The final executable is
+`e05bfb46114321af1ed08f8c8c665f8d362d1d852b69f5ce6a2adbc3a3e94c98`.
+Complete DLL/fixture hashes and commands are in the two `summary.json` files,
+`delivery-runs.json` and `delivery-audit.json`. The post-commit
+`delivery-manifest.json` records the resulting Git SHA and remaining worktree.
+
+Public Feature Level, Shader Model and Tier remain unchanged. Regression risk
+is limited to the opt-in tests and runner; the original texture path was
+rechecked. Recorded topology is intentionally coupled to DXMT internals and
+must be reviewed when encoder grouping changes. The flat checksum observes
+the vertex fetches contributing to the rasterized triangles, not an exhaustive
+oracle for every vertex lane. This is neither a general conformance test nor
+a proof that a relaxed schedule would fail on this GPU. The transitive trace
+must not be passed to the existing one-Compute/Render-pair analyzer.
+
+**Next recommended slice:** add a conservative early-access completeness
+record for ordinary MSC direct VB/IB bindings to the existing encoder-owned
+facts. Preserve it across draws/list boundaries and verify unknown paths select
+the existing wait. Keep production Fence stages unchanged until the broader
+barrier/alias/transitive proof and regressions are complete; do not introduce a
+second resource-state or residency owner. The overall MSC task remains open.

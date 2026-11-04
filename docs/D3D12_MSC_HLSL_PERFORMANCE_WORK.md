@@ -124,7 +124,7 @@ the detailed sections below preserve original measurements and limits.
 | Linear versus root layout | A native Metal control compared linear and explicit layouts with one SRV and one UAV, including reflection, readback and timing; D3D12 equivalence remains unproven. | Measure representative resource sets and D3D12 binding costs before any production change. |
 | GPU and OS targets | Apple6/Apple7 controlled conversion and GPU output were compared on M1 Max; target parameters are included in the conversion key. | Test OS targets and additional devices; do not promote minimum platform. |
 | Argument buffer/occupancy | Root and table residency is tracked in command list (`d3d12_command_list.cpp:949-975`). No register or occupancy counters captured. | Capture representative vertex/fragment/compute counters and CPU binding cost before changing ABI. |
-| Execution overlap | Exact readbacks and 50 timing samples per visibility passed. After correcting layout-depth handling and adding submission/execution-point checks, three fresh ALL/PIXEL trace pairs passed: 72 workloads, 216 point pairs, no observed Compute/Vertex overlap. The N13 audit found that residency deltas, direct bindings, transitive predecessors and alias/barrier obligations do not provide a complete early-access proof. MSC broad stages and the Vertex fence wait remain unchanged. | Add the CS→VB transitive-dependency regression before a scheduling experiment; see the [dependency contract](msc-fence-dependency-design.md) and [trace evidence](msc-trace-attribution.md). |
+| Execution overlap | Exact readbacks and 50 timing samples per visibility passed. After correcting layout-depth handling and adding submission/execution-point checks, three fresh ALL/PIXEL trace pairs passed: 72 workloads, 216 point pairs, no observed Compute/Vertex overlap. The N13 audit found that residency deltas, direct bindings, transitive predecessors and alias/barrier obligations do not provide a complete early-access proof. The direct/transitive/split-list CS→VB regression now passes under existing waits. | Next: complete encoder-owned early-access facts for ordinary MSC direct VB/IB bindings while preserving current Fence stages; see the [dependency contract and regression](msc-fence-dependency-design.md) and [trace evidence](msc-trace-attribution.md). |
 | Input DXIL | Controlled `-Od` and `-O3` pixel tests passed; embedded debug exposed an LLVM metadata incompatibility addressed by a separately built patched toolchain. | Expand shader coverage and deployment verification; do not recompile game shaders. |
 | Root validation | Unset, zero, bound-resource and DXIL validation were compared on one valid/missing-resource pair; DXIL validation also passed controlled HLSL GPU pixels. | Validate broader inputs and runtime versions before changing production flags. |
 | In-process and persistent cache | Process cache plus single-flight exists, disk cache explicitly disabled (`d3d12_shader_converter.cpp:199-213,228-237,1812-1837`). Map has no evident capacity bound. Key includes stage, source, root, targets, spaces, configuration and flags, but loaded-dylib content identity is not trusted for persistent use. | Measure hits, waits and memory growth; validate content identity, corruption recovery and opt-in before disk cache. Function specializations require separate keys. |
@@ -1658,3 +1658,30 @@ test. No stage relaxation is implemented or certified. Wider WAR/WAW, alias,
 volatile descriptor, indirect, replay and advanced-stage coverage is specified
 before future optimization. This documentation slice adds no runtime cost or
 capability; the broader MSC task remains incomplete.
+
+### CS-to-VB dependency regression — 2026-11-04
+
+At baseline `bb7dda45`, the existing overlap probe gained three opt-in cases:
+direct compute-to-VB consumption, a transitive chain through an unrelated
+copy/compute encoder, and two lists in one submission. Recorded chains must
+be `CR`, `CBCR` and `C|CR`; the last form explicitly checks the list boundary.
+Changing-seed exact image output and independent scratch readbacks establish
+correctness under the current production waits. They do not demonstrate safe
+stage relaxation or GPU overlap.
+
+The isolated x64 release full-target build passed using the patched LLVM and
+Metal 27.2 environment. Final VB validation passed 12 processes, 90 full-image
+readbacks and 60 scratch readbacks; original texture regression passed eight
+processes and 28 full-image readbacks. Counts include warmups. All five wrong
+oracle controls failed as expected. API/GPU validation, loaded PE/Unix/MSC
+identity and final stage/build pairing passed; 22 parser tests passed. Original
+texture DXIL hashes remained identical. Intermediate topology-sentinel and
+PE-postprocessing deployment failures were corrected and retained as evidence.
+
+The [detailed report](msc-fence-dependency-design.md#cs-to-vb-regression--2026-11-04)
+records commands, source anchors, hashes, Gate 0–4 and limitations. Results are
+under `dxmt-test/n95-capability-gate/result-msc-vb-dependency-20261104/` outside
+the repository. No x86, native Windows, Mullion runtime or new trace result is
+claimed. No production Fence, ABI or advertised capability changed. The next
+slice is encoder-owned early-access completeness for ordinary MSC direct VB/IB
+bindings; the overall MSC task remains incomplete.

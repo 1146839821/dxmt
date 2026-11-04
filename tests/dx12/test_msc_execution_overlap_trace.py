@@ -158,5 +158,59 @@ class TraceTest(unittest.TestCase):
         self.assertEqual(self.run_trace()['workloads'], baseline['workloads'])
 
 
+class DependencyLogTest(unittest.TestCase):
+    # Log-contract tests only. Real readbacks are exercised separately by Wine.
+    def log(self, workload='vb-transitive', wrong=False):
+        sequence = {'vb-direct': 'CR', 'vb-transitive': 'CBCR', 'vb-split-list': 'C|CR'}[workload]
+        lists = 2 if workload == 'vb-split-list' else 1
+        lines = ['OVERLAP_BACKEND msc visibility=all iterations=1024',
+                 'DEPENDENCY_CONFIG workload=' + workload]
+        for i in range(3):
+            lines.append(f'DEPENDENCY_ENCODERS sample={i} sequence={sequence} lists={lists}')
+            if wrong and i == 2:
+                lines.append('OVERLAP_MISMATCH sample=2 x=0 y=0 actual=42 expected=43')
+                break
+            if workload != 'vb-direct':
+                lines.append(f'DEPENDENCY_SCRATCH sample={i} exact_bytes=24576')
+            lines.append(f'OVERLAP_SAMPLE {i} gpu_ns=1000 encode_ms=1 submit_ms=1 exact_bytes=65536')
+        if not wrong:
+            lines.append('OVERLAP_PASS visibility=all samples=1 warmup=2')
+        return '\n'.join(lines) + '\n'
+
+    def parse(self, log, workload='vb-transitive', wrong=False):
+        from run_msc_execution_overlap import parse
+        return parse(log, 'all', 1, 1024, wrong, workload)
+
+    def test_all_dependency_modes(self):
+        for workload in ('vb-direct', 'vb-transitive', 'vb-split-list'):
+            with self.subTest(workload=workload):
+                self.assertEqual(len(self.parse(self.log(workload), workload)), 3)
+                self.assertEqual(len(self.parse(self.log(workload, True), workload, True)), 2)
+
+    def test_merged_compute_is_rejected(self):
+        with self.assertRaisesRegex(AssertionError, 'encoder'):
+            self.parse(self.log().replace('CBCR', 'CR'))
+
+    def test_wrong_list_count_is_rejected(self):
+        with self.assertRaisesRegex(AssertionError, 'encoder'):
+            self.parse(self.log('vb-split-list').replace('lists=2', 'lists=1'), 'vb-split-list')
+
+    def test_wrong_list_boundary_is_rejected(self):
+        with self.assertRaisesRegex(AssertionError, 'encoder'):
+            self.parse(self.log('vb-split-list').replace('C|CR', 'CC|R'), 'vb-split-list')
+
+    def test_missing_or_duplicate_scratch_is_rejected(self):
+        line = 'DEPENDENCY_SCRATCH sample=1 exact_bytes=24576\n'
+        for replacement in ('', line + line, line.replace('24576', '4')):
+            with self.subTest(replacement=replacement), self.assertRaisesRegex(AssertionError, 'scratch'):
+                self.parse(self.log().replace(line, replacement))
+
+    def test_config_cannot_be_omitted_or_disguised(self):
+        with self.assertRaisesRegex(AssertionError, 'configuration'):
+            self.parse(self.log().replace('DEPENDENCY_CONFIG workload=vb-transitive\n', ''))
+        with self.assertRaisesRegex(AssertionError, 'unexpected dependency'):
+            self.parse(self.log(), 'texture')
+
+
 if __name__ == '__main__':
     unittest.main()

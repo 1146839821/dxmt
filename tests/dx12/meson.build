@@ -277,6 +277,14 @@ if dxc_command.length() > 0
         ['-E', stage + '_main', '-T', stage + '_6_0', '@INPUT@', '-Fo', '@OUTPUT@'],
       build_by_default: false,
     )
+    custom_target('dx12_msc_execution_overlap_vb_' + stage,
+      input: 'msc_execution_overlap.hlsl',
+      output: 'msc_execution_overlap_vb.' + stage + '.cso',
+      command: dxc_command + ['-D', 'VERTEX_INPUT=1'] +
+        (stage == 'cs' ? ['-D', 'COMPUTE=1'] : []) +
+        ['-E', stage + '_main', '-T', stage + '_6_0', '@INPUT@', '-Fo', '@OUTPUT@'],
+      build_by_default: false,
+    )
   endforeach
   custom_target('dx12_compute_sm6_fixture',
     input: 'compute_sm6.hlsl',
