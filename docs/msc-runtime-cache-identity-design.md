@@ -1,5 +1,12 @@
 # MSC runtime identity for persistent shader cache
 
+Current status at `a9cf396efcb591a1ed47e21e88f6219ff27dd60e`: the snapshot
+helper and V1 bridge already exist, including opt-in loader diagnostics.
+V1 still returns unavailable and the MSC disk-cache guard remains false.
+The sections below record successive experiments, not an unimplemented task
+list. See [the macOS 27.2 refresh](#macos-272-revalidation--2026-11-04) for
+current source evidence and remaining acceptance conditions.
+
 ## Gate 0: baseline and evidence
 
 At `2dfc8c30`, `DXMTMSCGetCapabilities` reports the `IR_VERSION_*` macros
@@ -212,8 +219,9 @@ persistent caching remains fail-closed.
 
 `src/winemetal/unix/msc_image_identity.{h,c}` extracts the pre-open, full-file
 hash, vnode comparison and revalidation logic into a candidate component.
-It is not linked to WineMetal or the MSC loader and cannot enable the persistent
-cache. Its open operation requires a regular readable file, hashes from a pinned
+It was initially standalone and is now linked into WineMetal for the opt-in
+loader diagnostic described below; it cannot enable the persistent cache.
+Its open operation requires a regular readable file, hashes from a pinned
 file descriptor with metadata checks on both sides, and leaves failures
 unavailable; its separate mapping and revalidation calls are exercised by
 `tests/airconv/test_msc_image_identity_component.py`.
@@ -466,3 +474,136 @@ are in `dxmt-test/n92-conversion-trace/results3`. The wrapper means this is
 not an uninstrumented converter; the log is process-wide, can interleave
 threads, does not cover unloads or in-place changes, and does not establish a
 dependency identity or atomic cache transaction. The cache guard is unchanged.
+
+## macOS 27.2 revalidation — 2026-11-04
+
+### Scope and design card
+
+- **Goal:** Resolve the earlier missing-Metal-toolchain build limitation and
+  distinguish the existing diagnostic from a usable persistent-cache identity.
+- **Baseline:** `feat/d3d12`, `a9cf396efcb591a1ed47e21e88f6219ff27dd60e`,
+  46 commits ahead of the locally stored `origin/feat/d3d12` reference. The
+  user's pre-existing `.gitignore` edit is excluded; no remote fetch or push
+  was performed for this validation slice.
+- **Evidence:** Current source paths below, fresh isolated build logs, explicit
+  x86_64/arm64 native probes, and paired x64 WineMetal runtime tests. Historical
+  macOS 27.0.1 observations above retain their original scope.
+- **Scope / boundary:** Documentation and two explanatory helper comments;
+  reuse the existing loader, V1 bridge and regression runners. No new identity
+  algorithm, bridge ABI, disk-cache access, shader policy or capability change.
+- **Plan:** Build current source with the existing candidate LLVM, compile all
+  Metal inputs normally, refresh identity controls on both architectures, then
+  verify a new Wine stage and prefix with API/shader validation.
+- **Risk / rollback:** The tests observe selected inputs and do not prove
+  lifetime immutability or all dependency bindings. Reverting this documentation
+  slice changes no runtime behavior. Existing user build and Wine installations
+  remain intact.
+- **Done:** Build and focused controls pass with retained commands, artifact
+  hashes and loaded-path evidence; unresolved cache gates stay explicit.
+
+### Current implementation
+
+| Evidence type | Source at the baseline | Confirmed behavior and limit |
+| --- | --- | --- |
+| SOURCE_AUDIT | `src/winemetal/unix/meson.build:5`; `src/winemetal/unix/metalirconverter.c:598` | The helper is linked and activated only by `DXMT_TEST_MSC_IDENTITY_SNAPSHOT=1`; pre-open requires an explicit absolute converter path. |
+| SOURCE_AUDIT | `src/winemetal/unix/msc_image_identity.c:40`, `:63`, `:80` | Pinned-file hash, mapping vnode comparison and revalidation exist. None guarantees unchanged mapped contents for a conversion's lifetime. |
+| SOURCE_AUDIT | `src/winemetal/unix/metalirconverter.c:347`, `:359`, `:371` | Every resolved required/optional API entry point is checked against the root mapping in diagnostic mode. Internal bindings and late loads are not enumerated. |
+| SOURCE_AUDIT | `src/winemetal/metalirconverter_thunks.h:135`; `src/winemetal/metalirconverter_thunks.c:37`; `src/winemetal/unix/winemetal_unix.c:2589` | V1 is a size/version/reserved-checked, pointer-free 48-byte request with a capability-bit guard. The Unix implementation clears the digest and reports unavailable. |
+| SOURCE_AUDIT | `src/d3d12/d3d12_shader_converter.cpp:208`, `:1870`, `:1918` | Persistent read and write are both disabled. The process-local cache is separate. |
+| SOURCE_AUDIT | `src/winemetal/unix/msc_image_epoch.c`; `src/winemetal/unix/meson.build:1` | The event counter remains a standalone experiment, not a WineMetal dependency or a cache transaction. |
+
+The installed Xcode SDK's `usr/include/mach-o/dyld.h:68` documents add/remove
+callbacks. `usr/include/mach-o/dyld_images.h:52` says the image array may be
+unavailable while being changed; `:164` declares `sharedCacheUUID`. These are
+image-event and process-metadata interfaces, not a guarantee of an immutable
+compiler/dependency closure. This slice changes no Microsoft D3D12 contract;
+Mullion and Windows GPU behavior are not substitutes for these Darwin loader
+observations and were not retested.
+
+### Fresh build and native results
+
+`LOCAL_PASS`: macOS 27.2 (26B123), Xcode 27.2 (27B52), Apple M1 Max.
+`xcodebuild -showComponent MetalToolchain` reports installed build 27B47,
+identifier `com.apple.dt.toolchain.Metal.32023.922.4`.
+`xcrun metal --version` reports 32023.922; `metallib` resolves within the same
+27.2 toolchain. Developer Documentation asset versions were user-reported;
+their catalog contents were not independently validated by this run.
+
+Under `/Users/zhangbo/Documents/Vibe-Codeding/dxmt-test/n95-capability-gate/`:
+
+- New build: `dxmt-metal272-identity-audit-20261104/`.
+- Existing patched LLVM: `llvm-current-patches-20261103/install/`.
+- Evidence: `result-msc-identity-refresh-20261104/`.
+- New isolated stage/prefix: `stage-msc-identity-refresh-20261104/` and
+  `prefix-msc-identity-refresh-20261104/`.
+
+Setup follows `.github/build_dxmt.sh`'s x64 release options, enabling NVAPI,
+NVNGX and D3D12, adding tests, and selecting the existing patched LLVM
+explicitly. `setup.log`, `build.log` and `build-manifest.json` record the exact
+commands and exit statuses. All 388 default build steps completed (exit 0),
+including seven real `xcrun metal` compilations and one `xcrun metallib` link.
+No AIR/metallib files were copied from another build and no generated Ninja
+rules were edited. The log also records 351 warning diagnostics.
+`llvm-metadata-selftest` passed
+the valid string record and both rejected variants. A final incremental build
+after the comment edits also passed. The x86 build was `NOT_RUN` this round.
+
+`native-results.json` contains all commands, architecture, exit status and
+output for eight existing runners on each of x86_64 and arm64: loaded-image,
+pinned-file, component, dependency, system-dependency, provider-override,
+image-epoch and real-conversion tests. All 16 passed; none skipped. Each
+launcher uses `/usr/bin/arch -<architecture> /usr/bin/python3`, verifies
+`platform.machine()`, and the runners pass that architecture to clang.
+
+Both architectures still load all five listed MSC system dependencies while
+their paths are unavailable as regular files. The observed shared-cache UUIDs
+were `c1c7d64c41c73219bb29a98228fb1d3e` (x86_64) and
+`b411828b445038e3973aafe7b7b5bef5` (arm64), different from the historical
+27.0.1 observations. The isolated provider override still changes the resolved
+function without changing the queried path's cache membership.
+
+The converter full-file SHA-256 remains
+`cc487a757f431c83483346c06a3ae8558910ecc510ce59b1e4f905d5d6d72bd4`.
+Fragment DXIL SHA-256
+`f80ad457898b9997e86325eb8823eb784f66ca851895c62618b8f7adc80d9c0c`
+produced 5,244-byte metallibs on both architectures. The baseline event counter
+stayed unchanged during that conversion; deliberate late loading advanced it
+on both. Invalid DXIL was rejected. This is one fragment fixture, not all
+stages/configurations or proof that dependency behavior stayed constant.
+
+### Wine runtime results and remaining gates
+
+`LOCAL_PASS`: Wine 11.0 x64/Rosetta, eight diagnostic groups: stable snapshot,
+metadata change, concurrent initialization/queries, invalid-path fallback,
+missing symbols, dependency-provided symbols, mixed providers and descriptor
+cleanup. `diagnostic/summary.json` records them. The runner checks PE export
+bytes, paired PE/Unix hashes and the loaded Unix path. V1 remained unavailable.
+
+`LOCAL_PASS`: `conversion-trace/summary.json` records baseline and deliberate
+late-load runs. Each observed two successful conversions in its positive
+fragment run; the baseline had no dyld load messages within the marked windows,
+and the injected control had the expected image. Exact fragment readback and
+the wrong-expected-output control passed with Metal API/shader validation in
+both modes. The wrapper is test-only and the dyld log is process-wide; neither
+establishes dependency closure or catches all in-place mutations. The paired
+WineMetal Unix SHA-256 is
+`c9e20da27632144651fd744d01ddb26445800ea4baa1fbd36a0257188f1fbd8c`.
+
+| Persistent-cache acceptance gate | Current status | Required evidence before enabling reuse |
+| --- | --- | --- |
+| Identify all effective compiler providers | BLOCKED_BY_ARCHITECTURE | Define supported dependency/override policy and attest actual providers, architecture and shared-cache provenance; root hash or path membership alone is insufficient. |
+| Bind identity to conversion and cache access | UNVERIFIED | A specified transaction covering lookup, compilation and publication, with file mutation and load/unload controls. Event equality alone does not cover in-place writes. |
+| V1 usable digest and namespace migration | NOT_RUN | Only after identity is defensible: same identity hits, different runtime/dependency/configuration misses, old namespace is rejected, unavailable identity never reads or writes. |
+| Platform and shader coverage | NOT_RUN | Revalidate WOW64/mixed bridge pairs, other shader stages and concurrent cache operations for the eventual implementation. Current native tests do not establish arm64 Wine support. |
+
+**Gate 0/1:** Existing implementation and remaining gaps verified; no duplicate
+identity component is proposed. **Gate 2:** Documentation/comments only.
+**Gate 3:** Fresh build, native controls and isolated x64 runtime checks pass.
+**Gate 4:** No behavioral or public Feature Level/Shader Model/Tier change;
+persistent MSC caching stays disabled. GPU occupancy, bandwidth, execution
+overlap, representative performance/memory and RT work remain incomplete.
+
+**Next recommended slice:** Return to the specification's P1 work and establish
+a controlled GPU execution-overlap baseline with correct-output controls and
+explicitly reported unavailable counters. P2 identity research must not delay
+P0/P1 validation or be described as completed persistent caching.

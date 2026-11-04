@@ -1,6 +1,6 @@
 #pragma once
 
-// Candidate helper only: not yet connected to MSC or persistent caching.
+// Used by the opt-in MSC loader diagnostic; does not enable persistent caching.
 // File metadata is an observational check, not a lifetime immutability proof.
 // Initialize with DXMT_MSC_IMAGE_IDENTITY_INIT. Do not copy an open identity;
 // the caller must serialize every operation, including close, on each object.

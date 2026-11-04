@@ -1024,6 +1024,11 @@ using the new LLVM installation. The production toolchain was not replaced.
 
 ### Isolated DXMT and Wine run with the combined LLVM candidate
 
+Historical result before the Metal Toolchain upgrade. The missing-toolchain
+limitation below was subsequently resolved; see
+[Clean Metal 27.2 build and debug runtime](#clean-metal-272-build-and-debug-runtime)
+and the [current-HEAD revalidation](msc-runtime-cache-identity-design.md#macos-272-revalidation--2026-11-04).
+
 A separate `release`, x86_64 Wine cross-build was configured with D3D12 and
 tests enabled, using `llvm-combined-full-20261103/install` as its native LLVM
 path. The build completed and the WineMetal link command names this install's

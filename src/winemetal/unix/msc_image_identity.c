@@ -1,4 +1,4 @@
-// Candidate loaded-image file identity helper. Not wired into the MSC loader.
+// Loaded-image snapshot helper for opt-in MSC diagnostics, not persistent cache identity.
 #include "msc_image_identity.h"
 #include <CommonCrypto/CommonDigest.h>
 #include <errno.h>
