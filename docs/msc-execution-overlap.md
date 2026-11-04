@@ -1,9 +1,12 @@
 # MSC Compute-to-Fragment execution overlap
 
-The correctness and whole-workload timing baseline is complete. One ALL
-capture passed GPU-channel analysis; the PIXEL captures did not pass trace
-completeness/attribution checks, so the paired overlap comparison remains
-blocked. No production optimization or capability change is included.
+The correctness and whole-workload timing baseline is complete. The initial
+slice below accepted one ALL capture and rejected the PIXEL captures. The
+[subsequent attribution fix and paired results](msc-trace-attribution.md)
+resolved the layout-depth mistake and added submission/execution-point checks;
+three fresh ALL/PIXEL pairs passed with no observed Compute/Vertex overlap.
+The initial capture failures remain retained. No production optimization or
+capability change is included.
 
 ## Design card — 2026-11-04
 
@@ -167,15 +170,16 @@ trace the system under Rosetta translation` (`trace-record.log`). Launching
 the collector with `/usr/bin/arch -arm64 xcrun xctrace` succeeded while Wine
 remained x64. Capture runs are separate from the ordinary timing runs.
 
-The analyzer joins `metal-gpu-intervals` to
+The initial analyzer joined `metal-gpu-intervals` to
 `metal-application-encoders-list` by command-buffer and encoder IDs, filters
 the exact launched PID, checks the target arguments/exit and readback log,
 and ignores Blit encoders even when they execute on the Compute channel.
 It requires all expected workloads and Compute/Vertex/Fragment data, with
 exactly one Compute and one Render encoder for each workload. It unions
-intervals before computing intersections. This baseline accepts only Active
-depth-zero channel events; a nested event for a relevant encoder is explicitly
-unsupported, rather than silently discarded. Missing events cause failure.
+intervals before computing intersections. Its depth-zero restriction was later
+found to reject valid layout tracks; the attribution follow-up replaces that
+restriction with submission and execution-point cross-checks. Missing events
+continue to cause failure.
 
 `final-trace-all-analysis.json` contains 22 complete workloads (including two
 warmups), PID 72390. Every observed Compute/Vertex and Compute/Fragment
@@ -271,8 +275,15 @@ probe with `all|pixel 10 1024 normal trace`. Export each schema separately:
 /usr/bin/arch -arm64 xcrun xctrace export --input CAPTURE.trace \
   --xpath '/trace-toc/run[@number="1"]/data/table[@schema="metal-application-encoders-list"]' \
   --output ENCODERS.xml
+/usr/bin/arch -arm64 xcrun xctrace export --input CAPTURE.trace \
+  --xpath '/trace-toc/run[@number="1"]/data/table[@schema="metal-gpu-submission-to-command-buffer-id"]' \
+  --output SUBMISSIONS.xml
+/usr/bin/arch -arm64 xcrun xctrace export --input CAPTURE.trace \
+  --xpath '/trace-toc/run[@number="1"]/data/table[@schema="metal-gpu-execution-points"]' \
+  --output POINTS.xml
 python3 tests/dx12/analyze_msc_execution_overlap_trace.py \
   --toc TOC.xml --gpu GPU.xml --encoders ENCODERS.xml --stdout TARGET.log \
+  --submissions SUBMISSIONS.xml --points POINTS.xml \
   --visibility all --samples 10 --iterations 1024 --output NEW-analysis.json
 ```
 
@@ -280,7 +291,7 @@ Use absolute paths for xctrace output arguments. Run the second visibility
 separately. Analysis output must not already exist. The earlier 22-workload
 captures require `--samples 20`; arguments and readback count must match.
 
-## Delivery audit and next slice
+## Initial slice delivery audit and next slice
 
 | Gate | Result | Evidence / limitation |
 | --- | --- | --- |
@@ -321,3 +332,7 @@ Instruments' raw driver events, document supported schema semantics, and
 require complete ALL/PIXEL results before proposing a stage-scoped fence
 change. Preserve the current queue fence and resource-use declarations until
 that evidence and a separate dependency-safety design are available.
+
+That recommended measurement slice is now completed in
+[the attribution report](msc-trace-attribution.md). Its next step is a scoped
+dependency-safety design; the initial failures above remain historical evidence.

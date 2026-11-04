@@ -16,7 +16,7 @@ implementation reference.
 | HLSL extensions | `Metal_HLSL.inc` is vendored. Special resource spaces are disabled in ordinary conversion; reflection and specialized function bridge APIs exist. | `src/d3d12/d3d12_shader_converter.cpp:1402`, `src/winemetal/unix/metalirconverter.c:279`; existing tests exercise reflection/conversion, not pixel GPU output. |
 | Graphics/compute PSO | Existing ordinary pipelines load converted metallibs and create Metal functions and pipeline states. | `src/d3d12/d3d12_pipeline_graphics.cpp`, `src/d3d12/d3d12_pipeline_compute.cpp`; no independent specialization cache proof yet. |
 | Raytracing | Ordinary compiler path configures full intrinsic masks, 16-byte max attributes and visible functions; specialized RT paths take the supplied attribute size but still use full masks. | `src/winemetal/unix/metalirconverter.c:942`, `:1461`, `:1588`. Intrinsic collection availability alone is not sufficient to narrow a pipeline-wide mask. |
-| Performance | Controlled CPU/GPU baselines and one complete ALL-visibility execution trace exist; no current evidence establishes a safe production optimization for these options. | Paired ALL/PIXEL overlap remains blocked by trace completeness/attribution. GPU counters, occupancy, bandwidth and unsupported instrumentation must not be inferred. |
+| Performance | Controlled CPU/GPU baselines and three checked ALL/PIXEL trace pairs exist; no current evidence establishes a safe production optimization for these options. | No Compute/Vertex overlap was observed in the paired workload. Audit dependency safety before changing fence/residency stages. GPU counters, occupancy and bandwidth must not be inferred. |
 
 ## Execution plan
 
@@ -115,8 +115,8 @@ avoid simultaneous incompatible Wine installations sharing a prefix.
 
 ## Apple performance recommendations and decisions
 
-Status refreshed through baseline `f6c6d241` and the execution-overlap test
-slice; the detailed sections below preserve original measurements and limits.
+Status refreshed through baseline `2e7e7ef6` and the trace-attribution slice;
+the detailed sections below preserve original measurements and limits.
 
 | Topic | Current evidence and decision | Further work |
 | --- | --- | --- |
@@ -124,7 +124,7 @@ slice; the detailed sections below preserve original measurements and limits.
 | Linear versus root layout | A native Metal control compared linear and explicit layouts with one SRV and one UAV, including reflection, readback and timing; D3D12 equivalence remains unproven. | Measure representative resource sets and D3D12 binding costs before any production change. |
 | GPU and OS targets | Apple6/Apple7 controlled conversion and GPU output were compared on M1 Max; target parameters are included in the conversion key. | Test OS targets and additional devices; do not promote minimum platform. |
 | Argument buffer/occupancy | Root and table residency is tracked in command list (`d3d12_command_list.cpp:949-975`). No register or occupancy counters captured. | Capture representative vertex/fragment/compute counters and CPU binding cost before changing ABI. |
-| Execution overlap | Exact D3D12 Compute-to-Fragment readbacks and 50 timing samples per ALL/PIXEL visibility passed. One ALL System Trace contains 22 complete GPU-channel workloads with no observed Compute/Vertex overlap; PIXEL exports failed completeness/attribution checks. MSC broad stages (`d3d12_command_list.cpp:4620`) and the Vertex fence wait (`d3d12_command_queue.cpp:1382`) remain unchanged. | Establish reliable paired traces and dependency safety before narrowing residency or fence stages; see [the overlap report](msc-execution-overlap.md). |
+| Execution overlap | Exact readbacks and 50 timing samples per visibility passed. After correcting layout-depth handling and adding submission/execution-point checks, three fresh ALL/PIXEL trace pairs passed: 72 workloads, 216 point pairs, no observed Compute/Vertex overlap. Earlier incomplete/ambiguous captures remain rejected. MSC broad stages (`d3d12_command_list.cpp:4620`) and the Vertex fence wait (`d3d12_command_queue.cpp:1382`) remain unchanged. | Establish dependency safety before a stage-scoped scheduling experiment; see [the attribution report](msc-trace-attribution.md). |
 | Input DXIL | Controlled `-Od` and `-O3` pixel tests passed; embedded debug exposed an LLVM metadata incompatibility addressed by a separately built patched toolchain. | Expand shader coverage and deployment verification; do not recompile game shaders. |
 | Root validation | Unset, zero, bound-resource and DXIL validation were compared on one valid/missing-resource pair; DXIL validation also passed controlled HLSL GPU pixels. | Validate broader inputs and runtime versions before changing production flags. |
 | In-process and persistent cache | Process cache plus single-flight exists, disk cache explicitly disabled (`d3d12_shader_converter.cpp:199-213,228-237,1812-1837`). Map has no evident capacity bound. Key includes stage, source, root, targets, spaces, configuration and flags, but loaded-dylib content identity is not trusted for persistent use. | Measure hits, waits and memory growth; validate content identity, corruption recovery and opt-in before disk cache. Function specializations require separate keys. |
@@ -1604,7 +1604,7 @@ for identities, counts and limitations. Native Metal variant-cache counters,
 different physical GPUs and representative performance remain unmeasured;
 this adds controlled correctness evidence without changing production policy.
 
-The MSC Compute-to-Fragment baseline now includes an independent Vertex
+The first MSC Compute-to-Fragment baseline added an independent Vertex
 checksum, ALL/PIXEL table visibility controls, exact integer readback and
 separate CPU/GPU timing. Both Metal validation cases and wrong-oracle controls
 passed. Fifty ordinary samples per visibility produced GPU span medians of
@@ -1612,8 +1612,22 @@ passed. Fifty ordinary samples per visibility produced GPU span medians of
 established speedup. One ALL System Trace passed strict PID/encoder attribution
 for 22 workloads, with no observed Compute/Vertex overlap. Four subsequent
 captures were rejected for missing or unsupported nested/attributed events;
-the paired stage-overlap comparison remains blocked. See the
+the paired stage-overlap comparison was blocked in that slice. See the
 [execution-overlap report](msc-execution-overlap.md) for artifacts, failures,
-limits and reproduction. The next slice is a reliable paired trace protocol,
-before any stage-scoped residency or fence proposal. Production synchronization
-and advertised capabilities remain unchanged; the overall MSC task is ongoing.
+limits and reproduction. That slice recommended a reliable paired trace
+protocol before any stage-scoped residency or fence proposal.
+
+The follow-up corrected an analyzer mistake: Instruments' `event-depth` is a
+layout reservation ID, not a validity flag. It also found cross-process GPU
+submission ID collisions in the rejected data. The analyzer now requires
+submission mappings and execution-point exports, preserves nonzero tracks and
+rejects ambiguous/missing/mismatched events. Sixteen parser regressions pass;
+one formerly rejected ALL capture now passes, while three historical PIXEL
+captures still fail for concrete evidence problems. All three predeclared fresh
+ALL/PIXEL pairs passed exact readback, loaded-runtime identity and 216 point-pair
+checks over 72 workloads. Neither visibility showed Compute/Vertex overlap.
+This resolves the paired-measurement blocker without a performance or safety
+claim for relaxing the current fence. See [trace attribution](msc-trace-attribution.md)
+for the fixed capture schedule, all outcomes and limits. Next is a scoped
+dependency-safety design. Production synchronization and advertised capabilities
+remain unchanged; the overall MSC task is ongoing.
