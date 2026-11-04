@@ -1575,3 +1575,15 @@ cache correctness remain **NOT_RUN**. The MSC task remains incomplete. The
 next recommended slice is graphics/stage-in conversion-cache replay with GPU
 output verification. Commit only these three files, preserve the existing
 `.gitignore` edit, and do not push.
+
+MSC GS graphics conversion-cache replay now has separate GPU evidence for
+three input layouts: compact slot 0, padded sparse slot 3 and an offset-24
+color attribute. Six freshly created PSOs retained five converted entries;
+the warm phase performed no conversion or storage growth. Eighteen readbacks
+verified 3,072 bytes each, including command-list replay and submission-lifetime
+checks. Both a wrong reference and an intentionally wrong cached input layout
+failed at the expected final warm pixel. Baseline and output-growth controls
+also passed under Metal validation. See [graphics stage-in cache evidence](msc-single-flight-design.md#graphics-stage-in-cache-replay-results--2026-11-04)
+for identities, byte counts, reproduction and scope. Ordinary VS/PS vertex-fetch,
+TS/mesh, cross-device replay and representative performance still require
+separate evidence; no production code or advertised capability changed.

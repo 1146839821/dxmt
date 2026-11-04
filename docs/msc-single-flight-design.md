@@ -436,3 +436,112 @@ Constant specialization identity and other GPU/OS/MSC versions remain
 whole-process memory is explicitly unmeasured in GPU corpus mode. The next
 recommended slice is Function Constant specialization/PSO cache isolation,
 which is a separate requirement from ordinary DXIL conversion-cache reuse.
+
+## Graphics stage-in cache replay design — 2026-11-04
+
+- **Goal:** Verify cached VS/stage-in, PS and GS conversion results through real D3D12 PSO recreation and exact GPU readback.
+- **Baseline:** `e304a986`, `feat/d3d12`; the existing `.gitignore` edit remains outside the slice. Compute cache replay and test-owned Function Constant cache isolation have separate evidence. Ordinary VS/PS does not synthesize separate stage-in; MSC GS/TS does (`d3d12_pipeline_graphics.cpp:1091-1123,1185-1196`).
+- **Contract / evidence:** Microsoft `D3D12_INPUT_ELEMENT_DESC` defines `InputSlot` and `AlignedByteOffset`; the VBV supplies stride. Apple's installed MSC manual describes separate stage-in synthesis for emulation. `MakeMSCConversionCacheKey` includes the initialized input layout (`d3d12_shader_converter.cpp:338-345`), and cached values own both metallib vectors (`:1849-1855`). These are source observations, not GPU proof. Microsoft reference: https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ns-d3d12-d3d12_input_element_desc .
+- **Scope / boundary:** Extend the existing geometry differential probe and stage-in runner only. Three input layouts: slot 0/offset 8/stride 24; slot 3/offset 8/stride 32; slot 0/offset 24/stride 48. Keep shader bytes and root signature fixed. Recreate devices/roots/PSOs/resources for every case, first with new keys and then with cache hits.
+- **Design:** Preserve the canonical CPU vertex values and oracle; pack the upload bytes separately for each layout. Expect three VS/stage-in entries and shared PS/GS entries, five conversions total, then no warm conversion. Require nonempty stage-in storage and no warm storage growth. Reuse exact readback, closed-list replay, fenced reset, pending-reset rejection and release-before-completion checks.
+- **Negative controls:** On the final warm layout, either corrupt the expected output or select layout 0 while retaining layout 2's valid padded VB. The latter intentionally requests an existing wrong stage-in key; it must produce a pixel mismatch without invalid GPU addressing. Neither control corrupts the production cache.
+- **Test plan:** Build the executable and existing three SM6 fixtures; run all cases under Metal API/GPU validation in a paired isolated Wine stage, checking runtime identities and exact cache events; rerun the original stage-in baseline/growth tests and mutate recorded parser inputs.
+- **Non-scope:** TS, mesh, new shader semantics, native Windows/Mullion execution, production cache policy, persistent caching, performance conclusions or public capability promotion. Mullion uses a different shader backend and is not an MSC cache oracle. Broader input layouts remain unverified.
+- **Risks:** Sparse-slot handling could reveal an existing emulation bug. Tracing perturbs performance. Scope a discovered defect before changing runtime code.
+- **Rollback / done:** Remove the new opt-in mode and checks independently. Require successful GPU/counter oracles, intended negative failures, adjacent regressions, reviewed diff and a focused commit without pushing. Gate 0 and Gate 1 complete.
+
+## Graphics stage-in cache replay results — 2026-11-04
+
+**Gate 2:** `dx12_graphics_sm6.cpp` now accepts `--gs-cache-replay VS PS GS`
+and optional `--wrong-expected` / `--wrong-layout`. It calls the existing GS
+differential path six times with independently packed buffers. The original
+layout remains the default for existing callers. The optional layout modes
+change only the probe's input descriptors, upload packing and VBV. Shader
+sources and the production converter, cache key and pipeline code are unchanged.
+`run_msc_stage_in_retry.py --mode cache-replay` reuses the trace wrapper and
+shared cache-snapshot parser, checks each phase's events and GPU results, and
+saves identities/raw logs/snapshots to JSON. This report and the MSC work report
+record the design and evidence.
+
+**Gate 3 / LOCAL_PASS:** The probe/fixtures and complete existing candidate
+build succeeded. On Apple M1 Max, macOS 27.2, Wine 11.0, the positive process
+created six D3D12 graphics PSOs across three layouts and two phases. The first
+layout converted VS, PS and GS. The next two converted only VS/stage-in and
+reused PS/GS. All three warm cases used three cache hits each, with no extra
+conversion. Totals: five conversions/inserts, thirteen hits, five entries.
+
+All eighteen GPU readbacks checked 3,072 bytes exactly, including suppressed
+primitives and strip gaps. Each of six cases checked closed-list replay,
+fenced reset, pending allocator-reset rejection, and released application
+references while submission waited on a gate. Backend/reflection checks
+confirmed MSC geometry in every case. Metal API and shader validation were
+enabled; loaded PE export bytes, PE/Unix/MSC paths and stage/build contents
+were verified.
+
+| Control | Completed cases before mismatch | Intended final warm mismatch | Exit |
+| --- | ---: | --- | ---: |
+| Correct layouts | 6 | None | 0 |
+| Wrong reference | 5 | Pass 0, byte 0: actual 1, expected 0 | 1 |
+| Wrong cached layout | 5 | Pass 0, byte 1: actual 31, expected 79 | 1 |
+
+Both negative processes still recorded five conversions and thirteen hits.
+Their final case used existing cached data and failed at the expected pixel;
+all prior fifteen readbacks passed. This demonstrates the oracle's sensitivity
+to an incorrectly selected stage-in result; it is not a corruption of the cache
+implementation or proof against every possible cache collision.
+
+The final cache retained 81,120 bytes of stage metallibs and 9,876 bytes of
+stage-in metallibs, with equal vector capacities. The five mapped values
+occupied 45,480 bytes; entry-point character length/capacity were 35/75 and
+bucket count was 13. Warm cases did not change any snapshot field. These
+measurements exclude allocator/node overhead, GPU storage and PSO copies;
+they are not total memory consumption and do not justify a capacity policy.
+
+The original baseline and injected stage-in growth modes also passed their
+GPU/negative controls (three and four conversions respectively). Fourteen
+parser mutations rejected missing/wrong cases, selection, completions,
+readbacks, lifetime checks, extra conversion, missing status, zero stage-in
+storage, unexpected failure, empty reflection and missing-failure/false-success
+negative logs. Mutation results are saved in `parser-controls.json`.
+
+Runtime WineMetal Unix SHA-256:
+`c9e20da27632144651fd744d01ddb26445800ea4baa1fbd36a0257188f1fbd8c`.
+Actual MSC file `/usr/local/lib/libmetalirconverter.dylib` SHA-256:
+`cc487a757f431c83483346c06a3ae8558910ecc510ce59b1e4f905d5d6d72bd4`.
+The wrapper links that file and both paths are checked; this records content
+identity, not a runtime product-version query. Results are under the external
+`/Users/zhangbo/Documents/Vibe-Codeding/dxmt-test/n95-capability-gate/`:
+
+- `result-msc-graphics-cache-20261104/`
+- `result-msc-graphics-cache-baseline-20261104/`
+- `result-msc-graphics-cache-grow-20261104/`
+
+Reproduce from the repository root with fresh output directories:
+
+```sh
+base=/Users/zhangbo/Documents/Vibe-Codeding/dxmt-test/n95-capability-gate
+WINEPREFIX="$base/prefix-dxc-build-cache-gpu-20261104" meson compile \
+  -C "$base/dxmt-current-patches-20261103" dx12_graphics_sm6 \
+  dx12_geometry_differential_3_vs dx12_geometry_differential_3_ps \
+  dx12_geometry_differential_3_gs
+meson compile -C "$base/dxmt-current-patches-20261103"
+python3 tests/dx12/run_msc_stage_in_retry.py \
+  --stage "$base/stage-msc-graphics-cache-20261104" \
+  --prefix "$base/prefix-msc-space-fresh-20261104" \
+  --build "$base/dxmt-current-patches-20261103" \
+  --converter /usr/local/lib/libmetalirconverter.dylib \
+  --output "$base/NEW-graphics-cache-results" --mode cache-replay
+```
+
+Prepare the stage as documented in `DEVELOPMENT.md`, refreshing D3D12/DXGI,
+both WineMetal halves and the probe/three fixtures from the build. Keep the
+build-only Wine/DXC prefix separate from the compatible runtime prefix.
+Use `--mode baseline` or `--mode grow` with another output path for regressions.
+
+**Gate 4:** Scope and whitespace review passed. Only test code/runners and
+reports changed; no public capability, cache policy, production API or backend
+behavior changed. Ordinary VS/PS vertex-fetch cache replay, TS/mesh, different
+devices, arbitrary layouts, persistence and performance remain **NOT_RUN**.
+The next recommended slice is ordinary VS/PS cache-hit PSO recreation with
+dynamic vertex strides. The wider MSC task remains active. Commit this slice
+locally, retaining the pre-existing `.gitignore` change and without pushing.

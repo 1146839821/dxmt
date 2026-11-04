@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify an injected stage-in size increase through Wine and GPU readback."""
+"""Verify stage-in output retries or conversion-cache replay with GPU readback."""
 import argparse
 import hashlib
 import json
@@ -11,17 +11,69 @@ import sys
 
 sys.dont_write_bytecode = True
 from run_msc_lod_experiment import pe_export_bytes
+from run_msc_concurrent import parse_cache_trace
 
 
 def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def validate_cache_replay(log, negative=None):
+    expected = [(phase, layout) for phase in range(2) for layout in range(3)]
+    begins = [(int(a), int(b), int(c)) for a, b, c in re.findall(
+        r'^CACHE_GRAPHICS_BEGIN (\d+) (\d+) selected=(\d+)\s*$', log, re.M)]
+    ends = [(int(a), int(b)) for a, b in re.findall(r'^CACHE_GRAPHICS_END (\d+) (\d+)\s*$', log, re.M)]
+    if begins != [(a, b, 0 if negative == 'layout' and (a, b) == (1, 2) else b) for a, b in expected]:
+        raise AssertionError('unexpected graphics replay cases or selected layouts')
+    if ends != (expected[:-1] if negative else expected):
+        raise AssertionError('missing graphics replay completions')
+    snapshots = parse_cache_trace(log, entries=5, hits=13, misses=5)
+    segments = re.split(r'^CACHE_GRAPHICS_BEGIN [^\n]+\n', log, flags=re.M)[1:]
+    if len(segments) != 6:
+        raise AssertionError('unexpected graphics replay markers')
+    last_stage_in = 0
+    for segment, (phase, layout) in zip(segments, expected):
+        events = re.findall(r'MSC_CACHE event=(\w+)', segment)
+        wanted = (['miss', 'insert'] * 3 if layout == 0 else ['miss', 'insert', 'hit', 'hit']) if phase == 0 else ['hit'] * 3
+        calls = (3 if layout == 0 else 1) if phase == 0 else 0
+        if events != wanted or segment.count('DXMT_MSC_TRACE_BEGIN') != calls or segment.count('DXMT_MSC_TRACE_END ok') != calls:
+            raise AssertionError('graphics case did not use the expected conversion/cache path')
+        stage_in = [int(n) for n in re.findall(r'MSC_CACHE [^\r\n]*? stage_in_bytes=(\d+)', segment)]
+        if len(stage_in) != len(wanted) or (phase == 0 and stage_in[1] <= last_stage_in):
+            raise AssertionError('new vertex key did not retain stage-in bytecode')
+        if phase == 1 and any(n != last_stage_in for n in stage_in):
+            raise AssertionError('stage-in storage changed on warm replay')
+        last_stage_in = stage_in[-1]
+        wrong = bool(negative) and (phase, layout) == (1, 2)
+        rows = re.findall(r'^GS differential kind=triangle index=none pass=(\d) primitives=66 '
+                          r'draw_instances=2 exact_bytes=3072 passed\s*$', segment, re.M)
+        if rows != ([] if wrong else ['0', '1', '2']):
+            raise AssertionError('graphics readback sequence was incomplete')
+        if segment.count('GS replay/fenced reset/pending reset rejection/released refs passed') != int(not wrong):
+            raise AssertionError('graphics submission-lifetime checks missing')
+        failures = re.findall(r'^FAIL GS [^\r\n]*', segment, re.M)
+        mismatch = ('FAIL GS kind=triangle index=none pass=0 byte=1 got=31 expected=79' if negative == 'layout' else
+                    'FAIL GS kind=triangle index=none pass=0 byte=0 got=1 expected=0')
+        if failures != ([mismatch] if wrong else []):
+            raise AssertionError('wrong graphics output was not rejected at the intended byte')
+        reflection = re.findall(r'^GS MSC reflection vertex_bytes=(\d+) max_primitives=(\d+) instances=1\s*$', segment, re.M)
+        if len(reflection) != 1 or any(int(n) == 0 for n in reflection[0]):
+            raise AssertionError('MSC geometry backend/reflection not verified')
+    if log.count('MSC_CACHE_GRAPHICS layouts=3 phases=2 passed') != int(not negative):
+        raise AssertionError('graphics replay final status mismatch')
+    return {'layouts': [{'slot': 0, 'color_offset': 8, 'stride': 24},
+                        {'slot': 3, 'color_offset': 8, 'stride': 32},
+                        {'slot': 0, 'color_offset': 24, 'stride': 48}],
+            'negative_control': negative, 'completed_cases': len(ends),
+            'readbacks_per_case': 3, 'bytes_per_readback': 3072,
+            'cache_snapshots': snapshots}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("stage", "prefix", "build", "converter", "output"):
         parser.add_argument("--" + name, type=Path, required=True)
-    parser.add_argument("--mode", choices=("baseline", "grow", "metallib"), required=True)
+    parser.add_argument("--mode", choices=("baseline", "grow", "metallib", "cache-replay"), required=True)
     parser.add_argument("--large-metallib", type=Path)
     args = parser.parse_args()
     if (args.mode == "metallib") != bool(args.large_metallib):
@@ -44,6 +96,8 @@ def main():
             built = built[:64] + b" " * 16 + built[80:]
         if built != (stage / deployed).read_bytes():
             raise AssertionError(f"stage/build mismatch: {relative}")
+    if (stage / 'wine/lib/wine/x86_64-windows/winemetal.dll').read_bytes() != (stage / 'winemetal.dll').read_bytes():
+        raise AssertionError('WineMetal builtin/app-local mismatch')
     wrapper = output / "wrapper.dylib"
     subprocess.run(["xcrun", "clang", "-arch", "x86_64", "-dynamiclib", "-I", str(repository / "include"),
                     str(repository / "tests/dx12/msc_conversion_trace_wrapper.c"), str(converter),
@@ -56,6 +110,7 @@ def main():
                WINEDLLOVERRIDES="d3d12=n;dxgi=n;winemetal=b", WINEDEBUG="+loaddll",
                DXMT_METALIRCONVERTER_PATH=str(wrapper), DXMT_TEST_PRINT_LOADED_CODE="1",
                DXMT_SHADER_CACHE_PATH=str(output / "cache"), DXMT_LOG_PATH=str(output),
+               DXMT_MSC_CACHE_TRACE="1" if args.mode == "cache-replay" else "0", DXMT_LOG_LEVEL="info",
                MTL_DEBUG_LAYER="1", MTL_SHADER_VALIDATION="1", MTL_SHADER_VALIDATION_REPORT_TO_STDERR="1",
                DYLD_PRINT_LIBRARIES="1")
     env.pop("DXMT_TEST_TRACE_GROW_ENTRY", None)
@@ -79,9 +134,16 @@ def main():
     command = [str(stage / "wine/bin/wine"), "dx12_graphics_sm6.exe", "--gs-differential",
                "geometry_differential_3.vs.cso", "geometry_differential_3.ps.cso",
                "geometry_differential_3.gs.cso", "triangle", "none"]
+    if args.mode == "cache-replay":
+        command = command[:6]
+        command[2] = '--gs-cache-replay'
     results = []
-    for label, option, expected_exit in (("readback", [], 0), ("wrong", ["--wrong-expected"], 1)):
-        result = subprocess.run(command + option, cwd=stage, env=env, stdout=subprocess.PIPE,
+    cases = [("readback", [], 0), ("wrong", ["--wrong-expected"], 1)]
+    if args.mode == 'cache-replay':
+        cases.append(('wrong-layout', ['--wrong-layout'], 1))
+    for label, option, expected_exit in cases:
+        runenv = dict(env, DXMT_SHADER_CACHE_PATH=str(output / (label + '-cache')))
+        result = subprocess.run(command + option, cwd=stage, env=runenv, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, timeout=120)
         log = result.stdout.decode(errors="replace")
         (output / (label + ".log")).write_text(log)
@@ -95,9 +157,12 @@ def main():
                 str(stage / "wine/lib/wine/x86_64-unix/winemetal.so") not in log or str(wrapper) not in log or
                 str(converter) not in log or "Metal API Validation Enabled" not in log or
                 "Metal GPU Validation Enabled" not in log or
-                re.search(r"(?i)(metal (?:api|gpu|shader) validation error|validation error:|invalid metal usage:)", log)):
+                re.search(r"(?i)(metal (?:api|gpu|shader) validation (?:error|warning)|validation error:|invalid metal usage:|failed assertion)", log)):
             raise AssertionError(f"{label}: execution, identity or validation failed")
-        if label == "readback" and (log.count("exact_bytes=3072 passed") != 3 or "released refs passed" not in log):
+        replay = None
+        if args.mode == 'cache-replay':
+            replay = validate_cache_replay(log, None if label == 'readback' else 'layout' if label == 'wrong-layout' else 'reference')
+        elif label == "readback" and (log.count("exact_bytes=3072 passed") != 3 or "released refs passed" not in log):
             raise AssertionError("exact geometry readback did not pass")
         if label == "wrong" and "FAIL GS kind=triangle index=none pass=0 byte=0 got=1 expected=0" not in log:
             raise AssertionError("deliberately wrong readback was not rejected")
@@ -111,11 +176,17 @@ def main():
             raise AssertionError(f"{label}: expected compilation and retry count was not observed")
         results.append({"case": label, "exit": result.returncode, "stage_in_injected": injected,
                         "metallib_injected": small_injected,
-                        "successful_conversions": log.count("DXMT_MSC_TRACE_END ok")})
+                        "successful_conversions": log.count("DXMT_MSC_TRACE_END ok"),
+                        "cache_replay": replay})
     (output / "summary.json").write_text(json.dumps({"mode": args.mode, "converter_sha256": sha(converter),
         "wrapper_sha256": sha(wrapper), "artifacts": {path: sha(stage / path) for _, path in pairs},
         "fixtures": {name: sha(stage / name) for name in command[3:6]},
-        "large_metallib_sha256": sha(small) if args.mode == "metallib" else None, "results": results}, indent=2) + "\n")
+        "large_metallib_sha256": sha(small) if args.mode == "metallib" else None,
+        "command": command, "prefix": str(prefix), "build": str(build),
+        "hardware": subprocess.check_output(['sysctl', '-n', 'machdep.cpu.brand_string'], text=True).strip(),
+        "macos": subprocess.check_output(['sw_vers', '-productVersion'], text=True).strip(),
+        "limitations": "Controlled GS input layouts; no TS/mesh/cross-device/persistent-cache coverage or performance claim",
+        "results": results}, indent=2) + "\n")
     print("MSC stage-in", args.mode, "passed:", output)
 
 

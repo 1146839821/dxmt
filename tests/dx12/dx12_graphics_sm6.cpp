@@ -27,7 +27,16 @@ bool CheckHR(const char *name, HRESULT hr) {
 // Compare every integer pixel, including suppressed primitives and strip gaps.
 bool RunGeometryDifferential(const char *vs_path, const char *ps_path,
                              const char *gs_path, const char *kind,
-                             const char *index_mode, const char *option) {
+                             const char *index_mode, const char *option,
+                             unsigned layout_variant = 0,
+                             bool wrong_layout = false) {
+  if (layout_variant > 2 || (wrong_layout && layout_variant != 2))
+    return false;
+  const UINT input_slot = layout_variant == 1 ? 3 : 0;
+  const UINT color_offset = layout_variant == 2 ? 24 : 8;
+  const UINT vertex_stride = layout_variant == 2   ? 48
+                             : layout_variant == 1 ? 32
+                                                   : 24;
   D3D_PRIMITIVE_TOPOLOGY topology;
   UINT arity = 0, step = 0;
   bool strip = false;
@@ -238,9 +247,10 @@ bool RunGeometryDifferential(const char *vs_path, const char *ps_path,
   if (!CheckHR("GS root", hr))
     return false;
   const D3D12_INPUT_ELEMENT_DESC layout[] = {
-      {"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0,
+      {"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, input_slot, 0,
        D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
-      {"COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 8,
+      {"COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, input_slot,
+       wrong_layout ? 8u : color_offset,
        D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0}};
   D3D12_GRAPHICS_PIPELINE_STATE_DESC desc = {};
   desc.pRootSignature = o.root;
@@ -339,7 +349,7 @@ bool RunGeometryDifferential(const char *vs_path, const char *ps_path,
                                     state, nullptr, IID_PPV_ARGS(out)));
   };
   if (!buffer(D3D12_HEAP_TYPE_UPLOAD,
-              vertex_offset + vertices.size() * sizeof(Vertex),
+              vertex_offset + vertices.size() * vertex_stride,
               D3D12_RESOURCE_STATE_GENERIC_READ, &o.vb) ||
       !buffer(D3D12_HEAP_TYPE_UPLOAD, index_offset + (count + 2) * 4,
               D3D12_RESOURCE_STATE_GENERIC_READ, &o.ib) ||
@@ -364,8 +374,17 @@ bool RunGeometryDifferential(const char *vs_path, const char *ps_path,
   if (!CheckHR("GS VB map", o.vb->Map(0, nullptr, &mapped)))
     return false;
   memset(mapped, 0xcd, vertex_offset);
-  memcpy(static_cast<BYTE *>(mapped) + vertex_offset, vertices.data(),
-         vertices.size() * sizeof(Vertex));
+  // Pack independently of the PSO's selected layout. Zero padding makes the
+  // intentionally wrong cached layout a safe, deterministic pixel mismatch.
+  memset(static_cast<BYTE *>(mapped) + vertex_offset, 0,
+         vertices.size() * vertex_stride);
+  for (UINT i = 0; i < vertices.size(); ++i) {
+    auto *destination =
+        static_cast<BYTE *>(mapped) + vertex_offset + i * vertex_stride;
+    memcpy(destination, vertices[i].position, sizeof(vertices[i].position));
+    memcpy(destination + color_offset, vertices[i].color,
+           sizeof(vertices[i].color));
+  }
   o.vb->Unmap(0, nullptr);
   if (!CheckHR("GS IB map", o.ib->Map(0, nullptr, &mapped)))
     return false;
@@ -421,7 +440,7 @@ bool RunGeometryDifferential(const char *vs_path, const char *ps_path,
   o.device->CreateRenderTargetView(o.target, nullptr, rtv);
   const D3D12_VERTEX_BUFFER_VIEW vbv = {
       o.vb->GetGPUVirtualAddress() + vertex_offset,
-      UINT(vertices.size() * sizeof(Vertex)), sizeof(Vertex)};
+      UINT(vertices.size() * vertex_stride), vertex_stride};
   const D3D12_INDEX_BUFFER_VIEW ibv = {
       o.ib->GetGPUVirtualAddress() + index_offset,
       (count + 2) * (index32 ? 4u : 2u),
@@ -460,7 +479,7 @@ bool RunGeometryDifferential(const char *vs_path, const char *ps_path,
       o.list->RSSetViewports(1, &viewport);
       o.list->RSSetScissorRects(1, &scissor);
       o.list->IASetPrimitiveTopology(topology);
-      o.list->IASetVertexBuffers(0, 1, &vbv);
+      o.list->IASetVertexBuffers(input_slot, 1, &vbv);
       if (indexed)
         o.list->IASetIndexBuffer(&ibv);
       const UINT repetitions = performance ? 128 : 1;
@@ -663,6 +682,30 @@ bool RunGeometryDifferential(const char *vs_path, const char *ps_path,
   }
   std::cout << "GS replay/fenced reset/pending reset rejection/released refs "
                "passed\n";
+  return true;
+}
+
+bool RunGeometryCacheReplay(const char *vs_path, const char *ps_path,
+                            const char *gs_path, const char *option) {
+  const bool wrong_expected = option && !strcmp(option, "--wrong-expected");
+  const bool wrong_layout = option && !strcmp(option, "--wrong-layout");
+  if (option && !wrong_expected && !wrong_layout)
+    return false;
+  for (unsigned phase = 0; phase < 2; ++phase) {
+    for (unsigned layout = 0; layout < 3; ++layout) {
+      const bool last = phase == 1 && layout == 2;
+      std::cout << "CACHE_GRAPHICS_BEGIN " << phase << " " << layout
+                << " selected=" << (last && wrong_layout ? 0 : layout)
+                << std::endl;
+      if (!RunGeometryDifferential(
+              vs_path, ps_path, gs_path, "triangle", "none",
+              last && wrong_expected ? "--wrong-expected" : nullptr, layout,
+              last && wrong_layout))
+        return false;
+      std::cout << "CACHE_GRAPHICS_END " << phase << " " << layout << std::endl;
+    }
+  }
+  std::cout << "MSC_CACHE_GRAPHICS layouts=3 phases=2 passed\n";
   return true;
 }
 
@@ -1049,6 +1092,8 @@ int main(int argc, char **argv) {
       std::cout << "\n";
     }
   }
+  if ((argc == 5 || argc == 6) && !strcmp(argv[1], "--gs-cache-replay"))
+    return RunGeometryCacheReplay(argv[2], argv[3], argv[4], argc == 6 ? argv[5] : nullptr) ? 0 : 1;
   if (argc == 5 && !strcmp(argv[1], "--vertex-stride"))
     return RunVertexStride(argv[2], argv[3], argv[4]) ? 0 : 1;
   if ((argc == 7 || argc == 8) && !strcmp(argv[1], "--gs-differential"))
