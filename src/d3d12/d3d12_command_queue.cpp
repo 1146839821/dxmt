@@ -86,6 +86,7 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
   struct Submission {
     uint64_t serial = 0;
     WMT::Reference<WMT::CommandBuffer> command_buffer;
+    WMT::Reference<WMT::SparseBarrierCompletion> sparse_barrier;
     std::shared_ptr<D3D12CommandListSubmission> recording_lifetime;
     struct CommandList {
       uint64_t recording_id = 0;
@@ -150,6 +151,8 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
   uint64_t next_submission_serial_ = 1;
   uint64_t completed_submission_serial_ = 0;
   bool encoder_execution_status_ = false;
+  bool sparse_completion_trace_ = false;
+  bool hold_sparse_signal_for_testing_ = false;
   std::unordered_map<uint64_t, WMT::Reference<WMT::RenderPipelineState>> clear_psos_;
   std::unordered_map<uint64_t, WMT::Reference<WMT::RenderPipelineState>> clear_rtv_psos_;
   std::array<WMT::Reference<WMT::DepthStencilState>, 4> clear_dssos_;
@@ -484,6 +487,32 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
         }
       }
 
+      if (submission.sparse_barrier) {
+        if (sparse_completion_trace_) {
+          ERR("SPARSE_FIFO main_done serial=", submission.serial);
+          char name[80];
+          std::snprintf(name, sizeof(name), "DXMT.Test.SparseMainComplete.%lu", GetCurrentProcessId());
+          HANDLE observed = OpenEventA(EVENT_MODIFY_STATE, FALSE, name);
+          if (observed) {
+            SetEvent(observed);
+            CloseHandle(observed);
+          }
+        }
+        WMTSparseBarrierResult result = {};
+        // No queue locks: the native callback owns only its payload. This exact
+        // handoff must settle before later FIFO records publish success, even
+        // when their GPU events completed before CPU feedback was delivered.
+        const bool received = submission.sparse_barrier.wait(UINT64_MAX, result);
+        if (sparse_completion_trace_)
+          ERR("SPARSE_FIFO report serial=", submission.serial, " state=", result.state,
+              " actual=", result.native_feedback_received, " synthetic=", result.synthetic_error);
+        if (!received || result.state != WMTSparseBarrierCompleted) {
+          device_->MarkDeviceRemoved(DXGI_ERROR_DEVICE_REMOVED);
+          ERR("D3D12 sparse barrier submission ", submission.serial, " failed: state=", result.state,
+              " native_error=", result.native_error_code, " synthetic=", result.synthetic_error);
+        }
+      }
+
       // Publish before retiring the next submission on this queue. A wait on
       // another queue latches this value even if a later signal rewinds it.
       if (submission.diagnostic_signal_complete)
@@ -495,6 +524,8 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
       if (submission.wait_fence)
         submission.wait_fence->CancelWait(submission.fence_wait);
 
+      if (sparse_completion_trace_)
+        ERR("SPARSE_FIFO retire serial=", submission.serial, " main_status=", submission.command_buffer.status());
       for (auto &allocator : submission.allocators)
         allocator->MarkSubmissionCompleted();
 
@@ -534,6 +565,9 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
 
     submission.serial = next_submission_serial_++;
     submission.command_buffer.commit();
+    // Publish only after submit transitions the credential out of Prepared.
+    // Native feedback may be immediate but never calls back into PE queue state.
+    const bool sparse_submitted = !submission.sparse_barrier || submission.sparse_barrier.submit();
     if (pending_splits)
       submission_state_->pending_splits.swap(*pending_splits);
     submissions_[submission_tail_] = std::move(submission);
@@ -541,6 +575,12 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
     submission_count_++;
     submission_lock.unlock();
     submission_state_->ready.notify_one();
+    if (!sparse_submitted) {
+      // The main record is already committed/published. Preserve its native
+      // credential even for a test-reported host failure after a real commit.
+      ERR("D3D12 sparse ResourceState barrier submission failed");
+      device_->MarkDeviceRemoved(DXGI_ERROR_DEVICE_REMOVED);
+    }
     return true;
   }
 
@@ -590,6 +630,12 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
       return false;
 
     auto pool = WMT::MakeAutoreleasePool();
+    auto barrier = sparse_mapping_queue_.prepareBarrierBeforeResourceState();
+    if (!barrier) {
+      ERR("D3D12 sparse ResourceState barrier preparation failed");
+      device_->MarkDeviceRemoved(DXGI_ERROR_DEVICE_REMOVED);
+      return false;
+    }
     WMT::CommandBuffer cmdbuf;
     if (FAILED(NewCommandBuffer(cmdbuf)))
       return false;
@@ -600,16 +646,21 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
 
     Submission submission;
     submission.command_buffer = cmdbuf;
-    if (!CommitSubmissionLocked(submission))
-      return false;
-    sparse_event_value_ = main_queue_signal;
+    submission.sparse_barrier = std::move(barrier);
+    // Queue the native dependency before committing the classic handoff; the
+    // same admission owner submits the barrier before publishing its record.
     sparse_mapping_queue_.waitForEvent(sparse_event_, main_queue_signal);
-    if (!sparse_mapping_queue_.tryBarrierBeforeResourceState()) {
+    if (!CommitSubmissionLocked(submission)) {
+      // The native wait is queued but neither command buffer was admitted.
+      // Terminal cancellation releases it, without claiming successful work.
+      device_->MarkDeviceRemoved(DXGI_ERROR_DEVICE_REMOVED);
+      return false;
+    }
+    sparse_event_value_ = main_queue_signal;
+    if (FAILED(device_->GetDeviceRemovedReason())) {
       // The main signal/mapping wait are already submitted. Close that pair
       // before terminal cancellation, and never publish resource mappings.
       EndSparseMapping(main_queue_signal);
-      ERR("D3D12 sparse ResourceState barrier submission failed");
-      device_->MarkDeviceRemoved(DXGI_ERROR_DEVICE_REMOVED);
       return false;
     }
     return true;
@@ -618,7 +669,14 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
   void
   EndSparseMapping(uint64_t main_queue_signal) {
     const uint64_t mapping_signal = main_queue_signal + 1;
-    sparse_mapping_queue_.signalEvent(sparse_event_, mapping_signal);
+    if (hold_sparse_signal_for_testing_) {
+      // Opt-in cancellation oracle only: keep the mapping event unsignaled so
+      // terminal feedback must remove the device and release dependent work.
+      hold_sparse_signal_for_testing_ = false;
+      ERR("DXMT_TEST_SPARSE_HOLD_MAPPING_SIGNAL value=", mapping_signal);
+    } else {
+      sparse_mapping_queue_.signalEvent(sparse_event_, mapping_signal);
+    }
     sparse_event_value_ = mapping_signal;
   }
 
@@ -643,6 +701,20 @@ public:
     encoder_execution_status_ =
         GetEnvironmentVariableA("DXMT_METAL_ENCODER_EXECUTION_STATUS", encoder_status, sizeof(encoder_status)) &&
         encoder_status[0] != '0';
+
+    char sparse_trace[2] = {};
+    sparse_completion_trace_ =
+        GetEnvironmentVariableA("DXMT_TEST_SPARSE_COMPLETION_TRACE", sparse_trace, sizeof(sparse_trace)) &&
+        sparse_trace[0] != '0';
+
+    char hold_signal[2] = {}, synthetic_error[2] = {};
+    hold_sparse_signal_for_testing_ =
+        GetEnvironmentVariableA("DXMT_TEST_SPARSE_HOLD_MAPPING_SIGNAL", hold_signal, sizeof(hold_signal)) &&
+        hold_signal[0] == '1' &&
+        GetEnvironmentVariableA(
+            "DXMT_TEST_SPARSE_FEEDBACK_SYNTHETIC_ERROR", synthetic_error, sizeof(synthetic_error)
+        ) &&
+        synthetic_error[0] == '1';
 
     auto metal_device = device_->GetMTLDevice();
     queue_ = metal_device.newCommandQueue(kCommandQueueSize);

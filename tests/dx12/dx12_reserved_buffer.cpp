@@ -699,6 +699,174 @@ int CheckSparseMappingFailure(const char *mode) {
             << " removed=PASS fence=PASS signal_rejected=PASS\n";
   return 0;
 }
+int CheckSparseFIFO(const char *mode) {
+  const bool synthetic =
+      !std::strcmp(mode, "fifo-error") || !std::strcmp(mode, "fifo-cancel");
+  const bool reverse = !std::strcmp(mode, "fifo-reverse");
+  const bool perf = !std::strcmp(mode, "fifo-perf");
+  const bool wrong = !std::strcmp(mode, "fifo-wrong-oracle");
+  const bool submitted = !std::strcmp(mode, "fifo-submitted");
+  const bool prepare_failure = !std::strncmp(mode, "fifo-prepare-", 13);
+  Owned<ID3D12Device> device;
+  Check("FIFO device", D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+                                         IID_PPV_ARGS(&device.ptr)));
+  LogRuntimeIdentity();
+  if (!GetModuleHandleA("winemetal.dll"))
+    throw std::runtime_error("FIFO probe requires DXMT");
+  Owned<ID3D12CommandQueue> queue;
+  D3D12_COMMAND_QUEUE_DESC q = {};
+  Check("FIFO queue", device->CreateCommandQueue(&q, IID_PPV_ARGS(&queue.ptr)));
+  Owned<ID3D12Fence> fence;
+  Check("FIFO fence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                          IID_PPV_ARGS(&fence.ptr)));
+  // Establish an independently observed healthy prefix before enabling hooks.
+  Check("FIFO prefix", queue->Signal(fence.ptr, 1));
+  Wait(fence.ptr, 1);
+  if (fence->GetCompletedValue() != 1)
+    throw std::runtime_error("healthy prefix missing");
+  Owned<ID3D12Heap> heap;
+  D3D12_HEAP_DESC hd = {};
+  hd.SizeInBytes = TileBytes;
+  hd.Properties = Properties(D3D12_HEAP_TYPE_DEFAULT);
+  hd.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS;
+  Check("FIFO heap", device->CreateHeap(&hd, IID_PPV_ARGS(&heap.ptr)));
+  Owned<ID3D12Resource> sparse, upload, readback;
+  auto desc = BufferDesc(TileBytes);
+  Check("FIFO sparse",
+        device->CreateReservedResource(&desc, D3D12_RESOURCE_STATE_COPY_DEST,
+                                       nullptr, IID_PPV_ARGS(&sparse.ptr)));
+  auto make = [&](Owned<ID3D12Resource> &r, D3D12_HEAP_TYPE type,
+                  D3D12_RESOURCE_STATES state) {
+    auto props = Properties(type);
+    Check("FIFO committed", device->CreateCommittedResource(
+                                &props, D3D12_HEAP_FLAG_NONE, &desc, state,
+                                nullptr, IID_PPV_ARGS(&r.ptr)));
+  };
+  make(upload, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
+  make(readback, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
+  struct DrainQueueBeforeResources {
+    ID3D12CommandQueue *&queue;
+    ~DrainQueueBeforeResources() {
+      if (queue) {
+        queue->Release();
+        queue = nullptr;
+      }
+    }
+  } drain{queue.ptr};
+  UINT *mapped = nullptr;
+  Check("FIFO upload",
+        upload->Map(0, nullptr, reinterpret_cast<void **>(&mapped)));
+  for (UINT i = 0; i < TileBytes / 4; ++i)
+    mapped[i] = 0xbeef0000u ^ (i * 0x9e3779b9u);
+  upload->Unmap(0, nullptr);
+  struct Events {
+    HANDLE main = nullptr;
+    HANDLE completed = CreateEventA(nullptr, FALSE, FALSE, nullptr);
+    ~Events() {
+      if (main)
+        CloseHandle(main);
+      if (completed)
+        CloseHandle(completed);
+    }
+  } events;
+  char event_name[80];
+  std::snprintf(event_name, sizeof(event_name),
+                "DXMT.Test.SparseMainComplete.%lu", GetCurrentProcessId());
+  events.main = CreateEventA(nullptr, TRUE, FALSE, event_name);
+  if (!events.main || !events.completed)
+    throw std::runtime_error("FIFO events");
+  Check("FIFO register", fence->SetEventOnCompletion(2, events.completed));
+  // Native Unix controls must be inherited at process launch; changing the PE
+  // environment here does not update Unix getenv(). The runner records them.
+  D3D12_TILED_RESOURCE_COORDINATE coordinate = {};
+  D3D12_TILE_REGION_SIZE region = {};
+  region.NumTiles = 1;
+  UINT offset = 0;
+  LARGE_INTEGER frequency, start, finish;
+  QueryPerformanceFrequency(&frequency);
+  QueryPerformanceCounter(&start);
+  for (UINT i = 0; i < (perf ? 128u : 1u); ++i)
+    queue->UpdateTileMappings(sparse.ptr, 1, &coordinate, &region, heap.ptr, 1,
+                              nullptr, &offset, nullptr,
+                              D3D12_TILE_MAPPING_FLAG_NONE);
+  QueryPerformanceCounter(&finish);
+  if (perf)
+    std::printf("SPARSE_FIFO_COST mappings=128 cpu_us_per_mapping=%.6f "
+                "validation=external\n",
+                (finish.QuadPart - start.QuadPart) * 1e6 / frequency.QuadPart /
+                    128.0);
+  if (reverse)
+    queue->UpdateTileMappings(sparse.ptr, 1, &coordinate, &region, heap.ptr, 1,
+                              nullptr, &offset, nullptr,
+                              D3D12_TILE_MAPPING_FLAG_NONE);
+  if (submitted || prepare_failure) {
+    if (device->GetDeviceRemovedReason() != DXGI_ERROR_DEVICE_REMOVED ||
+        WaitForSingleObject(events.completed, 5000) != WAIT_OBJECT_0 ||
+        fence->GetCompletedValue() != UINT64_MAX ||
+        queue->Signal(fence.ptr, 2) != DXGI_ERROR_DEVICE_REMOVED)
+      throw std::runtime_error("FIFO synchronous failure contract");
+    queue.ptr->Release();
+    queue.ptr = nullptr; // Drain submitted work before resources retire.
+    std::cout << "SPARSE_FIFO_TEST mode=" << mode
+              << " prefix=1 removal=PASS signal_rejected=PASS drained=PASS\n";
+    return 0;
+  }
+  Owned<ID3D12CommandAllocator> allocator;
+  Owned<ID3D12GraphicsCommandList> list;
+  Check("FIFO allocator",
+        device->CreateCommandAllocator(q.Type, IID_PPV_ARGS(&allocator.ptr)));
+  Check("FIFO list",
+        device->CreateCommandList(0, q.Type, allocator.ptr, nullptr,
+                                  IID_PPV_ARGS(&list.ptr)));
+  list->CopyBufferRegion(sparse.ptr, 0, upload.ptr, 0, TileBytes);
+  Transition(list.ptr, sparse.ptr, D3D12_RESOURCE_STATE_COPY_DEST,
+             D3D12_RESOURCE_STATE_COPY_SOURCE);
+  list->CopyBufferRegion(readback.ptr, 0, sparse.ptr, 0, TileBytes);
+  Check("FIFO close", list->Close());
+  ID3D12CommandList *lists[] = {list.ptr};
+  queue->ExecuteCommandLists(1, lists);
+  Check("FIFO later signal", queue->Signal(fence.ptr, 2));
+  if (!perf && WaitForSingleObject(events.main, 10000) != WAIT_OBJECT_0)
+    throw std::runtime_error("FIFO main completion missing");
+  if (!perf && (WaitForSingleObject(events.completed, 25) != WAIT_TIMEOUT ||
+                fence->GetCompletedValue() != 1 ||
+                FAILED(device->GetDeviceRemovedReason())))
+    throw std::runtime_error("FIFO success published before report");
+  if (WaitForSingleObject(events.completed, 10000) != WAIT_OBJECT_0)
+    throw std::runtime_error("FIFO report timeout");
+  if (synthetic) {
+    if (device->GetDeviceRemovedReason() != DXGI_ERROR_DEVICE_REMOVED ||
+        fence->GetCompletedValue() != UINT64_MAX ||
+        queue->Signal(fence.ptr, 3) != DXGI_ERROR_DEVICE_REMOVED)
+      throw std::runtime_error("FIFO asynchronous removal contract");
+    // Queue destruction drains submitted native and main work before fixture
+    // resources retire.
+    queue.ptr->Release();
+    queue.ptr = nullptr;
+    std::cout << "SPARSE_FIFO_TEST mode=" << mode
+              << " prefix=1 pending=PASS removal=PASS signal_rejected=PASS "
+                 "drained=PASS\n";
+    return 0;
+  }
+  if (fence->GetCompletedValue() != 2 ||
+      FAILED(device->GetDeviceRemovedReason()))
+    throw std::runtime_error("FIFO success contract");
+  Check("FIFO readback",
+        readback->Map(0, nullptr, reinterpret_cast<void **>(&mapped)));
+  bool ok = true;
+  for (UINT i = 0; i < TileBytes / 4; ++i)
+    if (mapped[i] != ((0xbeef0000u ^ (i * 0x9e3779b9u)) ^
+                      (wrong && i == TileBytes / 4 - 1 ? 1u : 0u))) {
+      ok = false;
+      break;
+    }
+  readback->Unmap(0, nullptr);
+  if (!ok)
+    throw std::runtime_error("FIFO readback mismatch");
+  std::cout << "SPARSE_FIFO_TEST mode=" << mode
+            << " prefix=1 pending=PASS terminal=PASS words=16384\n";
+  return 0;
+}
 int Run(const char *read_path, const char *write_path, UINT seed,
         bool wrong_oracle, bool queue_failure) {
   auto read_shader = ReadShader(read_path),
@@ -972,18 +1140,33 @@ int Run(const char *read_path, const char *write_path, UINT seed,
 } // namespace
 int main(int argc, char **argv) {
   if (argc != 3 && argc != 5 && argc != 6) {
-    std::cerr << "usage: dx12_reserved_buffer <probe_read.cso> "
-                 "<probe_write.cso> [seed rounds "
-                 "[wrong-oracle|queue-init-failure|barrier-update|barrier-copy|"
-                 "buffer-update|buffer-unmap|buffer-copy|buffer-copy-null|"
-                 "buffer-self|buffer-self-null|buffer-self-mixed|buffer-self-"
-                 "multiheap|feedback-normal|feedback-delay|feedback-reverse|"
-                 "feedback-synthetic|feedback-submitted|feedback-release|"
-                 "feedback-prepare-command_buffer|feedback-prepare-allocator|"
-                 "feedback-prepare-encoder]]\n";
+    std::cerr
+        << "usage: dx12_reserved_buffer <probe_read.cso> "
+           "<probe_write.cso> [seed rounds "
+           "[wrong-oracle|queue-init-failure|barrier-update|barrier-copy|"
+           "buffer-update|buffer-unmap|buffer-copy|buffer-copy-null|"
+           "buffer-self|buffer-self-null|buffer-self-mixed|buffer-self-"
+           "multiheap|fifo-delay|fifo-reverse|fifo-error|fifo-cancel|fifo-perf|"
+           "fifo-wrong-oracle|fifo-submitted|fifo-prepare-command_buffer|"
+           "fifo-prepare-allocator|fifo-prepare-encoder|"
+           "feedback-normal|feedback-delay|feedback-reverse|"
+           "feedback-synthetic|feedback-submitted|feedback-release|"
+           "feedback-prepare-command_buffer|feedback-prepare-allocator|"
+           "feedback-prepare-encoder]]\n";
     return 2;
   }
   try {
+    if (argc == 6 && (!std::strcmp(argv[5], "fifo-delay") ||
+                      !std::strcmp(argv[5], "fifo-reverse") ||
+                      !std::strcmp(argv[5], "fifo-perf") ||
+                      !std::strcmp(argv[5], "fifo-error") ||
+                      !std::strcmp(argv[5], "fifo-cancel") ||
+                      !std::strcmp(argv[5], "fifo-wrong-oracle") ||
+                      !std::strcmp(argv[5], "fifo-submitted") ||
+                      !std::strcmp(argv[5], "fifo-prepare-command_buffer") ||
+                      !std::strcmp(argv[5], "fifo-prepare-allocator") ||
+                      !std::strcmp(argv[5], "fifo-prepare-encoder")))
+      return CheckSparseFIFO(argv[5]);
     const UINT seed = argc >= 5 ? std::stoul(argv[3]) : 0;
     const UINT rounds = argc >= 5 ? std::stoul(argv[4]) : 1;
     if (rounds == 0 || rounds > 64 ||

@@ -388,3 +388,101 @@ Rollback: focused additive commit. Test controls opt-in/bounded/separately label
 Commit seven source/test/report files with repository style, no push; original .gitignore unstaged, no staged/untracked residue. Resulting HEAD/tracking/hashes recorded post-commit in E4/delivery-manifest.json.
 
 Next one N13 slice: **attach credentials to the existing Submission/FIFO completion owner**, gate success/fence publication on required native terminal evidence; test benign delay/reverse/synthetic errors, submitted-host-failure cancellation and safe retirement. Preserve existing owners/waits, no second scheduler/state truth or capability promotion. Stop after this transport delivery; no automatic FIFO implementation in this round.
+
+## N13 sparse feedback → existing FIFO — Design Card, 2026-11-05
+
+- GOAL / BASELINE: close auxiliary barrier feedback-before-success publication at eee6030e; original .gitignore only. Prior turn is progress (committed bridge and real validation), not goal completion.
+- CURRENT PATH / EVIDENCE: BeginSparseMapping publishes classic handoff Submission, submits native barrier with only synchronous status; CompletionThread waits classic completion and can advance without native feedback. Existing ring32 and removal listeners remain authoritative.
+- INVARIANTS / SPEC: INV-03/04/08/11/12/14; Microsoft removed-fence UINT64_MAX and explicit queue synchronization; Apple per-commit feedback and retained allocator obligations; pinned Mullion per-work result/reference semantics only, no code copy.
+- PLAN A/B / SELECTION: poll a sticky queue error at future API calls versus bind one credential to its existing handoff Submission; choose the latter to cover late reports and no future API calls without monitor thread/second scheduler.
+- PROPOSED CHANGES: prepare before main admission; existing CommitSubmissionLocked commits main and submits attached credential before publishing/notifying the record. Existing completion thread waits main then that exact credential outside both queue locks, marks removal before advancing/publishing success, and retires only after native/main terminal evidence. Never expose Prepared as submitted or use a maximum callback sequence.
+- ERROR BOUNDARY: prepare failure removes before main admission; post-commit synchronous failure preserves the published record and real native lifetime. Existing removal listener releases sparse-event waits. Later submitted main work still waits actual terminal completion; timeout never grants success or retirement.
+- FILES / SCOPE: existing command_queue.cpp, existing reserved-buffer probe, existing bridge test controls only if required for deterministic cancellation, this report. No new src/d3d12 file, resource-state truth, callback into PE or ABI change.
+- PROOF / DoD: real delayed-report success fence stays pending; reverse reports do not skip lower work; synthetic error wakes registered fence as UINT64_MAX and rejects later Signal, with healthy prefix retained; submitted/prepared failure and safe retirement; wrong oracle and nearest buffer/texture/packed/D3D11 regressions, exact module identities.
+- COST: one existing credential per native mapping handoff, bounded by ring plus preparation; one native condition wait per handoff, unchanged GPU work/waits. Measure same-device baseline/candidate CPU mapping cost; distinguish deliberate latency and validation overhead.
+- NON-SCOPE / RISKS: mapping-operation error attribution, missing terminal callback reclamation, native GPU fault generation, cross-device full conformance. No Metal3/D3D11/backend/capability changes; missing callback remains explicit risk, never fabricated completion.
+- ROLLBACK: one focused FIFO/test/doc commit; preserve old bridge exports and current waits. Continuation authorizes this N13 slice, repository-style commit and no push; stop after delivery, broad goal remains active.
+
+## N13 sparse feedback FIFO — Delivery, 2026-11-05
+
+### 1. Task Summary / Gate outcome
+
+**Gate 0–4 complete for the per-handoff native barrier credential → existing Submission/FIFO path.** Success publication now waits the exact barrier's terminal feedback. Synthetic error propagation/cancellation and retained native/main lifetime are locally verified. This does not complete the broad sparse/MSC development goal or certify error reporting for separate native mapping operations.
+
+### 2. Baseline Evidence
+
+Baseline eee6030e7dd6347c690e8d877d33918872a206c5 on feat/d3d12; local origin reference 0 behind /14 ahead, not refreshed. Original .gitignore SHA256 764aac09922db4654ca6de63fd20cf014739d9292623eb979f448f38e609b759 preserved. Actual environment rechecked: M1 Max, macOS27.2/26B123, Xcode27.2/27B52, Metal32023.922; isolated staged Wine11.0 runtime. Repository toolchains/wine SDK executable reports8.17; do not conflate SDK tool version with tested runtime. Compiled MSC API4.0.3, runtime product version unknown.
+
+E5: /Users/zhangbo/Documents/Vibe-Codeding/dxmt-test/n95-capability-gate/result-sparse-feedback-fifo-20261105. Contains baseline.json/before-* copies, sources.json, pinned Mullion93de32b9145885ceb2e45be7d445e56d62499b3c source, Apple documentation JSON, freshly fetched Microsoft GetCompletedValue contract, exact build/link commands, paired stage files, loaded code/UUID evidence, every process environment and stdout/stderr, performance and ownership audits. Isolated prefix/stage/cache only; no shared Wine deployment, sudo, patch reapplication or push.
+
+### 3. Findings / Source Evidence
+
+| Finding | Source / evidence |
+| --- | --- |
+| Baseline handoff committed a native barrier without attaching its feedback to FIFO, allowing later public fence completion before report delivery. | Baseline queue:585–615/456–515; previous bridge commit supplies per-work credential. SOURCE_AUDIT. Independent differential probe with 1500ms report delay: baseline early=1/value1/exit1, candidate early=0/value1/exit0. LOCAL_PASS of distinguishing oracle; deliberately delayed report, not a naturally captured native error. |
+| Each published handoff now has a submitted or submit-failed credential; completion waits classic main then that exact native report outside both queue locks. | src/d3d12/d3d12_command_queue.cpp:86–90,460–543,560–589,626–667. SOURCE / GPU traces. |
+| Device-removal listener remains the cancellation authority. UINT64_MAX cancellation unblocks later sparse-event-dependent work; those submissions still wait real classic terminal state before retirement. | Existing SubmissionState:131–141 and completion:474–530. New cancellation test suppresses exactly one mapping signal only with explicit synthetic-error hook. LOCAL_PASS: serial3/4 retire main_status4 after error on serial2. No success is inferred from cancellation. |
+| Reverse native reports cannot complete an earlier handoff. | Two real credentials publish in reverse order; FIFO still waits lower report before later Signal. verified-reverse.log. LOCAL_PASS. |
+| Queue admission ring bounds held credentials. | 128 mapping calls with 200ms report delay, final real 16384-DWORD readback; peak33 native credentials (ring32 plus preparation), all destroyed. verified-ring-audit.json. LOCAL_PASS, not proof against missing callbacks. |
+| Mullion distinguishes GPU event completion from later CPU feedback using unsettled_ / SettleFeedback. | E5/mullion-queue.cpp:532–562; bridge feedback at5665–5673/wait5721–5737. SOURCE_AUDIT, not Mullion runtime observation. Share per-work semantics; do not copy its scheduler/unbounded unsettled registry. |
+
+### 4. Design Decisions
+
+Keep the existing queue admission/commit owner and bounded Submission. Prepare native objects before main admission. Queue existing sparse wait, commit classic handoff, submit its attached credential, then publish/notify the record. A failed submit still publishes the already committed main record so its real payload can drain. A prepare failure removes before admitting main work. Existing synchronous post-commit fault behavior is retained; no false early native retirement.
+
+The existing completion thread consumes exact per-work feedback after classic completion. Error invokes existing MarkDeviceRemoved before advancing FIFO; later fence Signal cannot succeed on the removed device. Healthy prefix is verified independently before the failing operation. Native callbacks never call PE; no new thread, scheduler, resource-state map, bridge ABI/export or GPU synchronization is added.
+
+Reject sticky future-API polling because there may be no next API and callback delivery may be late. Reject synchronous wait in mapping API because it can prevent the application from submitting the gate-opening work. Existing ring pressure may naturally block admission; that is measured and bounded, not a new application-side per-mapping wait.
+
+Two opt-in queue test controls: cached completion trace with process-specific observation event; hold one mapping signal only when explicitly paired with synthetic-error mode, exercising cancellation without unsafe GPU work. Neither changes advertised capabilities. The cancellation probe is process-bounded; absent native feedback can still hang drain, an explicit remaining limitation.
+
+### 5. Changed Files
+
+- src/d3d12/d3d12_command_queue.cpp:89 — own credential in existing Submission; completion460–543 waits/report/removal before FIFO advance; admission560–589 submits before record publication; Begin/End626–683 preserve event ordering and tested failure handling. Cached opt-in tracing/cancellation controls near700. No new src/d3d12 file.
+- tests/dx12/dx12_reserved_buffer.cpp:702–870 — extend existing probe with healthy prefix, delayed/reverse/error/cancel/prepared/submitted failure contracts, real nonuniform16384-DWORD readback and wrong-last-word control. fifo-perf repeats128 mappings and records CPU duration. Queue drains before fixture resource destruction, including exceptional exits; unique named event prevents cross-process collision. Existing test paths remain available.
+- docs/sparse-handoff-retirement-audit.md:392 onward — Design Card and this delivery. WineMetal source/ABI, shaders, resource backends and feature declarations unchanged.
+
+### 6. Validation Results
+
+| Check | Result and scope |
+| --- | --- |
+| x64 release complete default-target build with D3D12/tests/NVAPI/NVNGX | **PASS**, build-verified.log. Compiles actual production change and existing tests. |
+| x86 release script-default profile, D3D12/tests disabled | **PASS**, build-x86.log. Not x86 D3D12 execution; earlier unchanged raytracing SIZE_T narrowing remains documented. |
+| Final FIFO matrix | **8 success +1 expected negative**, verified-fifo.log: delay/reverse/error/cancel/submitted/three preparation failures and wrong readback. Metal API/shader validation enabled, actual paired modules. |
+| Adjacent regressions | **12 success +3 expected negatives**, verified-regressions.log: MSC reserved-buffer311296-word readback; wrong oracle; barrier factory/encoder/submitted faults at first and second call; fenced handoff retirement, wrong-tile/wrong-shader controls; packed-tail; D3D11 256-word hardware buffer copy. |
+| Ring saturation | **PASS**,128 delayed mappings and16384-word readback, peak33 credentials, all retired. Both validation modes on. |
+| Independent old/new fence oracle | **PASS of differential**, baseline expected exit1 early success; candidate exit0 waits report. Both validation modes on; identical external executable/dependencies. |
+| A/B cost fixture | **8 success**,4 baseline+4 candidate in ABBA repeated order,128 mappings/process and full16384-word readback. Validation disabled for timing only. Same test/Wine/MSC/Unix dependencies, exact per-run DLL hashes. |
+| Static/delivery audit | **PASS**, scoped clang-format, diff check, original .gitignore, exact code export bytes/path/Unix UUID, build-stage pairing, no WineMetal source changes, no new modules. E5/verified-audit.json and audit-verified.log. |
+| Native GPU failure generation, missing callback, physical OOM, all independent queues/device races | **NOT_RUN**; benign synthetic result proves transport/consumer behavior only, not NSError generation/recovery. |
+| Windows native / other GPU / Metal3 fallback runtime / full D3D11 rendering | **NOT_RUN**. Unavailable differential targets TARGET_DEVICE_NOT_AVAILABLE; do not label real M1 Max unavailable or Apple7 PlacementSparse unsupported. |
+
+Final acceptance aggregate:35 processes =30 successful exits and5 expected negative exits (includes A/B and differential; excludes earlier exploratory runs). Nine ordinary FIFO/performance readbacks plus ring etc. are recorded individually; do not combine heterogeneous checks into a fictitious conformance coverage percentage. Correctness runs use API+shader validation, timing runs deliberately do not.
+
+Reproduction, expand E5 to full path: python3 E5/fifo_runs.py; python3 E5/regressions.py; python3 E5/performance.py; python3 E5/audit.py. Ring and independent differential commands/source are retained externally with their process manifests. Existing stage/prefix remain isolated. Do not overwrite retained labels during a new run; use fresh output paths.
+
+Retained failed attempts: initial PE SetEnvironmentVariable did not update native Unix getenv(), so no delay was injected and pending oracle failed; controls moved to process-launch environment. Baseline compiler probe initially chose host GCC rather than LLVM-MinGW (-fblocks rejected), then passed with configured compiler PATH. One audit initially counted the additional ring process as a ninth-case batch member; label filter corrected without rerunning GPU work. Named-event initialization and failure cleanup were tightened during review, followed by final formatted-artifact matrix rerun. These are not native GPU faults, and earlier successful runs are supplemental rather than substituted for final acceptance.
+
+### 7. Performance / Capability Impact
+
+Final four-vs-four process CPU mapping medians: baseline275.985547µs, candidate290.699610µs (about+5.33%); ranges269.657031–293.285937 and260.965625–302.066406. Earlier same-method batches showed approximately+4.33% and+4.73% medians. Distributions overlap;128 calls include ring admission pressure, process-first initialization, native encoding and mapping, not isolated callback cost. No warm-driver-cache guarantee, no speedup/no-regression claim. GPU timeline cost and broader scene impact remain unmeasured.
+
+One credential reference per Submission adds8 bytes before alignment (32-slot ring plus one completion local), one condition wait per sparse handoff and existing bridge object/condition/retained command objects per active handoff. Classic nonsparse submissions add a nullable-field check, no new allocation/GPU wait. Cost is accepted for closing feedback-before-success semantics; optimization needs independent evidence and must preserve lifetime/order.
+
+Public FL/SM/Tiers unchanged. Metal3 shadow backing, Airconv/MSC, D3D11 implementation, WineMetal ABI and prior waits retained. Real M1 Max supports Apple7/Metal4/PlacementSparse; no hardware-block classification is introduced.
+
+### 8. Regression Risks / Remaining Blockers
+
+- **BACKEND_NOT_IMPLEMENTED:** attribution/propagation of asynchronous failures from separate void sparse mapping operations remains open; this credential describes the preceding ResourceState barrier workload only. Existing checked mapping APIs still provide synchronous status. Do not claim all sparse GPU errors are now covered.
+- **SPEC_UNVERIFIED:** missing native terminal callback teardown and safe reclamation; custom feedback-queue ownership cause; independent mapping-operation error observability. Indefinite wait preserves safety rather than inventing success, but can strand completion/admission/queue destruction.
+- **MSC_SEMANTIC_GAP:** no new gap established; shader/counter/descriptor/format and sparse conformance still require their own evidence.
+- **TARGET_DEVICE_NOT_AVAILABLE / NOT_RUN:** native Windows/other-GPU differential; broad Metal3/no-placement and D3D11 rendering coverage absent. Actual Apple7 target available.
+- Only owning queue FIFO gates its public completion. No new global scheduler/device-wide success guarantee is asserted; cross-queue progress depends on existing public fence synchronization. Controlled synthetic error is not natural device-loss reproduction.
+
+### 9. Git State / Rollback
+
+Focused commit includes only the existing queue, existing test and report. Preserve original unstaged .gitignore; no staged/untracked residue and no push. Resulting exact HEAD/status/tracking/source hashes recorded post-commit in E5/delivery-manifest.json. Rollback is this single focused commit; prior bridge and earlier evidence remain available.
+
+### 10. Next Recommended Slice
+
+One next N13 design/audit slice: **establish the native sparse mapping-operation completion/error contract** for update/copy/unmap independently of the preceding barrier. Check Apple SDK/documented guarantees and pinned Mullion ordering; design a benign per-operation proof using existing completion owner. Do not assume a later dummy command-buffer callback certifies prior void mapping errors, introduce a second scheduler, generate unsafe GPU faults or promote capabilities. Broad user goal stays active; stop this implementation round after commit.
