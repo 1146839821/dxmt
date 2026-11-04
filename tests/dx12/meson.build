@@ -50,6 +50,12 @@ test('dx12 msc single flight', dx12_msc_single_flight, timeout: 15)
 
 dx12_msc_concurrent = executable('dx12_msc_concurrent', 'dx12_msc_concurrent.cpp', dependencies: [d3d12_dep])
 
+dx12_msc_execution_overlap = executable('dx12_msc_execution_overlap', 'dx12_msc_execution_overlap.cpp',
+  include_directories: [include_directories('../../src/airconv'), include_directories('../../src/dxgi'),
+    include_directories('../../src/dxmt'), include_directories('../../src/winemetal'), include_directories('../../src/util')],
+  dependencies: [d3d12_dep],
+)
+
 dx12_airconv_compute_residency = executable('dx12_airconv_compute_residency', 'dx12_airconv_compute_residency.cpp',
   include_directories: [
     include_directories('../../src/airconv'),
@@ -263,6 +269,15 @@ else
 endif
 
 if dxc_command.length() > 0
+  foreach stage : ['cs', 'vs', 'ps']
+    custom_target('dx12_msc_execution_overlap_' + stage,
+      input: 'msc_execution_overlap.hlsl',
+      output: 'msc_execution_overlap.' + stage + '.cso',
+      command: dxc_command + (stage == 'cs' ? ['-D', 'COMPUTE=1'] : []) +
+        ['-E', stage + '_main', '-T', stage + '_6_0', '@INPUT@', '-Fo', '@OUTPUT@'],
+      build_by_default: false,
+    )
+  endforeach
   custom_target('dx12_compute_sm6_fixture',
     input: 'compute_sm6.hlsl',
     output: 'compute_sm6.cs.cso',
