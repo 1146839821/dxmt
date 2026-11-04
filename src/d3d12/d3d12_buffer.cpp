@@ -21,6 +21,9 @@
 #include "com/com_pointer.hpp"
 #include "dxmt_format.hpp"
 #include <limits>
+#include <atomic>
+#include <cstring>
+#include <new>
 #include <mutex>
 
 namespace dxmt {
@@ -28,6 +31,24 @@ namespace dxmt {
 namespace {
 
 constexpr uint64_t kD3D12TileSize = 64ull * 1024;
+
+static void
+FailBufferUpdatePreparationForTesting() {
+  char phase[16] = {}, at[16] = {};
+  const DWORD length = GetEnvironmentVariableA("DXMT_TEST_SPARSE_BUFFER_UPDATE_FAILURE", phase, sizeof(phase));
+  if (!length || length >= sizeof(phase) || std::strcmp(phase, "prepare"))
+    return;
+  const DWORD at_length = GetEnvironmentVariableA("DXMT_TEST_SPARSE_BUFFER_UPDATE_FAIL_AT", at, sizeof(at));
+  if (at_length >= sizeof(at) || (at_length && std::strcmp(at, "1") && std::strcmp(at, "2")))
+    return;
+  const uint64_t target = at_length && !std::strcmp(at, "2") ? 2 : 1;
+  static std::atomic<uint64_t> calls{0};
+  const auto call = calls.fetch_add(1, std::memory_order_relaxed) + 1;
+  if (call == target) {
+    ERR("DXMT_TEST_SPARSE_BUFFER_UPDATE_FAILURE phase=prepare call=", call);
+    throw std::bad_alloc();
+  }
+}
 
 void
 ClearResourceTiling(
@@ -528,7 +549,7 @@ public:
       const D3D12_TILE_REGION_SIZE *pResourceRegionSizes, ID3D12Heap *pHeap, UINT NumRanges,
       const D3D12_TILE_RANGE_FLAGS *pRangeFlags, const UINT *pHeapRangeStartOffsets, const UINT *pRangeTileCounts,
       D3D12_TILE_MAPPING_FLAGS Flags, WMT::SparseMappingQueue sparse_mapping_queue
-  ) override {
+  ) override try {
     if (!reserved_ || (Flags & ~D3D12_TILE_MAPPING_FLAG_NO_HAZARD))
       return E_INVALIDARG;
     if (!NumResourceRegions || !NumRanges)
@@ -603,6 +624,7 @@ public:
     if (sparse_mapping_queue) {
       if (!buffer || !buffer->current())
         return E_OUTOFMEMORY;
+      if (!updates.empty()) FailBufferUpdatePreparationForTesting();
       std::vector<WMTUpdateSparseBufferMappingOperation> mapping_operations;
       mapping_operations.reserve(updates.size());
       for (const auto &update : updates) {
@@ -612,16 +634,19 @@ public:
         operation.buffer_range.length = 1;
         operation.heap_offset = update.heap_tile;
       }
-      sparse_mapping_queue.updateBufferMappings(
-          buffer->current()->buffer(), pHeap ? static_cast<MTLD3D12Heap *>(pHeap)->GetMetalHeap() : WMT::Heap{},
-          mapping_operations.data(), mapping_operations.size()
-      );
+      if (!sparse_mapping_queue.tryUpdateBufferMappings(
+              buffer->current()->buffer(), pHeap ? static_cast<MTLD3D12Heap *>(pHeap)->GetMetalHeap() : WMT::Heap{},
+              mapping_operations.data(), mapping_operations.size()
+          ))
+        return DXGI_ERROR_DEVICE_REMOVED; // Do not publish a failed native update.
     }
 
     std::unique_lock<dxmt::mutex> lock(tile_mapping_mutex_);
     for (const auto &update : updates)
       tile_mappings_[update.resource_tile] = {update.heap, update.heap_tile};
     return S_OK;
+  } catch (const std::bad_alloc &) {
+    return E_OUTOFMEMORY;
   }
 
   HRESULT
