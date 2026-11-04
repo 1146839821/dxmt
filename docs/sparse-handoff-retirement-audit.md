@@ -778,3 +778,85 @@ One focused docs(d3d12) commit, no push, no fetch or shared Wine modifications; 
 ### 10. Next Recommended Slice
 
 Implement and execute one **controlled native mapping-completion credential prototype**, using existing WineMetal native owner conventions and E7's real sparse buffers. Prove allocation-before-issue, exact event separation, partial-issued-prefix sealing, single close and retained-input release under healthy completion with valid GPU work. Keep production queue/resource callers disconnected; keep ABI design additive and paired. Gate its GPU evidence and ownership audit before separate Submission integration. No-event production recovery stays explicitly unresolved; do not silently broaden this next slice to a scheduler or device teardown redesign.
+
+
+## N13 native mapping credential prototype — Execution card, 2026-11-05
+
+- GOAL / BASELINE: at9cd2713b execute prior Design Card's controlled native prototype. Gate0 source/owner baseline verified; Gate1 scope fixed below.
+- SCOPE: external MRC NSObject credential plus ARC real sparse-buffer harness, prepared native storage/retains/private event, healthy and host-failed partial-prefix issue, single sealing, gate/cancel/timeout observations, explicit release gate. Existing WineMetal native-owner conventions, no production caller or bridge ABI edits.
+- OWNERSHIP: credential retains queue, native input copies and named owner lease through actual GPU completion; fixture retains old/new heaps/residency and classic readbacks. Lease destruction is measured separately from final native/COM destruction; do not infer production residency correctness.
+- PROOF: actual64-KiB mapping/copy/remap/unmap/full-word readback, pending private event under closed gate/unrelated cancellation, prepared/issuing/zero/partial state checks, duplicate-close/reuse rejection, pre-issue preparation failures, changing seeds, wrong-event/wrong-word negative controls, ASan and Metal validation.
+- NON-SCOPE: production FIFO/resource integration, Metal3/D3D11/MSC changes, mapping NSError guarantee, lost-event recovery, unsafe GPU fault, Tier/FL promotion, new scheduler or repository test runner.
+- COST / ROLLBACK: one external credential/event per batch, operation storage/retains prepared before issue; source-controlled runtime cost zero. Revert focused report commit, retain external evidence. No performance claim.
+- DoD: genuine GPU completion before controlled cleanup, explicit partial-host-failure vs GPU-complete distinction, negative controls reject bad oracles, identities/commands/logs retained, focused commit/no push; overall goal active. A no-event timeout remains unknown and cannot justify release.
+
+## N13 native mapping credential prototype — Delivery, 2026-11-05
+
+### 1. Task Summary / Gate outcome
+
+Gate0 baseline/source contracts rechecked; Gate1 prior design narrowed to controlled native prototype; Gate2 external MRC NSObject credential and ARC GPU harness implemented; Gate3 final real GPU matrix PASS for the stated contract; Gate4 identity/scope audit PASS. No production WineMetal export, queue/resource caller, repository test or public capability changed. This is completed prototype evidence, not completed production mapping lifetime/error support. Overall goal remains active.
+
+### 2. Baseline Evidence
+
+Baseline feat/d3d12 at9cd2713be2bbddfec34a2c6a28d6754e00f96d31; local origin reference0 behind/3 ahead before this commit, not refreshed. Original .gitignore SHA256764aac09922db4654ca6de63fd20cf014739d9292623eb979f448f38e609b759 preserved. Rechecked macOS27.2/26B123, Xcode27.2/27B52, clang21.0.0/clang-2100.4.1.1, Metal32023.922/metalfe-32023.922.4. Actual DEVICE records M1 Max, Apple7=true, Apple8/9=false, Metal4=true, PlacementSparse=true,64-KiB page size. Native buffer sparse tier1 is a Metal property, not a D3D12 Tier declaration. Neither Wine nor MSC loaded in this executable.
+
+E9 = /Users/zhangbo/Documents/Vibe-Codeding/dxmt-test/n95-capability-gate/result-sparse-mapping-credential-prototype-20261105. Retains credential.h/credential.mm/credential_probe.mm, both final executables/objects, build.py/builds.json/logs, run_matrix.py/matrix.json, each process record/log, audit.json, environment, installed SDK headers, fresh official signal/feedback JSON and pinned Mullion queue bytes. E7 baseline_probe.mm remains unchanged; preformat/ preserves the initial passing matrix/binaries before input-copy oracle/formatting. E9 final records alone support totals below.
+
+### 3. Findings / exact evidence
+
+| Evidence type | Finding / source anchor |
+| --- | --- |
+| SOURCE_AUDIT | Existing native credential conventions own NSObject queue/condition/buffer/allocator before submit:src/winemetal/unix/winemetal_unix.c:4179–4251. Existing mapping thunks4405–4470 allocate per call; they are not changed or assumed equivalent to the prototype. Production ownership gap and COM residency-destructor findings in prior Design Card remain. |
+| SDK_CONTRACT | E9/MTL4CommandQueue.h:261–276 defines prior-GPU-work signal ordering,395–431 void buffer mapping/copy; MTL4CommitFeedback.h:19–40 is committed-buffer feedback. Fresh official JSON hashes match E8. A GPU event is completion evidence, not a mapping NSError channel. |
+| REFERENCE_SOURCE | Fresh pinned Mullion93de32b9145885ceb2e45be7d445e56d62499b3c queue SHA256641a21ad8fce6aa6f3f6f0cb02e0b0e3ae162a97a0eb7740d738c5f70ece6492 matches retained reference. Queue593–625 owns inputs through CPU mapping wait; no source copied, no Mullion runtime/fault claim. Microsoft void Update/Copy and overlap semantics remain those cited in prior Design Card. |
+| LOCAL_PASS / native | Preparation owns copied operations, source/destination/heap native refs and a separate owner lease before any mapping call:E9/credential.mm:30–77. Caller then overwrites its operation storage with a different valid mapping, yet actual GPU output follows the private original copy:credential_probe.mm:243–282. This proves copied operation data for this fixture. |
+| LOCAL_PASS / native | Prepared/Issuing cannot retire; SealedPending times out under a closed gate without becoming complete; unrelated cancellation at MAX does not change it:credential.mm:79–168; probe:278–362. Private credential event is never exported to harness or CPU-signaled. Separate GPU ordering/read-done events are used for classic readback. |
+| LOCAL_PASS / host injection | Partial mode prepares two different operations, issues exactly the first, records FailedAfterIssue, seals once, rejects second seal/new issue, drains real GPU work and reads only the prefix result:probe:254–302,419–431. Partial host outcome stays FailedAfterIssue after GPUComplete; no synthetic Metal error or false batch acceptance. |
+| LOCAL_PASS / lease boundary | External owner variable is dropped before issue; weak owner stays alive through Prepared/Issuing/Pending. After exact mapping and classic completion, retireInputs releases once, weak owner is nil and destruction count1:probe:263–282,335–343,410–431. Native fixture still owns heaps/resources/residency; this is owner-lease release, not proof of final COM destruction, physical page reclamation or production residency removal. |
+| LOCAL_PASS / pre-issue | Four deterministic preparation checkpoints reject before mapping; planned-but-rejected and empty accepted cases become NotIssued, with0 possible calls and one lease release:probe:433–486. Test injection is host preparation failure, not natural allocator OOM or GPU failure. |
+
+### 4. Design Decisions / what was actually implemented
+
+Prototype is a separate MRC translation unit to follow existing WineMetal retain/release conventions; ARC harness owns real GPU fixture and uses weak lifetime observation. One private event/queue/copy of native operations/owner lease per credential. No PE pointer, callback, global registry or scheduler. State and host outcome are separate: Prepared→Issuing→SealedPending→GPUComplete; zero issue→NotIssued. possible_calls increments before native invocation. Native operation storage and event are prepared before first issue. seal issues its event once, with no explicit wrapper array/event/owner allocation or copy after issue; driver/Foundation/lock internal allocations are not instrumented or ruled out. Native objects are retained and released using their actual +1 ownership; lease/input release occurs outside NSLock.
+
+Partial mode's omitted second operation would remap to different heap data. Exact readbacks therefore distinguish issuing the valid prefix from accidentally running both operations. Every checkpoint still uses a preceding real ResourceAlias→ResourceState barrier; its callback is separately labelled preceding-barrier-only. A separate GPU event orders classic readers after credential seal; it cannot CPU-complete the credential. Source map, copy to destination, remap one page, unmap checkpoint and remap two pages retain E7's exact seeded word/guard oracle. Unmap is not read until valid remap. Data pattern changes by seed/heap/page/word.
+
+No missing-event recovery is implemented: observe timeout leaves SealedPending, premature retire is rejected. Harness timeout uses isolated _Exit; credential premature deallocation has an isolated _Exit guard. These guards are not proposed production behavior and are not exercised as GPU-fault tests. Controlled runs always open gates/drain actual work before cleanup. Existing production signal/cancellation, native thunks, FIFO and mapping tables remain unchanged.
+
+### 5. Changed Files / reproducibility
+
+Only repository edit is this report's execution card/delivery. All three prototype source files, native build/run scripts and artifacts are external E9; no repository runner or src/d3d12 file added. Reproduce with python3 E9/build.py then python3 E9/run_matrix.py, expanding E9 to its absolute path and using a fresh evidence destination for new runs. Builds use xcrun clang++, C++20/blocks/O2/debug, deployment27.2; credential -fno-objc-arc, harness -fobjc-arc, Foundation/Metal. ASan adds -fsanitize=address -fno-omit-frame-pointer. Exact argv stored in builds.json. Matrix binds final source/header/binary SHA256 and actual loaded executable path/LC_UUID checked against dwarfdump. No runtime library copy/deployment or PE/Unix pairing is involved.
+
+### 6. Validation Results
+
+| Check | Result / exact scope |
+| --- | --- |
+| Final native release + ASan compile/link | PASS;6 compile/link commands exit0. Final sources formatted before these builds. |
+| Validated normal-a/b, partial-a/b | LOCAL_PASS;4 positive release processes,20 checkpoints,28 readbacks,917504 compared DWORDs. Two processes use host-failed partial prefixes at every checkpoint. |
+| ASan normal + partial | LOCAL_PASS;2 positive processes,10 checkpoints,14 readbacks,458752 DWORDs. detect_leaks=0:halt_on_error=1; no leak-test claim. |
+| Wrong expected word / wrong observed event | Expected exit1 each; exactly one mismatch or pending-oracle rejection per process. Both still complete all5 checkpoints/7 readbacks and drain GPU work before exit. No fake capabilities/driver faults. |
+| Final matrix total |8 processes =6 positive +2 expected negative;40 mapping checkpoints,56 full readbacks,1835008 DWORD comparisons including negative-process checks;32 preparation-failure checks and16 NotIssued cases.15 checkpoints use partial-host-failure mode across3 processes. Every completed credential has1 possible call/1 seal/1 owner-lease destruction; planned count2 in partial mode. |
+| API / GPU validation and identities | PASS; all8 launches set MTL_DEBUG_LAYER=1, MTL_SHADER_VALIDATION=1, MTL_SHADER_VALIDATION_REPORT_TO_STDERR=1 before device creation. Timestamped API/GPU enabled notices present; all other lines JSON evidence, no validation/ASan diagnostic. MTLDebugDevice/pipeline classes, actual images/path/UUID and noMSC retained. |
+| Source copy / state / cleanup | PASS final matrix for mutated caller input, pre-issue failure, timeout-pending, no early retirement, duplicate seal/issue rejection and one-time lease retirement under controlled valid work. Not a multithread stress or actual last-native-reference test. |
+| Complete DXMT build / PE/Wine/32-bit / D3D11/Metal3/MSC | NOT_RUN; production source/test/ABI unchanged. Prior build/runtime evidence is not rerun or recounted. |
+| Missing event / natural mapping error / driver hang / Windows/other GPU | NOT_RUN; safe benign ordering does not establish fault teardown or mapping error attribution. No invalid GPU input induced. |
+
+Initial source generation duplicated the partial member; compiler rejected it before GPU execution, fixed before first run. First validated-a GPU run passed but collector rejected timestamp-prefixed validation-enabled notices; original log retained, exact suffix recognition fixed. An initial full8-process matrix then passed. That initial matrix is supplemental in preformat/, excluded from final totals. Final matrix reruns formatted source plus the new private-input-copy oracle; no GPU failure hidden and no reuse of older binaries as final evidence.
+
+### 7. Capability / cost impact
+
+No FL/SM/Tier, Metal3 shadow backing, D3D11, Airconv/MSC or Fence policy change; actual M1 Max is available and no Apple7 hardware block is asserted. Production runtime cost zero in this round. Proposed mechanism costs one event/credential and copied input/native retains, NSLock per method and existing-worker polling/wait; no wrapper post-issue data allocation, no new worker, scheduler or whole-heap scan. Allocation counts/latency/GPU overlap unmeasured; deliberate5x40ms windows make process times unsuitable as benchmarks. No optimization or no-regression claim.
+
+### 8. Risks / remaining blockers
+
+BACKEND_NOT_IMPLEMENTED: actual WineMetal transport/paired ABI, resource-private-COM payload and bounded Submission handoff are still absent. The native lease demonstrates protocol feasibility, not production owner integration. Existing per-call Unix allocations must not survive an eventual prepare-all/issue/seal integration without a tested prefix-failure close path.
+
+SPEC_UNVERIFIED: void mapping asynchronous error attribution and no-event safe teardown. GPUComplete means the private event was observed after prior work; FailedAfterIssue remains host failure and mapping_error_coverage remains UNVERIFIED. Timeout/removal/cancellation does not authorize release or success. No native/PE self-retain leak/quarantine is proposed. TARGET_DEVICE_NOT_AVAILABLE applies to Windows/other GPUs only; M1 Max target works. No new MSC_SEMANTIC_GAP is demonstrated. Broader texture/packed-tail/self-overlap, cross-queue and last-COM-reference cases require future integration regression.
+
+### 9. Git State / Rollback
+
+Focused docs(d3d12) commit/no push; original .gitignore preserved and excluded from staging. E9/delivery-manifest.json records final SHA/status/tracking, file identities, scope audit and external artifacts. Revert focused report commit to roll back repository changes; external probe does not modify runtime/Wine prefix. Overall goal remains active.
+
+### 10. Next Recommended Slice
+
+Transport this controlled mapping credential through the **existing WineMetal boundary** with additive paired ABI and a controlled test caller, preserving production queue/resource callers disconnected. Validate PE↔Unix state/host-outcome separation, prepare-before-issue, partial-prefix close and real GPU completion/retains using the same oracle, paired runtime identities and applicable32/64-bit layout checks. This tests the actual boundary instead of repeating native-only evidence. Production Submission/resource integration remains a separate gate with COM residency ownership and unresolved no-event teardown explicitly addressed; do not broaden this next slice to device teardown or capability promotion.
