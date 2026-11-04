@@ -139,6 +139,19 @@ struct RenderEncoderStencilAttachmentData {
 };
 
 struct RenderEncoderData : EncoderData {
+  // IA coverage only, not a shader/resource/alias/barrier dependency proof.
+  // Concrete binding history stays in cmd_head; accumulate across every draw.
+  struct InputAssemblyUse {
+    uint32_t vertex_slots = 0;
+    bool indexed = false;
+    bool direct = false;
+    bool unclassified = false;
+
+    bool
+    complete() const {
+      return direct && !unclassified;
+    }
+  } input_assembly;
   // Recorded native PSO handles (including stride variants and depth state) must
   // survive PSO switches, closed-list replay and pending submissions.
   WMT::RenderPipelineState current_pipeline = {};

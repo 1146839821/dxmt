@@ -3170,8 +3170,8 @@ public:
 
   DrawCallStatus
   PreDraw(
-      bool SkipResourceBinding = false,
-      SM50_INDEX_BUFFER_FORMAT airconv_index_format = SM50_INDEX_BUFFER_FORMAT_NONE
+      bool SkipResourceBinding = false, SM50_INDEX_BUFFER_FORMAT airconv_index_format = SM50_INDEX_BUFFER_FORMAT_NONE,
+      bool direct_input_assembly = false
   ) {
     if (!pso_graphics_)
       return DrawCallStatus::Invalid;
@@ -3363,6 +3363,12 @@ public:
     // wait conservative for every draw recorded into it.
     auto *render = static_cast<RenderEncoderData *>(allocator_->encoder_current);
     render->use_geometry |= use_msc_mesh_stages || use_airconv_geometry;
+    if (!direct_input_assembly || !use_msc || use_msc_mesh_stages || use_airconv_geometry ||
+        pso_graphics_->stream_output || predication_buffer_) {
+      // Indirect/internal helpers, predication and other backends are not
+      // classified here. A later direct draw cannot make their encoder complete.
+      render->input_assembly.unclassified = true;
+    }
 
     if (dirty_state_.test(DirtyState::GraphicsPipelineState)) {
       UpdateGraphicsPSO(pso_graphics_.ptr(), airconv_index_format);
@@ -3647,7 +3653,7 @@ public:
       allocator_->InvalidateCurrentPass();
       predication_args_offset = offset;
     }
-    DrawCallStatus status = PreDraw();
+    DrawCallStatus status = PreDraw(false, SM50_INDEX_BUFFER_FORMAT_NONE, true);
     if (status == DrawCallStatus::Invalid) {
       if (trace_draw_id < 32)
         DEBUG("[DEBUG-DRAW] DrawInstanced rejected by PreDraw");
@@ -3721,6 +3727,7 @@ public:
       return;
     }
 
+    RecordDirectInputAssembly(false);
     auto &cmd_draw = allocator_->EncodeRenderCommand<wmtcmd_render_draw>();
     cmd_draw.type = WMTRenderCommandDraw;
     cmd_draw.primitive_type = primitive_type;
@@ -3803,7 +3810,7 @@ public:
     if (restart_adjacency && IndexCountPerInstance && InstanceCount &&
         !PrepareGeometryIndexPrefix(IndexCountPerInstance, StartIndexLocation, geometry_prefix, geometry_prefix_address))
       return;
-    DrawCallStatus status = PreDraw(false, to_airconv_index_format(index_type));
+    DrawCallStatus status = PreDraw(false, to_airconv_index_format(index_type), true);
     if (status == DrawCallStatus::Invalid) {
       if (trace_draw_indexed_id < 32)
         DEBUG("[DEBUG-DRAW] DrawIndexedInstanced rejected by PreDraw");
@@ -3892,6 +3899,7 @@ public:
       return;
     }
 
+    RecordDirectInputAssembly(true);
     auto &cmd_draw = allocator_->EncodeRenderCommand<wmtcmd_render_draw_indexed>();
     cmd_draw.type = WMTRenderCommandDrawIndexed;
     cmd_draw.primitive_type = primitive_type;
@@ -3905,6 +3913,16 @@ public:
     if (pso_graphics_->stream_output)
       EmitMemoryBarrier(WMTBarrierScopeBuffers, WMTRenderStageVertex, WMTRenderStageVertex);
   };
+
+  void
+  RecordDirectInputAssembly(bool indexed) {
+    if (pso_graphics_->shader_backend != D3D12ShaderBackend::MetalShaderConverter)
+      return;
+    auto &input = static_cast<RenderEncoderData *>(allocator_->encoder_current)->input_assembly;
+    input.direct = true;
+    input.vertex_slots |= pso_graphics_->slot_mask;
+    input.indexed |= indexed;
+  }
 
   uint64_t
   EncodeRootArgument(MTLD3D12RootSignature *pRootSig, uint64_t const pStaging[64], UINT Count = 1) {

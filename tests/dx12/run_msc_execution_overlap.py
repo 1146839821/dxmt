@@ -23,7 +23,7 @@ def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def parse(log, visibility, samples, iterations, wrong=False, workload='texture'):
+def parse(log, visibility, samples, iterations, wrong=False, workload='texture', require_ia=False):
     if log.count(f'OVERLAP_BACKEND msc visibility={visibility} iterations={iterations}') != 1:
         raise AssertionError('missing MSC backend/configuration evidence')
     rows = re.findall(r'^OVERLAP_SAMPLE (\d+) gpu_ns=(\S+) encode_ms=(\S+) submit_ms=(\S+) exact_bytes=65536\s*$', log, re.M)
@@ -46,6 +46,17 @@ def parse(log, visibility, samples, iterations, wrong=False, workload='texture')
         raise AssertionError('completion marker mismatch')
     if 'OVERLAP_ERROR' in log:
         raise AssertionError('probe error')
+    ia = re.findall(r'^INPUT_ASSEMBLY sample=(\d+) slots=(\d+) indexed=([01]) complete=([01]) replay=([01])\s*$', log, re.M)
+    mixed = workload == 'vb-input-mixed'
+    indexed = workload == 'vb-indexed' or mixed
+    indirect = workload == 'vb-input-indirect'
+    slots = '9' if mixed else '0' if workload == 'texture' else '1'
+    # Retained pre-IA trace captures remain readable; new runner executions
+    # require the additional evidence. If present it must always be complete.
+    if (ia or require_ia) and ia != [
+            (str(i), slots, str(int(indexed)), str(int(not indirect)), str(int(mixed and bool(i & 1))))
+            for i in range(3 if wrong else expected)]:
+        raise AssertionError('input assembly summary incomplete')
     config = re.findall(r'^DEPENDENCY_CONFIG workload=(\S+)\s*$', log, re.M)
     encoders = re.findall(r'^DEPENDENCY_ENCODERS sample=(\d+) sequence=(\S+) lists=(\d+)\s*$', log, re.M)
     scratch = re.findall(r'^DEPENDENCY_SCRATCH sample=(\d+) exact_bytes=(\d+)\s*$', log, re.M)
@@ -53,13 +64,13 @@ def parse(log, visibility, samples, iterations, wrong=False, workload='texture')
         if config or encoders or scratch:
             raise AssertionError('unexpected dependency workload')
     else:
-        if workload not in ('vb-direct', 'vb-transitive', 'vb-split-list') or visibility != 'all' or config != [workload]:
+        if workload not in ('vb-direct', 'vb-transitive', 'vb-split-list', 'vb-indexed', 'vb-input-mixed', 'vb-input-indirect') or visibility != 'all' or config != [workload]:
             raise AssertionError('dependency configuration mismatch')
-        sequence = {'vb-direct': 'CR', 'vb-transitive': 'CBCR', 'vb-split-list': 'C|CR'}[workload]
+        sequence = {'vb-transitive': 'CBCR', 'vb-split-list': 'C|CR'}.get(workload, 'CR')
         lists = '2' if workload == 'vb-split-list' else '1'
         if encoders != [(str(i), sequence, lists) for i in range(3 if wrong else expected)]:
             raise AssertionError('dependency encoder sequence incomplete')
-        expected_scratch = [] if workload == 'vb-direct' else [(str(i), '24576') for i in range(expected)]
+        expected_scratch = [(str(i), '24576') for i in range(expected)] if workload in ('vb-transitive', 'vb-split-list') else []
         if scratch != expected_scratch:
             raise AssertionError('dependency scratch readback incomplete')
     return values
@@ -80,7 +91,11 @@ def main():
     parser.add_argument('--iterations', type=int, default=1024)
     parser.add_argument('--vertex-dependency', action='store_true',
                         help='run direct/transitive CS-to-VB correctness cases instead of the texture overlap comparison')
+    parser.add_argument('--input-assembly', action='store_true',
+                        help='run indexed, mixed-draw replay and indirect classification cases')
     args = parser.parse_args()
+    if args.input_assembly and not args.vertex_dependency:
+        parser.error('--input-assembly requires --vertex-dependency')
     if not 2 <= args.processes <= 20 or not 2 <= args.samples <= 100 or not 1 <= args.iterations <= 4096:
         parser.error('require 2..20 processes, 2..100 samples, 1..4096 iterations')
     stage, prefix, build, converter = (getattr(args, name).resolve(strict=True)
@@ -117,7 +132,8 @@ def main():
     report['wine'] = subprocess.check_output([str(stage / 'wine/bin/wine'), '--version'], env=env, text=True,
                                              stderr=subprocess.DEVNULL).strip()
     if args.vertex_dependency:
-        workloads = ('vb-direct', 'vb-transitive', 'vb-split-list')
+        workloads = (('vb-indexed', 'vb-input-mixed', 'vb-input-indirect') if args.input_assembly else
+                     ('vb-direct', 'vb-transitive', 'vb-split-list'))
         cases = [(f'validation-{w}', 'all', True, False, 2, w) for w in workloads]
         cases += [(f'negative-{w}', 'all', True, True, 2, w) for w in workloads]
         cases += [(f'repeat-{i}-{w}', 'all', False, False, args.samples, w)
@@ -141,7 +157,7 @@ def main():
         (output / (label + '.log')).write_text(log)
         if result.returncode != int(wrong):
             raise AssertionError(f'{label}: exit {result.returncode}; see log')
-        rows = parse(log, visibility, samples, args.iterations, wrong, workload)
+        rows = parse(log, visibility, samples, args.iterations, wrong, workload, require_ia=True)
         for dll, mode in (('d3d12.dll', 'native'), ('dxgi.dll', 'native'), ('winemetal.dll', 'builtin')):
             path = ('Z:' + str(stage / dll).replace('/', '\\')).replace('\\', '\\\\').lower()
             if not any(('loaded l"' + path + '"') in line.lower() and ': ' + mode in line.lower() for line in log.splitlines()):
@@ -161,7 +177,7 @@ def main():
         (output / 'summary.json').write_text(json.dumps(report, indent=2) + '\n')
         print(label, 'PASS', flush=True)
     if args.vertex_dependency:
-        print('Verified direct, transitive and split-list vertex dependencies; no performance comparison')
+        print('Verified vertex input cases; no performance comparison')
         return
     report['pooled'] = {visibility: {key: stats([s[key] for r in report['runs'] if not r['validation'] and r['visibility'] == visibility
                                                for s in r['samples'][2:]]) for key in ('gpu_ms', 'encode_ms', 'submit_ms')}

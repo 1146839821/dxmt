@@ -356,3 +356,178 @@ facts. Preserve it across draws/list boundaries and verify unknown paths select
 the existing wait. Keep production Fence stages unchanged until the broader
 barrier/alias/transitive proof and regressions are complete; do not introduce a
 second resource-state or residency owner. The overall MSC task remains open.
+
+## Input assembly recording slice — design card, 2026-11-04
+
+1. **Goal / node:** N13; preserve the ordinary MSC input-assembly facts needed by a later dependency proof.
+2. **Baseline:** `2eb8f928`, `feat/d3d12`; only the user's `.gitignore` is dirty; previous three-mode GPU regression passed.
+3. **Current path / evidence:** `Draw[Indexed]Instanced → PreDraw → EncodeVertexBuffers → RenderEncoderData → queue`; direct VB commands bypass residency masks, while the queue still waits at Vertex/PreRaster.
+4. **Invariant:** Aggregate every draw in an encoder; preserve immutable closed recordings and existing resource/lifetime owners. This summary is not a complete shader-access, alias or barrier proof.
+5. **Selection:** Add a bounded input-assembly summary to the existing render encoder; reject a second resource map or additional Metal useResource calls merely to manufacture dependency metadata.
+6. **Scope:** Ordinary MSC direct draw records active input-layout slots and indexed use only when emitting its draw command; every other PreDraw caller defaults to unclassified. An empty encoder cannot count as complete.
+7. **Boundary:** Commands retain concrete binding history; this summary classifies only IA coverage. Do not infer resource independence, actual fetch ranges or safe Fragment waits from it.
+8. **Files:** Existing encoder header, command-list implementation, overlap probe/runner and reports; no new production module or public ABI.
+9. **Cost:** Fixed summary per render encoder and constant-time classification/accumulation per draw; no heap scan, lock, per-draw allocation or encoder split.
+10. **Proof:** Recording checks for sparse slots, indexed/nonindexed accumulation, indirect fallback, new encoders and replay immutability; existing changing-seed VB GPU oracles plus original texture regression.
+11. **Risks / rollback:** Incomplete paths must remain unclassified; revert this isolated commit. Preserve the existing fence policy regardless of the summary.
+12. **Done / capability:** Build, recording assertions, GPU output and paired runtime identity pass; no FL/SM/Tier promotion or performance improvement claimed.
+
+### Implementation and scope
+
+`RenderEncoderData::InputAssemblyUse` (`d3d12_command_encoder.hpp:144`) stores
+the union of input-layout slots used by ordinary MSC direct draws, whether an
+indexed draw was recorded, whether any direct draw was recorded, and a sticky
+unclassified flag. `complete()` means only that these IA facts cover the
+recorded draw paths. It says nothing about shader resources, ranges, aliasing,
+barriers or transitive dependencies; it must never be used alone to relax a
+fence. No queue decision consumes this summary in this slice.
+
+`PreDraw` (`d3d12_command_list.cpp:3172`, `:3366`) defaults to unclassified.
+Only direct `DrawInstanced` / `DrawIndexedInstanced` explicitly select the
+ordinary-input path; geometry/tessellation/mesh, Airconv, predication, stream
+output and indirect/internal callers remain unclassified. The accumulation
+helper at `:3918` runs immediately before emitting an ordinary direct draw,
+after early rejection and specialized draw branches. Slot/index bits accumulate
+instead of following only the last binding. New encoders start empty; submission
+and replay do not mutate the record. Closed command records remain the source
+for concrete binding history; no second resource-state, residency or lifetime
+owner is added. Existing direct-binding lifetime behavior is not changed or
+certified by this summary.
+
+The existing probe adds `vb-indexed`, `vb-input-mixed` and
+`vb-input-indirect` modes (`tests/dx12/dx12_msc_execution_overlap.cpp:131`).
+The mixed case draws left/middle/right stripes with slot 0 nonindexed, slot 3
+indexed, then slot 0 nonindexed. Thus the middle draw must produce correct
+pixels and the final record must retain mask 9 plus indexed use. It alternates
+recording and replaying exactly the same closed list; seeds change on each
+new recording, with resource transitions valid for replay. The indirect case
+places a non-updating indirect draw between two direct stripes and requires
+the summary to remain unclassified. These tests use the existing VB DXIL;
+no shader, Meson target or new runner is introduced.
+
+All modes inspect the actual encoder-owned record before submission and again
+after completion, while retaining the original image/scratch oracles. IA logs
+are mandatory for new runner invocations. Historical trace captures without
+them remain accepted by the shared parser; any supplied IA sequence is checked
+in full. Synthetic cases reject lost slot/index bits, omitted replay evidence,
+missing IA records and false completeness after indirect work. The trace
+analyzer continues to support only the original single-Compute/Render workload.
+
+The specification contract earlier in this report remains unchanged:
+Microsoft `resource-barriers.md:135-155` permits explicit promotable before
+states after buffer decay and does not decay between lists in one Execute
+call. Installed Apple `MTLRenderCommandEncoder.h:798`, `:806`, `:966` keeps
+fence ordering separate from declarations and resource lifetime. Pinned
+Mullion `93de32b9145885ceb2e45be7d445e56d62499b3c` remains source-only evidence:
+its `PopulateVertexBufferTable` (`mullion-command-list.cpp:881`) and grouped
+`NextSync` (`mullion-command-queue.cpp:182`) are different owners/mechanisms.
+No source was transplanted; Windows and Mullion execution remain NOT_RUN.
+
+### Validation evidence
+
+Baseline: `2eb8f928e878cde8ccd5081db545ca9ad30c5710`, 51 ahead / 0 behind the
+locally stored `origin/feat/d3d12` (not refreshed). Apple M1 Max, macOS 27.2
+`26B123`, Xcode 27.2 `27B52`, Metal `32023.922`, Wine 11.0 and the same patched
+LLVM x64 release build are used. Evidence is under
+`dxmt-test/n95-capability-gate/result-msc-input-assembly-20261104/` outside the
+repository; runtime stage/prefix are `stage-msc-input-assembly-20261104` and
+`prefix-msc-input-assembly-20261104`. The user's Wine installation is untouched.
+`build-final-result.json` records the full default-target build command and
+exit status; `build-final.log` retains compiler diagnostics, including existing
+warnings. Final GPU results use the `ia-final`, `vb-final`, `texture-final`
+batches, not the earlier exploratory batches.
+
+Use the preceding runner command with the new stage/prefix and output paths.
+For IA cases add `--vertex-dependency --input-assembly --samples 2`; for the
+existing three VB cases use `--vertex-dependency --samples 2`; for texture
+use `--samples 2`. All use `--processes 2 --iterations 1024`, with additional
+validated normal and negative cases generated by the existing runner. Exact
+argv and outcomes are retained in `runs-final.json` and each `summary.json`.
+
+The x64 compiler reports `sizeof(RenderEncoderData)` 808 → 816 bytes and
+`sizeof(InputAssemblyUse)` 8 bytes (`record-sizes.json` and the emitted assembly).
+The record has no dynamic allocation. This is storage size, not a measured
+resident-memory or application throughput result. The existing 4,096-draw
+`dx12_graphics_sm6 --vertex-stride ... perf-vertex` benchmark is used to compare
+baseline and candidate recording/submit costs with identical executable and
+DXIL, alternating four processes per build. Its first four draws are reported
+separately; every pass retains its 4,096-byte exact-output oracle. The baseline
+DLL hashes are matched to the previous delivery manifest, and both sides use
+the same WineMetal/MSC bytes. No GPU overlap improvement is claimed.
+
+| Evidence / check | Result | Scope |
+| --- | --- | --- |
+| Gate 0 / Gate 1 | PASS | Current Git/toolchain, CodeGraph-first owner audit, prior spec/reference evidence, bounded design above. |
+| Gate 2 | PASS | Two existing production files add IA facts; no queue policy or public ABI change. |
+| x64 full default-target build | LOCAL_PASS | `build-final-result.json` and the formatting rebuild `build-formatted-result.json`, exit 0. |
+| IA indexed/mixed/indirect | LOCAL_PASS | `ia-final/`: 12 processes, 42 full-image readbacks, seven replay submissions and three expected negative exits. |
+| Previous direct/transitive/split-list VB modes | LOCAL_PASS | `vb-final/`: 12 processes, 42 image and 28 scratch readbacks, three expected negative exits. |
+| Original texture modes | LOCAL_PASS | `texture-final/`: eight processes, 28 image readbacks and two expected negative exits. |
+| API/GPU validation and loaded identities | LOCAL_PASS | Validated normal/negative processes only; repeat and performance processes intentionally run without validation. `correctness-audit.json` independently checks sequences, exit codes and identities. |
+| Parser regression | LOCAL_PASS | `parser-tests-final.log`: 23 tests. Includes old trace logs, six VB modes and missing/incorrect IA evidence. |
+| Scoped formatting / diff checks | PASS | Changed production regions and C++ probe checked with clang-format; `git diff --check`. |
+| CPU cost A/B | MEASURED / INCONCLUSIVE | Eight alternating processes, 24 full-image readbacks, eight recording samples per build; values below. No speedup or no-regression guarantee. |
+| x86 / Windows native / Mullion runtime / new GPU trace | NOT_RUN | No widened environment, shader, scheduling or capability claim. |
+
+The performance harness has three submissions per process: pass 0 records,
+pass 1 replays without recording, pass 2 records again. Its first-four-draw
+time includes PSO setup in the first recording and must not be combined with
+warm per-draw cost as one distribution. Warm recording samples exclude those
+four draws. The A/B values are:
+
+| Metric | Baseline median / P95 / range | Candidate median / P95 / range |
+| --- | --- | --- |
+| Warm CPU record, µs/draw (8 samples each) | 0.289406 / 0.341642 / 0.260239–0.341642 | 0.304741 / 0.333065 / 0.267669–0.333065 |
+| CPU submit, µs (12 submissions each) | 1775.85 / 7298.60 / 1466.10–7298.60 | 1664.30 / 6856.10 / 1482.60–6856.10 |
+
+Observed warm median increases by 0.015335 µs/draw (about 5.3%). Process means
+and sample ranges overlap, and this short microbenchmark does not isolate
+instruction cost from noise. This is an explicit unresolved cost, not evidence
+of an optimization or a promise of zero regression. End-to-end frame time,
+occupancy, bandwidth and resident memory were not measured. Fixed 8-byte
+encoder storage and no new allocation/lock/heap scan bound the implementation
+cost; later scheduling adoption still requires its own correctness/performance
+gate. Keep the record only as dependency-proof groundwork, not as a claimed
+speedup. Full runs, identities and raw samples are in `performance-runs.json`
+and `performance-summary.json`.
+
+Retained failures: the first parser change wrongly required new IA fields in
+historical trace logs; this was corrected with mandatory fields for new runs
+and optional-but-fully-checked fields for old captures. The temporary benchmark
+collector initially required a recording sample for replay pass 1; the actual
+GPU run passed and its saved sample was reused after correcting the parser.
+Storage-size probing initially selected the host's GCC wrapper and then
+duplicated a header through `d3d12_device.hpp`; the successful probe uses the
+same LLVM-MinGW command as the build and compares the prior struct declaration
+against the current type. These collector failures are not GPU failures.
+
+The final formatting rebuild changes PE build identifiers and three `.text`
+bytes in the `IMPLEMENT_ME` log line constants for SetMarker/BeginEvent/EndEvent.
+All other code/data sections match; the overlap executable changes only its
+build identifier. `format-equivalence.json`, `format-disassembly.txt` and saved
+preformat binaries retain that comparison. The full functional batches above
+used the preformat identity; the A/B candidate and `ia-delivery/` use the final
+formatted build. This distinction is recorded rather than treating mismatched
+hashes as identical deployments.
+
+The formatted delivery batch also passes all 12 processes, 42 full-image
+readbacks, seven replay submissions and three expected negative controls.
+`delivery-artifact-audit.json` verifies final build/stage pairing, loaded export
+bytes, converter identity and validation results. Gate 3 and Gate 4 are PASS
+within this IA-recording scope. Seven changed files are committed locally with
+the repository's `feat(d3d12): ...` style; no push. The user's `.gitignore`
+change remains excluded. `delivery-manifest.json` records the resulting SHA,
+files and remaining Git state.
+
+Public FL/SM/Tier, production Fence stages and WineMetal ABI remain unchanged.
+Remaining risks: IA completeness does not establish a full early-access set;
+the slot union is conservative for zero-size or unused bindings and does not
+identify backing/alias ranges. Future paths that bypass the direct entry points
+must preserve unclassified status. The measured recording overhead remains
+inconclusive and must be accounted for before adopting a scheduling change.
+
+**Next recommended slice:** preserve explicit early-stage execution obligations
+from legacy/enhanced barriers in the existing encoder-boundary records, including
+barriers with no resource access and split/alias boundaries. Validate those
+facts against existing barrier probes before combining them with IA coverage;
+keep current waits. The larger MSC/HLSL/performance task is still incomplete.

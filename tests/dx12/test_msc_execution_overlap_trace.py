@@ -161,16 +161,20 @@ class TraceTest(unittest.TestCase):
 class DependencyLogTest(unittest.TestCase):
     # Log-contract tests only. Real readbacks are exercised separately by Wine.
     def log(self, workload='vb-transitive', wrong=False):
-        sequence = {'vb-direct': 'CR', 'vb-transitive': 'CBCR', 'vb-split-list': 'C|CR'}[workload]
+        sequence = {'vb-transitive': 'CBCR', 'vb-split-list': 'C|CR'}.get(workload, 'CR')
         lists = 2 if workload == 'vb-split-list' else 1
         lines = ['OVERLAP_BACKEND msc visibility=all iterations=1024',
                  'DEPENDENCY_CONFIG workload=' + workload]
         for i in range(3):
+            mixed = workload == 'vb-input-mixed'
+            lines.append(f'INPUT_ASSEMBLY sample={i} slots={9 if mixed else 1} '
+                         f'indexed={int(mixed or workload == "vb-indexed")} '
+                         f'complete={int(workload != "vb-input-indirect")} replay={int(mixed and bool(i & 1))}')
             lines.append(f'DEPENDENCY_ENCODERS sample={i} sequence={sequence} lists={lists}')
             if wrong and i == 2:
                 lines.append('OVERLAP_MISMATCH sample=2 x=0 y=0 actual=42 expected=43')
                 break
-            if workload != 'vb-direct':
+            if workload in ('vb-transitive', 'vb-split-list'):
                 lines.append(f'DEPENDENCY_SCRATCH sample={i} exact_bytes=24576')
             lines.append(f'OVERLAP_SAMPLE {i} gpu_ns=1000 encode_ms=1 submit_ms=1 exact_bytes=65536')
         if not wrong:
@@ -179,10 +183,10 @@ class DependencyLogTest(unittest.TestCase):
 
     def parse(self, log, workload='vb-transitive', wrong=False):
         from run_msc_execution_overlap import parse
-        return parse(log, 'all', 1, 1024, wrong, workload)
+        return parse(log, 'all', 1, 1024, wrong, workload, require_ia=True)
 
     def test_all_dependency_modes(self):
-        for workload in ('vb-direct', 'vb-transitive', 'vb-split-list'):
+        for workload in ('vb-direct', 'vb-transitive', 'vb-split-list', 'vb-indexed', 'vb-input-mixed', 'vb-input-indirect'):
             with self.subTest(workload=workload):
                 self.assertEqual(len(self.parse(self.log(workload), workload)), 3)
                 self.assertEqual(len(self.parse(self.log(workload, True), workload, True)), 2)
@@ -208,8 +212,18 @@ class DependencyLogTest(unittest.TestCase):
     def test_config_cannot_be_omitted_or_disguised(self):
         with self.assertRaisesRegex(AssertionError, 'configuration'):
             self.parse(self.log().replace('DEPENDENCY_CONFIG workload=vb-transitive\n', ''))
-        with self.assertRaisesRegex(AssertionError, 'unexpected dependency'):
+        with self.assertRaises(AssertionError):
             self.parse(self.log(), 'texture')
+
+    def test_lost_input_or_false_completeness_is_rejected(self):
+        for workload, old, new in [('vb-input-mixed', 'slots=9', 'slots=1'),
+                                    ('vb-input-mixed', 'indexed=1', 'indexed=0'),
+                                    ('vb-input-mixed', 'replay=1', 'replay=0'),
+                                    ('vb-input-indirect', 'complete=0', 'complete=1')]:
+            with self.subTest(workload=workload, old=old), self.assertRaisesRegex(AssertionError, 'input assembly'):
+                self.parse(self.log(workload).replace(old, new), workload)
+        with self.assertRaisesRegex(AssertionError, 'input assembly'):
+            self.parse('\n'.join(line for line in self.log().splitlines() if not line.startswith('INPUT_ASSEMBLY')))
 
 
 if __name__ == '__main__':

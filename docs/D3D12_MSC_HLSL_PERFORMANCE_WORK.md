@@ -124,7 +124,7 @@ the detailed sections below preserve original measurements and limits.
 | Linear versus root layout | A native Metal control compared linear and explicit layouts with one SRV and one UAV, including reflection, readback and timing; D3D12 equivalence remains unproven. | Measure representative resource sets and D3D12 binding costs before any production change. |
 | GPU and OS targets | Apple6/Apple7 controlled conversion and GPU output were compared on M1 Max; target parameters are included in the conversion key. | Test OS targets and additional devices; do not promote minimum platform. |
 | Argument buffer/occupancy | Root and table residency is tracked in command list (`d3d12_command_list.cpp:949-975`). No register or occupancy counters captured. | Capture representative vertex/fragment/compute counters and CPU binding cost before changing ABI. |
-| Execution overlap | Exact readbacks and 50 timing samples per visibility passed. After correcting layout-depth handling and adding submission/execution-point checks, three fresh ALL/PIXEL trace pairs passed: 72 workloads, 216 point pairs, no observed Compute/Vertex overlap. The N13 audit found that residency deltas, direct bindings, transitive predecessors and alias/barrier obligations do not provide a complete early-access proof. The direct/transitive/split-list CS→VB regression now passes under existing waits. | Next: complete encoder-owned early-access facts for ordinary MSC direct VB/IB bindings while preserving current Fence stages; see the [dependency contract and regression](msc-fence-dependency-design.md) and [trace evidence](msc-trace-attribution.md). |
+| Execution overlap | Exact readbacks and 50 timing samples per visibility passed. After correcting layout-depth handling and adding submission/execution-point checks, three fresh ALL/PIXEL trace pairs passed: 72 workloads, 216 point pairs, no observed Compute/Vertex overlap. The N13 audit found that residency deltas, direct bindings, transitive predecessors and alias/barrier obligations do not provide a complete early-access proof. Direct/transitive/split-list CS→VB tests pass; the encoder now records ordinary direct IA coverage with unknown paths kept unclassified. | Next: preserve explicit early-stage barrier obligations in existing encoder boundary records. Current Fence stages remain unchanged; see the [dependency contract and regression](msc-fence-dependency-design.md) and [trace evidence](msc-trace-attribution.md). |
 | Input DXIL | Controlled `-Od` and `-O3` pixel tests passed; embedded debug exposed an LLVM metadata incompatibility addressed by a separately built patched toolchain. | Expand shader coverage and deployment verification; do not recompile game shaders. |
 | Root validation | Unset, zero, bound-resource and DXIL validation were compared on one valid/missing-resource pair; DXIL validation also passed controlled HLSL GPU pixels. | Validate broader inputs and runtime versions before changing production flags. |
 | In-process and persistent cache | Process cache plus single-flight exists, disk cache explicitly disabled (`d3d12_shader_converter.cpp:199-213,228-237,1812-1837`). Map has no evident capacity bound. Key includes stage, source, root, targets, spaces, configuration and flags, but loaded-dylib content identity is not trusted for persistent use. | Measure hits, waits and memory growth; validate content identity, corruption recovery and opt-in before disk cache. Function specializations require separate keys. |
@@ -1685,3 +1685,33 @@ the repository. No x86, native Windows, Mullion runtime or new trace result is
 claimed. No production Fence, ABI or advertised capability changed. The next
 slice is encoder-owned early-access completeness for ordinary MSC direct VB/IB
 bindings; the overall MSC task remains incomplete.
+
+### Input assembly dependency records — 2026-11-04
+
+At baseline `2eb8f928`, N13 adds an 8-byte IA coverage summary to the existing
+render encoder. Ordinary MSC direct draws accumulate the input-layout slot
+mask and indexed use when the draw is actually emitted. Unknown, indirect,
+internal, predicated and advanced-stage paths remain unclassified; a later
+direct draw cannot erase that fact. Concrete buffer bindings retain their
+existing owner. No resource map, lock, allocation, encoder split or Metal
+declaration is added, and the queue keeps its Vertex/PreRaster waits.
+
+The existing overlap runner now checks indexed input, sparse-slot mixed draws,
+replay immutability and sticky indirect classification. Each mixed/indirect
+draw writes a distinct stripe so a later draw cannot hide its failure. The
+main functional batches passed 32 processes, 112 image and 28 scratch
+readbacks, including warmups, with eight expected negative controls. API/GPU
+validation and runtime identity passed; 23 parser tests passed. The x64 full
+build passed. Formatted delivery artifacts passed a separate IA batch of 12
+processes, 42 image readbacks and three expected negative controls; final
+build/stage pairing and runtime identities passed.
+
+An alternating A/B of the existing 4,096-draw benchmark passed 24 exact-image
+readbacks. Warm record median was 0.289406 → 0.304741 µs/draw; the observed
+increase is retained as an unresolved cost, with overlapping ranges and no
+speedup/no-regression claim. See the [IA report](msc-fence-dependency-design.md#input-assembly-recording-slice--design-card-2026-11-04)
+and external `result-msc-input-assembly-20261104/` evidence for source anchors,
+identities, raw statistics and limitations. This summary is not complete
+dependency evidence and cannot authorize stage relaxation by itself. Next
+preserve explicit early-stage barrier obligations in existing boundary records;
+alias identity, transitive dependencies and full shader access remain open.

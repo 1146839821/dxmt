@@ -104,6 +104,23 @@ std::string dependency_encoders(ID3D12GraphicsCommandList *first,
   throw std::runtime_error("missing dependency render encoder");
 }
 
+dxmt::RenderEncoderData::InputAssemblyUse
+input_assembly(ID3D12GraphicsCommandList *list) {
+  dxmt::RenderEncoderData *render = nullptr;
+  for (auto *encoder =
+           static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list)->entry;
+       encoder; encoder = encoder->next) {
+    if (encoder->type != dxmt::EncoderType::Render)
+      continue;
+    if (render)
+      throw std::runtime_error("unexpected extra render encoder");
+    render = static_cast<dxmt::RenderEncoderData *>(encoder);
+  }
+  if (!render)
+    throw std::runtime_error("missing input assembly record");
+  return render->input_assembly;
+}
+
 int run(int argc, char **argv) {
   if (argc != 9 && argc != 10)
     return 2;
@@ -111,8 +128,14 @@ int run(int argc, char **argv) {
   const bool vb = strcmp(workload, "texture") != 0;
   const bool transitive = !strcmp(workload, "vb-transitive");
   const bool split_list = !strcmp(workload, "vb-split-list");
-  if (vb && !transitive && !split_list && strcmp(workload, "vb-direct"))
+  const bool mixed = !strcmp(workload, "vb-input-mixed");
+  const bool indirect = !strcmp(workload, "vb-input-indirect");
+  const bool indexed = !strcmp(workload, "vb-indexed") || mixed;
+  if (vb && !transitive && !split_list && !indexed && !indirect &&
+      strcmp(workload, "vb-direct"))
     return 2;
+  if (dxmt::RenderEncoderData::InputAssemblyUse{}.complete())
+    throw std::runtime_error("empty input assembly must be unclassified");
   const bool pixel = !strcmp(argv[4], "pixel");
   if (!pixel && strcmp(argv[4], "all"))
     return 2;
@@ -242,6 +265,13 @@ int run(int argc, char **argv) {
   check(device->CreateGraphicsPipelineState(&gdesc,
                                             IID_PPV_ARGS(&graphics_pso.value)),
         "graphics PSO");
+  Owned<ID3D12PipelineState> sparse_pso;
+  if (mixed) {
+    input.InputSlot = 3;
+    check(device->CreateGraphicsPipelineState(&gdesc,
+                                              IID_PPV_ARGS(&sparse_pso.value)),
+          "sparse PSO");
+  }
   if (static_cast<dxmt::MTLD3D12PipelineState *>(compute_pso.value)
               ->shader_backend !=
           dxmt::D3D12ShaderBackend::MetalShaderConverter ||
@@ -258,6 +288,8 @@ int run(int argc, char **argv) {
                  vertex_bytes = vertex_count * sizeof(UINT);
   Owned<ID3D12Resource> texture, target, readback, times;
   Owned<ID3D12Resource> vertices, scratch, scratch_readback, separator;
+  Owned<ID3D12Resource> indices, indirect_arguments;
+  Owned<ID3D12CommandSignature> signature;
   auto resource = [&](Owned<ID3D12Resource> &out, bool buffer, UINT64 bytes,
                       D3D12_RESOURCE_FLAGS flags, D3D12_RESOURCE_STATES state,
                       D3D12_HEAP_TYPE buffer_heap = D3D12_HEAP_TYPE_READBACK) {
@@ -282,7 +314,9 @@ int run(int argc, char **argv) {
   if (vb) {
     resource(vertices, true, vertex_bytes,
              D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-             D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_HEAP_TYPE_DEFAULT);
+             mixed ? D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER
+                   : D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+             D3D12_HEAP_TYPE_DEFAULT);
     if (transitive || split_list) {
       resource(scratch, true, vertex_bytes,
                D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
@@ -304,8 +338,35 @@ int run(int argc, char **argv) {
     resource(texture, false, 0, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
              D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
   }
+  if (indexed) {
+    resource(indices, true, vertex_bytes, D3D12_RESOURCE_FLAG_NONE,
+             D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_HEAP_TYPE_UPLOAD);
+    UINT *values = nullptr;
+    check(indices->Map(0, nullptr, reinterpret_cast<void **>(&values)),
+          "map indices");
+    for (UINT i = 0; i < vertex_count; ++i)
+      values[i] = i;
+    indices->Unmap(0, nullptr);
+  }
+  if (indirect) {
+    resource(indirect_arguments, true, sizeof(D3D12_DRAW_ARGUMENTS),
+             D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ,
+             D3D12_HEAP_TYPE_UPLOAD);
+    void *mapped = nullptr;
+    check(indirect_arguments->Map(0, nullptr, &mapped), "map indirect");
+    *static_cast<D3D12_DRAW_ARGUMENTS *>(mapped) = {vertex_count, 1, 0, 0};
+    indirect_arguments->Unmap(0, nullptr);
+    D3D12_INDIRECT_ARGUMENT_DESC argument{};
+    argument.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW;
+    D3D12_COMMAND_SIGNATURE_DESC desc{sizeof(D3D12_DRAW_ARGUMENTS), 1,
+                                      &argument, 0};
+    check(device->CreateCommandSignature(&desc, nullptr,
+                                         IID_PPV_ARGS(&signature.value)),
+          "draw signature");
+  }
   resource(target, false, 0, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
-           D3D12_RESOURCE_STATE_RENDER_TARGET);
+           mixed ? D3D12_RESOURCE_STATE_COPY_SOURCE
+                 : D3D12_RESOURCE_STATE_RENDER_TARGET);
   auto tdesc = target->GetDesc();
   D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
   UINT64 bytes = 0;
@@ -376,102 +437,156 @@ int run(int argc, char **argv) {
     Sleep(2000);
   std::cout << std::setprecision(12);
   for (unsigned sample = 0; sample < samples + 2; ++sample) {
-    const UINT constants[2] = {sample * 79u + 17u, iterations};
-    auto begin = std::chrono::steady_clock::now();
-    check(allocator->Reset(), "allocator reset");
-    check(list->Reset(allocator, nullptr), "list reset");
-    if (split_list) {
-      check(second_allocator->Reset(), "second allocator reset");
-      check(second_list->Reset(second_allocator, nullptr), "second list reset");
-    }
-    ID3D12GraphicsCommandList *draw_list = list;
-    if (sample) {
-      transition(list, vb ? vertices.value : texture.value,
-                 vb ? D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER
-                    : D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
-                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-      if (scratch)
-        transition(list, scratch, D3D12_RESOURCE_STATE_COPY_SOURCE,
-                   D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-      transition(list, target, D3D12_RESOURCE_STATE_COPY_SOURCE,
-                 D3D12_RESOURCE_STATE_RENDER_TARGET);
-    }
-    list->EndQuery(queries, D3D12_QUERY_TYPE_TIMESTAMP, 0);
-    ID3D12DescriptorHeap *heaps[] = {descriptors};
-    list->SetDescriptorHeaps(1, heaps);
-    list->SetComputeRootSignature(compute_root);
-    list->SetComputeRootDescriptorTable(0, gpu);
-    list->SetComputeRoot32BitConstants(1, 2, constants, 0);
-    list->SetPipelineState(compute_pso);
-    list->Dispatch(vb ? vertex_count / 64 : width / 8, vb ? 1 : height / 8, 1);
-    D3D12_RESOURCE_BARRIER uav_barrier{};
-    uav_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-    uav_barrier.UAV.pResource = vb ? vertices.value : texture.value;
-    list->ResourceBarrier(1, &uav_barrier);
-    transition(list, vb ? vertices.value : texture.value,
-               D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-               vb ? D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER
-                  : D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    if (transitive) {
-      // A real unrelated copy delimits encoders without a CPU wait or a
-      // timestamp between the dependent producer and consumer.
-      transition(list, scratch, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                 D3D12_RESOURCE_STATE_COPY_DEST);
-      list->CopyBufferRegion(scratch, 0, separator, 0, sizeof(UINT));
-      transition(list, scratch, D3D12_RESOURCE_STATE_COPY_DEST,
-                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    }
-    if (split_list) {
-      check(list->Close(), "producer close");
-      draw_list = second_list;
-    }
+    const bool replay = mixed && (sample & 1);
+    const UINT constants[2] = {(mixed ? sample / 2 : sample) * 79u + 17u,
+                               iterations};
     const UINT scratch_constants[2] = {constants[0] ^ 0x9e3779b9u, iterations};
-    if (scratch) {
-      draw_list->SetDescriptorHeaps(1, heaps);
-      draw_list->SetComputeRootSignature(compute_root);
-      draw_list->SetComputeRootDescriptorTable(0, {gpu.ptr + step});
-      draw_list->SetComputeRoot32BitConstants(1, 2, scratch_constants, 0);
-      draw_list->SetPipelineState(compute_pso);
-      draw_list->Dispatch(vertex_count / 64, 1, 1);
-    }
-    draw_list->SetGraphicsRootSignature(graphics_root);
-    if (vb) {
-      D3D12_VERTEX_BUFFER_VIEW view{vertices->GetGPUVirtualAddress(),
-                                    vertex_bytes, sizeof(UINT)};
-      draw_list->IASetVertexBuffers(0, 1, &view);
-    } else {
-      draw_list->SetGraphicsRootDescriptorTable(0, {gpu.ptr + step});
-      draw_list->SetGraphicsRoot32BitConstants(1, 2, constants, 0);
-    }
-    draw_list->SetPipelineState(graphics_pso);
-    draw_list->OMSetRenderTargets(1, &output, FALSE, nullptr);
-    // Every pixel is overwritten and checked; an explicit clear would add a
-    // separate render encoder and an unrelated dependency to this workload.
-    D3D12_VIEWPORT viewport{0, 0, float(width), float(height), 0, 1};
-    D3D12_RECT scissor{0, 0, width, height};
-    draw_list->RSSetViewports(1, &viewport);
-    draw_list->RSSetScissorRects(1, &scissor);
-    draw_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    draw_list->DrawInstanced(vertex_count, 1, 0, 0);
-    draw_list->EndQuery(queries, D3D12_QUERY_TYPE_TIMESTAMP, 1);
-    transition(draw_list, target, D3D12_RESOURCE_STATE_RENDER_TARGET,
-               D3D12_RESOURCE_STATE_COPY_SOURCE);
-    D3D12_TEXTURE_COPY_LOCATION source{}, destination{};
-    source.pResource = target;
-    source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-    destination.pResource = readback;
-    destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-    destination.PlacedFootprint = footprint;
-    draw_list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
-    if (scratch) {
-      transition(draw_list, scratch, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+    auto begin = std::chrono::steady_clock::now();
+    ID3D12GraphicsCommandList *draw_list = split_list ? second_list : list;
+    if (!replay) {
+      check(allocator->Reset(), "allocator reset");
+      check(list->Reset(allocator, nullptr), "list reset");
+      if (split_list) {
+        check(second_allocator->Reset(), "second allocator reset");
+        check(second_list->Reset(second_allocator, nullptr),
+              "second list reset");
+      }
+      if (sample || mixed) {
+        transition(list, vb ? vertices.value : texture.value,
+                   vb ? D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER
+                      : D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                   D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        if (scratch)
+          transition(list, scratch, D3D12_RESOURCE_STATE_COPY_SOURCE,
+                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        transition(list, target, D3D12_RESOURCE_STATE_COPY_SOURCE,
+                   D3D12_RESOURCE_STATE_RENDER_TARGET);
+      }
+      list->EndQuery(queries, D3D12_QUERY_TYPE_TIMESTAMP, 0);
+      ID3D12DescriptorHeap *heaps[] = {descriptors};
+      list->SetDescriptorHeaps(1, heaps);
+      list->SetComputeRootSignature(compute_root);
+      list->SetComputeRootDescriptorTable(0, gpu);
+      list->SetComputeRoot32BitConstants(1, 2, constants, 0);
+      list->SetPipelineState(compute_pso);
+      list->Dispatch(vb ? vertex_count / 64 : width / 8, vb ? 1 : height / 8,
+                     1);
+      D3D12_RESOURCE_BARRIER uav_barrier{};
+      uav_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+      uav_barrier.UAV.pResource = vb ? vertices.value : texture.value;
+      list->ResourceBarrier(1, &uav_barrier);
+      transition(list, vb ? vertices.value : texture.value,
+                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                 vb ? D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER
+                    : D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+      if (transitive) {
+        // A real unrelated copy delimits encoders without a CPU wait or a
+        // timestamp between the dependent producer and consumer.
+        transition(list, scratch, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                   D3D12_RESOURCE_STATE_COPY_DEST);
+        list->CopyBufferRegion(scratch, 0, separator, 0, sizeof(UINT));
+        transition(list, scratch, D3D12_RESOURCE_STATE_COPY_DEST,
+                   D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+      }
+      if (split_list) {
+        check(list->Close(), "producer close");
+      }
+      if (scratch) {
+        draw_list->SetDescriptorHeaps(1, heaps);
+        draw_list->SetComputeRootSignature(compute_root);
+        draw_list->SetComputeRootDescriptorTable(0, {gpu.ptr + step});
+        draw_list->SetComputeRoot32BitConstants(1, 2, scratch_constants, 0);
+        draw_list->SetPipelineState(compute_pso);
+        draw_list->Dispatch(vertex_count / 64, 1, 1);
+      }
+      draw_list->SetGraphicsRootSignature(graphics_root);
+      if (vb) {
+        D3D12_VERTEX_BUFFER_VIEW view{vertices->GetGPUVirtualAddress(),
+                                      vertex_bytes, sizeof(UINT)};
+        draw_list->IASetVertexBuffers(0, 1, &view);
+      } else {
+        draw_list->SetGraphicsRootDescriptorTable(0, {gpu.ptr + step});
+        draw_list->SetGraphicsRoot32BitConstants(1, 2, constants, 0);
+      }
+      draw_list->SetPipelineState(graphics_pso);
+      draw_list->OMSetRenderTargets(1, &output, FALSE, nullptr);
+      // Every pixel is overwritten and checked; an explicit clear would add a
+      // separate render encoder and an unrelated dependency to this workload.
+      D3D12_VIEWPORT viewport{0, 0, float(width), float(height), 0, 1};
+      D3D12_RECT scissor{0, 0, width, height};
+      draw_list->RSSetViewports(1, &viewport);
+      draw_list->RSSetScissorRects(1, &scissor);
+      draw_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+      auto stripe = [&](LONG left, LONG right) {
+        D3D12_RECT rect{left, 0, right, height};
+        draw_list->RSSetScissorRects(1, &rect);
+      };
+      if (indexed) {
+        D3D12_INDEX_BUFFER_VIEW view{indices->GetGPUVirtualAddress(),
+                                     vertex_bytes, DXGI_FORMAT_R32_UINT};
+        draw_list->IASetIndexBuffer(&view);
+        if (mixed) {
+          stripe(0, 40);
+          draw_list->DrawInstanced(vertex_count, 1, 0, 0);
+          D3D12_VERTEX_BUFFER_VIEW sparse{vertices->GetGPUVirtualAddress(),
+                                          vertex_bytes, sizeof(UINT)};
+          draw_list->IASetVertexBuffers(3, 1, &sparse);
+          draw_list->SetPipelineState(sparse_pso);
+          stripe(40, 84);
+        }
+        draw_list->DrawIndexedInstanced(vertex_count, 1, 0, 0, 0);
+        if (mixed) {
+          draw_list->IASetIndexBuffer(nullptr);
+          draw_list->SetPipelineState(graphics_pso);
+          stripe(84, width);
+          draw_list->DrawInstanced(vertex_count, 1, 0, 0);
+        }
+      } else {
+        if (indirect)
+          stripe(0, 40);
+        draw_list->DrawInstanced(vertex_count, 1, 0, 0);
+        if (indirect) {
+          stripe(40, 84);
+          draw_list->ExecuteIndirect(signature, 1, indirect_arguments, 0,
+                                     nullptr, 0);
+          stripe(84, width);
+          draw_list->DrawInstanced(vertex_count, 1, 0, 0);
+        }
+      }
+      draw_list->EndQuery(queries, D3D12_QUERY_TYPE_TIMESTAMP, 1);
+      transition(draw_list, target, D3D12_RESOURCE_STATE_RENDER_TARGET,
                  D3D12_RESOURCE_STATE_COPY_SOURCE);
-      draw_list->CopyBufferRegion(scratch_readback, 0, scratch, 0,
-                                  vertex_bytes);
+      D3D12_TEXTURE_COPY_LOCATION source{}, destination{};
+      source.pResource = target;
+      source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+      destination.pResource = readback;
+      destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+      destination.PlacedFootprint = footprint;
+      draw_list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+      if (scratch) {
+        transition(draw_list, scratch, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                   D3D12_RESOURCE_STATE_COPY_SOURCE);
+        draw_list->CopyBufferRegion(scratch_readback, 0, scratch, 0,
+                                    vertex_bytes);
+      }
+      draw_list->ResolveQueryData(queries, D3D12_QUERY_TYPE_TIMESTAMP, 0, 2,
+                                  times, 0);
+      check(draw_list->Close(), "close");
     }
-    draw_list->ResolveQueryData(queries, D3D12_QUERY_TYPE_TIMESTAMP, 0, 2,
-                                times, 0);
-    check(draw_list->Close(), "close");
+    double encode_ms = elapsed(begin);
+    const auto recorded_ia = input_assembly(draw_list);
+    if (recorded_ia.vertex_slots != (mixed ? 9u
+                                     : vb  ? 1u
+                                           : 0u) ||
+        recorded_ia.indexed != indexed || !recorded_ia.direct ||
+        recorded_ia.unclassified != indirect ||
+        recorded_ia.complete() == indirect)
+      throw std::runtime_error("input assembly summary mismatch");
+    std::cout << "INPUT_ASSEMBLY sample=" << sample
+              << " slots=" << recorded_ia.vertex_slots
+              << " indexed=" << recorded_ia.indexed
+              << " complete=" << recorded_ia.complete() << " replay=" << replay
+              << '\n';
     if (vb) {
       const auto encoders = dependency_encoders(list, second_list);
       if (encoders != (transitive ? "CBCR" : split_list ? "C|CR" : "CR"))
@@ -481,7 +596,6 @@ int run(int argc, char **argv) {
                 << " sequence=" << encoders << " lists=" << (split_list ? 2 : 1)
                 << '\n';
     }
-    double encode_ms = elapsed(begin);
     begin = std::chrono::steady_clock::now();
     ID3D12CommandList *lists[] = {list, second_list};
     queue->ExecuteCommandLists(split_list ? 2 : 1, lists);
@@ -492,6 +606,12 @@ int run(int argc, char **argv) {
     if (WaitForSingleObject(event.value, 30000) != WAIT_OBJECT_0)
       throw std::runtime_error("GPU timeout");
     check(device->GetDeviceRemovedReason(), "device status");
+    const auto submitted_ia = input_assembly(draw_list);
+    if (recorded_ia.vertex_slots != submitted_ia.vertex_slots ||
+        recorded_ia.indexed != submitted_ia.indexed ||
+        recorded_ia.direct != submitted_ia.direct ||
+        recorded_ia.unclassified != submitted_ia.unclassified)
+      throw std::runtime_error("submission mutated input assembly record");
     D3D12_RANGE time_range{0, 16}, empty{0, 0};
     UINT64 *ticks = nullptr;
     check(times->Map(0, &time_range, reinterpret_cast<void **>(&ticks)),
