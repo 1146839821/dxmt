@@ -1061,3 +1061,78 @@ Focused feat(d3d12) commit/no push; original .gitignore preserved/excluded. E11/
 ### 10. Next Recommended Slice
 
 One **buffer mapping prepare/issue/publish plan** inside the existing buffer resource owner: reuse the current validation/tile traversal to construct immutable native operations plus this payload's old/source/new/intermediate refs before any handoff publication; preserve self-overlap snapshot semantics and zero/partial failure outcome. Avoid a parallel map or duplicated parser. Exercise it through the controlled caller first, retaining the production no-event/Submission activation gate. This advances actual input preparation rather than adding another disconnected lifetime model; texture/general production queue integration remains a separate decision.
+
+
+## Buffer prepare / issue / publish — execution card, 2026-11-05
+
+GOAL: Build one real buffer mapping plan from the existing Update/Copy parser before controlled native handoff.
+BASELINE: 28f5397db35fbe9b7b53b7f2cc9956ef97e4e0e4; original .gitignore excluded.
+CURRENT PATH: queue -> MTLD3D12Buffer UpdateTileMappings / CopyTileMappingsFrom -> WineMetal -> tile_mappings_.
+CONTRACT: Microsoft Update/CopyTileMappings; source snapshot for overlapping self-copy; no publication after failed issue.
+EVIDENCE: E11 retained Microsoft pages / pinned Mullion queue; current independent parsers and manual payload fixture.
+SCOPE: Reuse validation and tile traversal in existing buffer owner; prepare owned transient operations, old/source/new refs.
+DESIGN: Stack plan for legacy callers; opaque internal plan for controlled credential calls; one authoritative tile_mappings_.
+BOUNDARY: No production credential/Submission activation, new scheduler, texture path, capability promotion or D3D11 change.
+VALIDATE: Paired x64 build, real seeded GPU readbacks, input mutation, self-overlap, partial failure and nearby probes.
+RISKS: Serialized mapping owner required between prepare and issue; lost-event teardown remains SPEC_UNVERIFIED.
+ROLLBACK: Revert this focused slice; prior bridge/payload remains usable.
+DONE: Existing callers use common parser; controlled plan proves ownership and publication; tests/build/audit; commit, no push.
+
+
+## Buffer prepare / issue / publish — delivery, 2026-11-05
+
+### Task Summary / Baseline Evidence
+
+One N15/N13 buffer preparation slice on feat/d3d12, baseline28f5397db35fbe9b7b53b7f2cc9956ef97e4e0e4. E12 = /Users/zhangbo/Documents/Vibe-Codeding/dxmt-test/n95-capability-gate/result-sparse-buffer-plan-20261105. macOS27.2/26B123, Xcode27.2/27B52, Metal32023.922, Wine11.0, Apple M1 Max. Actual probe reports Apple7=1/Apple8=0/Apple9=0/Metal4=1/PlacementSparse=1; no capability result mocked. Original user .gitignore excluded. Existing queue and texture implementations unmodified.
+
+### Findings / Evidence
+
+| Type | Evidence and conclusion |
+|---|---|
+| SPEC_REQUIRED | Microsoft Update/CopyTileMappings contracts, freshly retrieved E12/ms-update and ms-copy with sources.json hashes. Validated inputs are copied before returning preparation. Copy overlap uses saved source mappings. Logical publication follows complete host acceptance; it does not prove GPU completion. Windows native NOT_RUN. |
+| REFERENCE_SOURCE | Fresh Mullion93de32b9145885ceb2e45be7d445e56d62499b3c queue:593–625 commits residency, issues mapping, waits its mapped event;1338–1353,1392–1404 retain resource/heap closure inputs. SHA256641a21ad8fce6aa6f3f6f0cb02e0b0e3ae162a97a0eb7740d738c5f70ece6492. Source only; no code transplant or Mullion runtime claim. |
+| SOURCE_AUDIT | d3d12_buffer.cpp:133–298 owns one transient MappingPlan; BuildUpdatePlan:750 and BuildCopyPlan:833 retain existing parsers. Legacy wrappers:880–902 and controlled preparation:905–940 share these parsers and Publish. tile_mappings_ is still the sole logical map. |
+| LOCAL_PASS | Existing reserved-buffer probe now constructs real plans instead of manually deriving their operations. Mutation of original coordinate/size/range/offset/count arrays after preparation cannot affect issue or publication. Host partial failure preserves prior logical destination even while real native prefix changes are read back. |
+
+### Design Decisions / Changed Files
+
+- src/d3d12/d3d12_buffer.cpp: MappingPlan remains inside the existing buffer owner. A stack plan serves synchronous legacy callers; the optional legacy heap is borrowed only for synchronous issue and valid new heaps remain owned by pending entries; only explicit controlled callers allocate an opaque plan and capture private ownership. No new locks, scheduler, logical map, queue wait or native export. Old/source/new/intermediate heap refs survive native drain. Self-copy emits saved mappings to preserve overlap. Legacy native batching/failure hooks remain intact.
+- src/d3d12/d3d12_device.hpp: append two internal preparation methods after the existing virtual prefix; opaque D3D12SparseBufferMappingPlan exposes preparation/issue/host finish/wait/retirement. Public D3D12 COM ABI unchanged; matched internal DXMT build required. Finish(accepted) publishes once only after all native calls; rejected and failed-after-issue never publish. Retire permits zero-issue terminal or actual private GPU event only.
+- tests/dx12/dx12_reserved_buffer.cpp: reuse payload's actual device/residency/lifetime/seeded readback fixture, grow controlled plan case to3pages. Modes plan-normal/partial/self/release/rejected/prepare-failure/wrong-word/cost. Default public D3D12 probe still uses delayed WineMetal imports.
+- docs/sparse-handoff-retirement-audit.md: execution card, source contracts, delivery evidence and remaining gates. No new repository files/runners.
+
+A duplicate parser or separate logical-state tracker was rejected. Automatic production credential activation remains rejected until the no-event terminal ownership contract is solved. Controlled caller must serialize source/destination mapping changes from prepare through issue/publication; capturing COM owners does not freeze arbitrary concurrent GPU mapping changes. No cross-queue concurrent mapping support is claimed.
+
+### Validation Results
+
+| Check | Result |
+|---|---|
+| Full x64 default build | PASS, release configuration following .github/build_dxmt.sh, repository LLVM-MinGW + patched LLVM installation, tests/D3D12/NVAPI/NVNGX enabled. Incremental full default target, not a clean/warning-free rebuild. No shared install. |
+| Scoped formatting / git diff --check | PASS; modified hunks only. |
+| i686 full probe compile | PASS, including internal plan/payload header; compile-only, no32bit runtime. |
+| Plan matrix | PASS11 processes: changing seeds for normal/partial/self, pending final release, wrong-word expected exit1, rejection, native event/operations preparation failures. Seven readback processes compare14 whole3page buffers:688128DWORDs plus guards. Native map/NULL/REUSE/SKIP, self overlap, cross-resource copy, empty plan, mutated input and exact-once finish/retirement checked. |
+| Ownership | PASS55 COM sentinel destructions matched to exact resource/heap unregister identities; zero public refs while issued plans remain pending; no premature destruction. This observes real COM destructor/unregister boundaries, not a kernel membership query. |
+| Nearby behavior | PASS9 processes: reserved buffer shader/remap/NULL/closed-list/cross-queue311296DWORD oracle, expected wrong-oracle exit1, feedback/barrier fault, native mapping normal/partial14readbacks458752DWORDs, texture retirement, packed full mips/copy, D3D11 real256DWORD copy and loaded D3D11/DXGI export/path identity. |
+| Failure regression | PASS11 processes: Update prepare/submitted, NULL unmap, Copy snapshot/prepare/submitted, copied NULL, self overlap/NULL/mixed/multiheap submitted failure. Actual mapping is drained by pre-existing test-only hook before terminal removal. Pending fence becomesMAX and later Signal rejected. |
+| Validation/runtime pairing | Metal API/GPU validation enabled notices in all31 final correctness processes; no unexpected Metal fault. PE loaded paths/export prefixes, paired WineMetal Unix UUID/path and staged/build hashes retained in delivery-gpu. MSC dylib SHA256cc487a757f431c83483346c06a3ae8558910ecc510ce59b1e4f905d5d6d72bd4; compiled SDK API4.0.3, runtime product version unknown. |
+| Windows/Mullion runtime, forced Metal3, other GPU, ASan, event-loss/device fault | NOT_RUN. Target M1 Max available and exercised; no Apple7 hardware block. |
+
+Initial GPU normal path passed. Temporary Python audit initially encoded a word-boundary regex as backspace; logs passed but audit failed, fixed external script and reran. Failure collector first used nonexistent phase issued, which exercised healthy mapping and correctly failed its removal oracle; corrected to the existing submitted hook and reran. These are preserved harness failures, not hidden GPU passes. Final review removed an unnecessary private retain of the optional unvalidated legacy heap argument before the final rebuild/matrix. Earlier identities/timing are supplemental and kept separate.
+
+### Cost / Capability Impact
+
+Production legacy path still uses stack ownership with no native credential allocation, additional lock or GPU submit. Controlled preparation adds one plan allocation, affected-tile vectors and private references; native preparation copies one operation per affected non-SKIP tile. Existing full resource_tiles reserve behavior is unchanged. Copy pending entries now also store destination tile indices; no all-resource/descriptor scan.
+
+CPU-only isolated A/B (ABBA/BAAB8processes, same executable,3tile Update/Copy,20000calls/sample, discard sample0,16warm samples/build/type, validation off) measured baseline Update median216.6475ns vs candidate219.085ns (+1.1%); Copy3812.765ns vs3812.245ns. Ranges Update212.815–440.065/214.75–228.33ns; Copy3769.46–4866.59/3775.715–3916.31ns. INCONCLUSIVE; no optimization/no-regression claim. This first comparison predates the final removal of the optional legacy heap retain; final source timing is recorded separately in cost-final-summary.json. Final-source comparison (same8process order): Update baseline/candidate median 220.113/213.897ns, P95 226.545/227.005ns, ranges 213.075–226.545/209.765–227.005ns; Copy baseline/candidate median 3819.495/3825.532ns, P95 3879.875/3888.370ns, ranges 3769.425–3879.875/3782.820–3888.370ns; distributions overlap, INCONCLUSIVE. CPU-only test is not GPU throughput or mapping completion timing. No Feature Level, Shader Model, Tier, MSC flags, Metal3 fallback, D3D11 source or production Fence policy change.
+
+### Remaining Blockers / Regression Risks
+
+BACKEND_NOT_IMPLEMENTED: bounded Submission attachment/queue admission and texture/packed mapping plans. SPEC_UNVERIFIED: independent terminal proof when mapping private event never signals, plus asynchronous NSError attribution of void mapping calls. Native final release may wait indefinitely; timeout/removal/cancellation/preceding barrier feedback still do not authorize retirement. MSC_SEMANTIC_GAP: none newly established; sparse shader coverage remains limited to existing fixtures. TARGET_DEVICE_NOT_AVAILABLE: Windows/other GPU comparisons only, not this Apple7 device.
+
+Logical host acceptance does not mean GPU completion. Partial native failure deliberately leaves CPU logical state unchanged, which requires terminal submission policy rather than rollback/continued normal issue. Existing parser limitations are not widened into a higher Tiled Tier. Controlled cross-resource preparation assumes serialized mapping owner; no generation/CAS/conflict map introduced.
+
+### Git State / Rollback / Next Recommended Slice
+
+Commit this focused four-file slice with repository feat(d3d12) style; no push, no history rewrite, original .gitignore unchanged. E12/delivery-manifest.json records final SHA/status/hashes. Revert the focused commit to restore independent legacy methods; existing WineMetal completion ABI/payload remains intact.
+
+Next single slice: **audit and specify the bounded Submission attachment and no-event terminal ownership together against the existing queue owner**, with explicit device-loss/teardown evidence. Do not activate automatic production plan issue just because happy-path private events passed. Texture plans and capability promotion remain separate.

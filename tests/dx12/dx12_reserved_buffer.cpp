@@ -77,6 +77,7 @@ int CheckSparseMappingPayload(const char *mode, uint32_t seed) {
       std::_Exit(3);
     }
   };
+  const bool plan_mode = !std::strncmp(mode, "plan-", 5);
   const bool native_only = !std::strcmp(mode, "payload-native-only"),
              release_pending = !std::strcmp(mode, "payload-release"),
              wrong_word = !std::strcmp(mode, "payload-wrong-word");
@@ -115,8 +116,8 @@ int CheckSparseMappingPayload(const char *mode, uint32_t seed) {
       std::printf("%02x", code[i]);
     std::printf("\n");
   }
-  constexpr uint64_t bytes = 131072, words = bytes / 4, page_words = 65536 / 4,
-                     guards = 32;
+  const uint64_t bytes = plan_mode ? 196608 : 131072, words = bytes / 4,
+                 page_words = 65536 / 4, guards = 32;
   std::array<std::atomic<unsigned>, 5> destroyed{};
   const GUID sentinel_guid = {0xaed22c31,
                               0xcaba,
@@ -175,26 +176,26 @@ int CheckSparseMappingPayload(const char *mode, uint32_t seed) {
                 (unsigned long long)resources[i]->GetMetalBuffer().handle);
   D3D12_TILED_RESOURCE_COORDINATE start = {};
   D3D12_TILE_REGION_SIZE region = {};
-  region.NumTiles = 2;
-  UINT offset = 0, count = 2;
+  region.NumTiles = plan_mode ? 3 : 2;
+  UINT offset = 0, count = region.NumTiles;
   for (unsigned i = 0; i < 2; ++i)
     require(SUCCEEDED(resources[i]->UpdateTileMappings(
                 1, &start, &region, public_heaps[i], 1, nullptr, &offset,
                 &count, D3D12_TILE_MAPPING_FLAG_NONE, {})),
             "logical fixture map");
   auto payload = std::make_unique<D3D12SparseMappingPayload>();
-  require(resources[0]->CaptureTileMappingOwners({2}, *payload) ==
-                  E_INVALIDARG &&
+  require(resources[0]->CaptureTileMappingOwners({plan_mode ? 3u : 2u},
+                                                 *payload) == E_INVALIDARG &&
               payload->resources.empty() && payload->heaps.empty(),
           "invalid range changed payload");
-  if (!native_only) {
+  if (!native_only && !plan_mode) {
     for (auto r : resources)
       require(SUCCEEDED(r->CaptureTileMappingOwners({0, 1}, *payload)),
               "capture owners");
     payload->heaps.emplace_back(heaps[2]);
   }
-  require(payload->resources.size() == (native_only ? 0 : 2) &&
-              payload->heaps.size() == (native_only ? 0 : 5),
+  require(payload->resources.size() == ((native_only || plan_mode) ? 0 : 2) &&
+              payload->heaps.size() == ((native_only || plan_mode) ? 0 : 5),
           "owner snapshot size");
   WMT::Reference<WMT::CommandQueue> classic{
       MTLDevice_newCommandQueue(metal.handle, 32)};
@@ -263,6 +264,288 @@ int CheckSparseMappingPayload(const char *mode, uint32_t seed) {
   MTLCommandBuffer_waitUntilCompleted(init);
   require(MTLCommandBuffer_status(init) == WMTCommandBufferStatusCompleted,
           "init failed");
+  if (plan_mode) {
+    const bool partial = !std::strcmp(mode, "plan-partial"),
+               self = !std::strcmp(mode, "plan-self"),
+               rejected = !std::strcmp(mode, "plan-rejected"),
+               prepare_fail = !std::strcmp(mode, "plan-prepare-failure"),
+               release = !std::strcmp(mode, "plan-release"),
+               negative = !std::strcmp(mode, "plan-wrong-word");
+    if (!std::strcmp(mode, "plan-cost")) {
+      LARGE_INTEGER frequency, begin, end;
+      QueryPerformanceFrequency(&frequency);
+      constexpr unsigned iterations = 20000;
+      for (unsigned sample = 0; sample < 5; ++sample) {
+        for (unsigned copy = 0; copy < 2; ++copy) {
+          QueryPerformanceCounter(&begin);
+          for (unsigned i = 0; i < iterations; ++i) {
+            const auto hr =
+                copy ? resources[1]->CopyTileMappingsFrom(
+                           resources[0], &start, &start, &region,
+                           D3D12_TILE_MAPPING_FLAG_NONE, {})
+                     : resources[0]->UpdateTileMappings(
+                           1, &start, &region, public_heaps[0], 1, nullptr,
+                           &offset, &count, D3D12_TILE_MAPPING_FLAG_NONE, {});
+            require(SUCCEEDED(hr), "cost mapping");
+          }
+          QueryPerformanceCounter(&end);
+          std::printf(
+              "PLAN_COST sample=%u copy=%u iterations=%u ns_per_call=%.3f\n",
+              sample, copy, iterations,
+              (end.QuadPart - begin.QuadPart) * 1e9 / frequency.QuadPart /
+                  iterations);
+        }
+      }
+      for (auto r : public_resources)
+        r->Release();
+      for (auto h : public_heaps)
+        h->Release();
+      require(deaths() == 5, "cost cleanup");
+      public_device->Release();
+      return 0;
+    }
+    std::vector<std::unique_ptr<D3D12SparseBufferMappingPlan>> plans;
+    auto logical = [&](unsigned resource, unsigned tile, unsigned heap,
+                       unsigned page) {
+      WMT::Buffer backing;
+      UINT64 at = UINT64_MAX;
+      return SUCCEEDED(
+                 resources[resource]->GetTileMapping(tile, backing, at)) &&
+             backing.handle == heaps[heap]->GetTileBackingBuffer().handle &&
+             at == uint64_t(page) * 65536;
+    };
+    std::unique_ptr<D3D12SparseBufferMappingPlan> invalid;
+    auto bad_start = start;
+    bad_start.X = 3;
+    require(resources[0]->PrepareBufferTileUpdate(
+                1, &bad_start, &region, public_heaps[0], 1, nullptr, &offset,
+                &count, D3D12_TILE_MAPPING_FLAG_NONE,
+                invalid) == E_INVALIDARG &&
+                !invalid,
+            "invalid preparation published output");
+    auto dst = start;
+    dst.X = self ? 1 : 0;
+    auto copy_size = region;
+    copy_size.NumTiles = 2;
+    if (self) {
+      plans.emplace_back();
+      require(SUCCEEDED(resources[0]->PrepareBufferTileUpdate(
+                  1, &start, &region, public_heaps[0], 1, nullptr, &offset,
+                  &count, D3D12_TILE_MAPPING_FLAG_NONE, plans.back())),
+              "self source plan");
+      plans.emplace_back();
+      require(SUCCEEDED(resources[0]->PrepareBufferTileCopy(
+                  resources[0], &dst, &start, &copy_size,
+                  D3D12_TILE_MAPPING_FLAG_NONE, plans.back())),
+              "self plan");
+    } else {
+      // Intermediate NULL and REUSE mappings are retained in order; SKIP is
+      // elided. Final source remains A0/A1/A2 for the later copied snapshot.
+      D3D12_TILED_RESOURCE_COORDINATE starts[7] = {};
+      D3D12_TILE_REGION_SIZE sizes[7] = {};
+      D3D12_TILE_RANGE_FLAGS flags[7] = {
+          D3D12_TILE_RANGE_FLAG_NONE, D3D12_TILE_RANGE_FLAG_NULL,
+          D3D12_TILE_RANGE_FLAG_SKIP, D3D12_TILE_RANGE_FLAG_REUSE_SINGLE_TILE,
+          D3D12_TILE_RANGE_FLAG_NONE, D3D12_TILE_RANGE_FLAG_NONE,
+          D3D12_TILE_RANGE_FLAG_NONE};
+      UINT offsets[7] = {0, 0, 0, 1, 0, 1, 2},
+           counts[7] = {1, 1, 1, 1, 1, 1, 1};
+      for (unsigned i = 0; i < 7; ++i) {
+        starts[i].X = i < 3 ? i : i - 4;
+        sizes[i].NumTiles = 1;
+      }
+      starts[3].X = 0;
+      plans.emplace_back();
+      require(SUCCEEDED(resources[0]->PrepareBufferTileUpdate(
+                  7, starts, sizes, public_heaps[0], 7, flags, offsets, counts,
+                  D3D12_TILE_MAPPING_FLAG_NONE, plans.back())) &&
+                  plans.back()->OperationCount() == 6,
+              "range plan");
+      std::memset(starts, 0xff, sizeof(starts));
+      std::memset(sizes, 0xff, sizeof(sizes));
+      std::memset(flags, 0xff, sizeof(flags));
+      std::memset(offsets, 0xff, sizeof(offsets));
+      std::memset(counts, 0xff, sizeof(counts));
+    }
+    plans.emplace_back();
+    require(SUCCEEDED(resources[1]->PrepareBufferTileUpdate(
+                1, &start, &region, public_heaps[2], 1, nullptr, &offset,
+                &count, D3D12_TILE_MAPPING_FLAG_NONE, plans.back())),
+            "destination plan");
+    if (!self) {
+      plans.emplace_back();
+      require(SUCCEEDED(resources[1]->PrepareBufferTileCopy(
+                  resources[0], &dst, &start, &copy_size,
+                  D3D12_TILE_MAPPING_FLAG_NONE, plans.back())),
+              "copy plan");
+    }
+    copy_size.NumTiles = UINT_MAX;
+    dst.X = UINT_MAX;
+    // Zero native operations are a legal all-SKIP plan; acceptance must keep
+    // the logical map unchanged and retire with no GPU event requirement.
+    if (!prepare_fail) {
+      std::unique_ptr<D3D12SparseBufferMappingPlan> skip;
+      D3D12_TILE_RANGE_FLAGS flag = D3D12_TILE_RANGE_FLAG_SKIP;
+      require(SUCCEEDED(resources[0]->PrepareBufferTileUpdate(
+                  1, &start, &region, nullptr, 1, &flag, nullptr, &count,
+                  D3D12_TILE_MAPPING_FLAG_NONE, skip)) &&
+                  skip->OperationCount() == 0 &&
+                  SUCCEEDED(skip->PrepareNative(sparse)) &&
+                  !skip->IssueNext() &&
+                  skip->Finish(WMTSparseMappingHostAccepted),
+              "empty plan");
+      WMTSparseMappingResult empty = {};
+      require(skip->Wait(0, empty) &&
+                  empty.state == WMTSparseMappingNotIssued &&
+                  skip->Retire(empty) &&
+                  !skip->Finish(WMTSparseMappingHostAccepted) &&
+                  !skip->Retire(empty),
+              "empty retirement");
+    }
+    for (auto &plan : plans) {
+      const auto hr = plan->PrepareNative(sparse);
+      require(prepare_fail ? hr == E_OUTOFMEMORY : SUCCEEDED(hr),
+              "native plan preparation");
+    }
+    require(logical(0, 1, 0, 1) && logical(1, 0, 1, 0) && logical(1, 2, 1, 2),
+            "preparation changed logical map");
+    for (auto r : public_resources)
+      require(r->Release() == 0, "public resource count");
+    for (auto h : public_heaps)
+      require(h->Release() == 0, "public heap count");
+    require(!deaths(), "plan failed to retain COM owners");
+    std::printf(
+        "PLAN_PREPARED self=%u partial=%u plans=%zu mutated=1 destroyed=%u\n",
+        self, partial, plans.size(), deaths());
+    if (prepare_fail || rejected) {
+      for (auto &plan : plans) {
+        WMTSparseMappingResult result = {};
+        if (!prepare_fail)
+          require(plan->Finish(WMTSparseMappingHostRejected) &&
+                      plan->Retire(result),
+                  "rejected plan");
+        else
+          require(!plan->IssueNext() &&
+                      !plan->Finish(WMTSparseMappingHostAccepted) &&
+                      !plan->Retire(result),
+                  "failed native preparation");
+      }
+      plans.clear();
+      require(deaths() == 5, "zero-issue plan cleanup");
+      std::printf("PLAN_ZERO prepare_failure=%u rejected=%u issued=0 "
+                  "destroyed=5 drained=1\n",
+                  prepare_fail, rejected);
+      public_device->Release();
+      return 0;
+    }
+    auto gate = metal.newSharedEvent(), done = metal.newSharedEvent();
+    auto barrier = sparse.prepareBarrierBeforeResourceState();
+    require(gate && done && barrier, "plan events");
+    sparse.waitForEvent(gate, 1);
+    require(barrier.submit(), "plan barrier");
+    unsigned issued = 0;
+    for (size_t i = 0; i < plans.size(); ++i) {
+      auto &plan = plans[i];
+      require(!plan->Finish(WMTSparseMappingHostAccepted), "early acceptance");
+      const auto n =
+          partial && i + 1 == plans.size() ? 1 : plan->OperationCount();
+      for (size_t j = 0; j < n; ++j)
+        require(plan->IssueNext(), "plan issue");
+      issued += n;
+      const auto host = partial && i + 1 == plans.size()
+                            ? WMTSparseMappingHostFailedAfterIssue
+                            : WMTSparseMappingHostAccepted;
+      require(plan->Finish(host) && !plan->Finish(host) && !plan->IssueNext(),
+              "plan finish once");
+      WMTSparseMappingResult result = {};
+      require(plan->Wait(0, result) &&
+                  result.state == WMTSparseMappingSealedPending &&
+                  !plan->Retire(result) && !deaths(),
+              "pending plan retired");
+    }
+    sparse.signalEvent(done, 1);
+    require(logical(0, 1, 0, self ? 0 : 1) && logical(0, 2, 0, self ? 1 : 2) &&
+                logical(1, 0, partial || self ? 2 : 0, 0) &&
+                logical(1, 1, partial || self ? 2 : 0, 1) &&
+                logical(1, 2, 2, 2),
+            "logical publication / partial rejection");
+    std::printf("PLAN_PENDING issued=%u logical=%s destroyed=%u\n", issued,
+                partial ? "prefix-unpublished" : "accepted", deaths());
+    std::fflush(stdout);
+    if (release) {
+      std::promise<void> entered;
+      auto started = entered.get_future();
+      auto worker = std::async(std::launch::async,
+                               [owned = std::move(plans), &entered]() mutable {
+                                 auto pool = WMT::MakeAutoreleasePool();
+                                 entered.set_value();
+                                 owned.clear();
+                               });
+      require(started.wait_for(std::chrono::seconds(10)) ==
+                      std::future_status::ready &&
+                  worker.wait_for(std::chrono::milliseconds(40)) ==
+                      std::future_status::timeout &&
+                  !deaths(),
+              "plan drain ownership");
+      gate.signalValue(1);
+      require(worker.wait_for(std::chrono::seconds(10)) ==
+                  std::future_status::ready,
+              "plan release drain");
+      worker.get();
+    } else {
+      gate.signalValue(1);
+      for (auto &plan : plans) {
+        WMTSparseMappingResult result = {};
+        require(plan->Wait(10000, result) &&
+                    result.state == WMTSparseMappingGPUComplete && !deaths(),
+                "plan GPU boundary");
+      }
+      std::fill(out, out + 2 * words + guards, 0xa5a55a5au);
+      auto read = MTLCommandQueue_commandBuffer(classic.handle);
+      MTLCommandBuffer_encodeWaitForEvent(read, done.handle, 1);
+      enc = MTLCommandBuffer_blitCommandEncoder(read);
+      require(read && enc, "plan read objects");
+      blit(enc, source.handle, output.handle, 0);
+      blit(enc, dest.handle, output.handle, bytes);
+      MTLCommandEncoder_endEncoding(enc);
+      MTLCommandBuffer_commit(read);
+      MTLCommandBuffer_waitUntilCompleted(read);
+      require(MTLCommandBuffer_status(read) == WMTCommandBufferStatusCompleted,
+              "plan read completed");
+      unsigned bad = 0, guard = 0;
+      for (unsigned n = 0; n < 2; ++n)
+        for (uint64_t w = 0; w < words; ++w) {
+          auto page = w / page_words;
+          unsigned heap = n && (self || page >= (partial ? 1u : 2u));
+          uint64_t index = self && !n && page ? w - page_words : w;
+          auto want = pattern(heap, index);
+          if (negative && !n && w + 1 == words)
+            want ^= 1;
+          bad += out[n * words + w] != want;
+        }
+      for (uint64_t w = 2 * words; w < 2 * words + guards; ++w)
+        guard += out[w] != 0xa5a55a5au;
+      std::printf("PLAN_READBACK words=%llu bad=%u guard=%u\n",
+                  (unsigned long long)(2 * words), bad, guard);
+      require(bad == unsigned(negative) && !guard, "plan read oracle");
+      for (auto &plan : plans) {
+        WMTSparseMappingResult result = {};
+        require(plan->Retire(result) && !plan->Retire(result),
+                "plan retirement once");
+      }
+      plans.clear();
+    }
+    require(deaths() == 5, "plan COM destruction");
+    WMTSparseBarrierResult feedback = {};
+    require(barrier.wait(10000, feedback) &&
+                feedback.state == WMTSparseBarrierCompleted,
+            "plan feedback");
+    std::printf("PLAN_RESULT seed=%u self=%u partial=%u release=%u issued=%u "
+                "destroyed=5 failures=%u drained=1\n",
+                seed, self, partial, release, issued, negative);
+    public_device->Release();
+    return negative ? 1 : 0;
+  }
   WMTSparseBufferBatchOperation ops[3] = {};
   ops[0].destination = source.handle;
   ops[0].heap = heaps[0]->GetMetalHeap().handle;
@@ -1993,7 +2276,15 @@ int Run(const char *read_path, const char *write_path, UINT seed,
 }
 } // namespace
 int main(int argc, char **argv) {
-  if (argc == 3 && (!std::strcmp(argv[1], "payload-normal") ||
+  if (argc == 3 && (!std::strcmp(argv[1], "plan-cost") ||
+                    !std::strcmp(argv[1], "plan-normal") ||
+                    !std::strcmp(argv[1], "plan-partial") ||
+                    !std::strcmp(argv[1], "plan-self") ||
+                    !std::strcmp(argv[1], "plan-rejected") ||
+                    !std::strcmp(argv[1], "plan-prepare-failure") ||
+                    !std::strcmp(argv[1], "plan-release") ||
+                    !std::strcmp(argv[1], "plan-wrong-word") ||
+                    !std::strcmp(argv[1], "payload-normal") ||
                     !std::strcmp(argv[1], "payload-release") ||
                     !std::strcmp(argv[1], "payload-native-only") ||
                     !std::strcmp(argv[1], "payload-prepare-failure") ||

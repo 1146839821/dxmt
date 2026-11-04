@@ -61,6 +61,7 @@ namespace dxmt {
 class MTLD3D12Resource;
 class MTLD3D12CommandAllocator;
 struct D3D12SparseMappingPayload;
+class D3D12SparseBufferMappingPlan;
 
 // A placed resource owns a private reference to the heap that backs it.  Keep
 // this interface declaration before MTLD3D12Resource so resource
@@ -354,6 +355,26 @@ public:
   CaptureTileMappingOwners(const std::vector<UINT> &tiles, D3D12SparseMappingPayload &payload) const {
     return E_NOTIMPL;
   }
+
+  // Controlled buffer handoff only. Calls between preparation and publication
+  // must be serialized by the existing mapping owner; no second tile map.
+  virtual HRESULT
+  PrepareBufferTileUpdate(
+      UINT region_count, const D3D12_TILED_RESOURCE_COORDINATE *starts, const D3D12_TILE_REGION_SIZE *sizes,
+      ID3D12Heap *heap, UINT range_count, const D3D12_TILE_RANGE_FLAGS *flags, const UINT *offsets, const UINT *counts,
+      D3D12_TILE_MAPPING_FLAGS mapping_flags, std::unique_ptr<D3D12SparseBufferMappingPlan> &plan
+  ) {
+    return E_NOTIMPL;
+  }
+
+  virtual HRESULT
+  PrepareBufferTileCopy(
+      MTLD3D12Resource *source, const D3D12_TILED_RESOURCE_COORDINATE *destination_start,
+      const D3D12_TILED_RESOURCE_COORDINATE *source_start, const D3D12_TILE_REGION_SIZE *size,
+      D3D12_TILE_MAPPING_FLAGS flags, std::unique_ptr<D3D12SparseBufferMappingPlan> &plan
+  ) {
+    return E_NOTIMPL;
+  }
 };
 
 // Transient submission input ownership, not another logical tile map. Declare
@@ -380,6 +401,20 @@ struct D3D12SparseMappingPayload {
     heaps.clear();
     return true;
   }
+};
+
+// An opaque transient plan, owned by the buffer implementation. Successful host
+// acceptance publishes once; rejection/partial issue never changes logical state.
+// Native completion and COM retirement are separate from logical publication.
+class D3D12SparseBufferMappingPlan {
+public:
+  virtual ~D3D12SparseBufferMappingPlan() = default;
+  virtual HRESULT PrepareNative(WMT::SparseMappingQueue queue) = 0;
+  virtual bool IssueNext() = 0;
+  virtual bool Finish(WMTSparseMappingHostOutcome outcome) = 0;
+  virtual bool Wait(uint64_t timeout_ms, WMTSparseMappingResult &result) = 0;
+  virtual bool Retire(WMTSparseMappingResult &result) = 0;
+  virtual size_t OperationCount() const = 0;
 };
 
 inline bool
