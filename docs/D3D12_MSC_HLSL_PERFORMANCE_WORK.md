@@ -124,7 +124,7 @@ the detailed sections below preserve original measurements and limits.
 | Linear versus root layout | A native Metal control compared linear and explicit layouts with one SRV and one UAV, including reflection, readback and timing; D3D12 equivalence remains unproven. | Measure representative resource sets and D3D12 binding costs before any production change. |
 | GPU and OS targets | Apple6/Apple7 controlled conversion and GPU output were compared on M1 Max; target parameters are included in the conversion key. | Test OS targets and additional devices; do not promote minimum platform. |
 | Argument buffer/occupancy | Root and table residency is tracked in command list (`d3d12_command_list.cpp:949-975`). No register or occupancy counters captured. | Capture representative vertex/fragment/compute counters and CPU binding cost before changing ABI. |
-| Execution overlap | Exact readbacks and 50 timing samples per visibility passed. After correcting layout-depth handling and adding submission/execution-point checks, three fresh ALL/PIXEL trace pairs passed: 72 workloads, 216 point pairs, no observed Compute/Vertex overlap. Earlier incomplete/ambiguous captures remain rejected. MSC broad stages (`d3d12_command_list.cpp:4620`) and the Vertex fence wait (`d3d12_command_queue.cpp:1382`) remain unchanged. | Establish dependency safety before a stage-scoped scheduling experiment; see [the attribution report](msc-trace-attribution.md). |
+| Execution overlap | Exact readbacks and 50 timing samples per visibility passed. After correcting layout-depth handling and adding submission/execution-point checks, three fresh ALL/PIXEL trace pairs passed: 72 workloads, 216 point pairs, no observed Compute/Vertex overlap. The N13 audit found that residency deltas, direct bindings, transitive predecessors and alias/barrier obligations do not provide a complete early-access proof. MSC broad stages and the Vertex fence wait remain unchanged. | Add the CS→VB transitive-dependency regression before a scheduling experiment; see the [dependency contract](msc-fence-dependency-design.md) and [trace evidence](msc-trace-attribution.md). |
 | Input DXIL | Controlled `-Od` and `-O3` pixel tests passed; embedded debug exposed an LLVM metadata incompatibility addressed by a separately built patched toolchain. | Expand shader coverage and deployment verification; do not recompile game shaders. |
 | Root validation | Unset, zero, bound-resource and DXIL validation were compared on one valid/missing-resource pair; DXIL validation also passed controlled HLSL GPU pixels. | Validate broader inputs and runtime versions before changing production flags. |
 | In-process and persistent cache | Process cache plus single-flight exists, disk cache explicitly disabled (`d3d12_shader_converter.cpp:199-213,228-237,1812-1837`). Map has no evident capacity bound. Key includes stage, source, root, targets, spaces, configuration and flags, but loaded-dylib content identity is not trusted for persistent use. | Measure hits, waits and memory growth; validate content identity, corruption recovery and opt-in before disk cache. Function specializations require separate keys. |
@@ -1631,3 +1631,30 @@ claim for relaxing the current fence. See [trace attribution](msc-trace-attribut
 for the fixed capture schedule, all outcomes and limits. Next is a scoped
 dependency-safety design. Production synchronization and advertised capabilities
 remain unchanged; the overall MSC task is ongoing.
+
+### Compute-to-Render dependency design — 2026-11-04
+
+The N13 audit at `cf2af837` completed the
+[dependency contract](msc-fence-dependency-design.md). Current submission uses
+are residency deltas, ordinary MSC vertex buffers also use direct binding,
+and alias/split barriers rely on encoder boundaries and existing ordering.
+An unrelated immediate compute producer cannot rule out an older producer or
+reader whose dependency the shared fence carries. Explicit enhanced-barrier
+execution scopes must also survive independently of resource intersections.
+
+Mullion was refreshed to remote HEAD
+`93de32b9145885ceb2e45be7d445e56d62499b3c` for this source audit. Its PreRaster
+and Fragment waits are backed by grouped-fence predecessor tracking; its alias
+ordering uses additional backend-specific mechanisms. No implementation was
+ported and no Mullion runtime result is claimed. Primary Microsoft documents,
+installed Apple SDK headers and the pinned reference files/hashes are retained
+in `dxmt-test/n95-capability-gate/result-msc-fence-dependency-20261104/`.
+
+The design preserves current production waits and identifies a single next
+slice: extend the existing overlap probe with CS-written VB data, both directly
+consumed and consumed after a distinct unrelated compute encoder. Require exact
+readback without an intervening CPU wait; a wrong-oracle control checks the
+test. No stage relaxation is implemented or certified. Wider WAR/WAW, alias,
+volatile descriptor, indirect, replay and advanced-stage coverage is specified
+before future optimization. This documentation slice adds no runtime cost or
+capability; the broader MSC task remains incomplete.
