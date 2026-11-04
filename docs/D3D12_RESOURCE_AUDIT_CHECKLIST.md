@@ -61,6 +61,11 @@ and does not justify another unchanged local MS_LOAD or Submit timing matrix.
   remap. The source audit and proposed admission-time resolution Design Card
   are complete; implementation and public activation remain open. See
   [2026-11-05 audit](sparse-handoff-retirement-audit.md#buffer-plan-preparation-versus-admission--n15-audit-2026-11-05).
+  The following controlled admission-time resolution slice fixes same-owner
+  source/logical divergence and captures current old-target heaps; source/NULL/
+  self/capacity/retry/lifetime and MSC regressions pass within its documented
+  scope. Public activation and general cross-queue ownership remain open. See
+  [implementation delivery](sparse-handoff-retirement-audit.md#controlled-admission-time-buffer-mapping-resolution--delivery-2026-11-05).
 
 - [x] N09 typed-buffer format admission rejects unsupported native SRV/UAV
   formats before publication. See the 2026-10-27 slice below; BGRA SRV usage,

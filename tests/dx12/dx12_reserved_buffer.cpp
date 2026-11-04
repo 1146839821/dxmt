@@ -78,6 +78,11 @@ int CheckSparseMappingPayload(const char *mode, uint32_t seed) {
     }
   };
   const bool plan_mode = !std::strncmp(mode, "plan-", 5);
+  const bool generation_null = !std::strcmp(mode, "plan-queue-generation-null"),
+             generation_mapped =
+                 !std::strcmp(mode, "plan-queue-generation-mapped"),
+             generation_lifetime =
+                 !std::strcmp(mode, "plan-queue-generation-lifetime");
   const bool native_only = !std::strcmp(mode, "payload-native-only"),
              release_pending = !std::strcmp(mode, "payload-release"),
              wrong_word = !std::strcmp(mode, "payload-wrong-word");
@@ -178,11 +183,15 @@ int CheckSparseMappingPayload(const char *mode, uint32_t seed) {
   D3D12_TILE_REGION_SIZE region = {};
   region.NumTiles = plan_mode ? 3 : 2;
   UINT offset = 0, count = region.NumTiles;
-  for (unsigned i = 0; i < 2; ++i)
+  for (unsigned i = 0; i < 2; ++i) {
+    const auto flag = generation_mapped && !i ? D3D12_TILE_RANGE_FLAG_NULL
+                                              : D3D12_TILE_RANGE_FLAG_NONE;
     require(SUCCEEDED(resources[i]->UpdateTileMappings(
-                1, &start, &region, public_heaps[i], 1, nullptr, &offset,
-                &count, D3D12_TILE_MAPPING_FLAG_NONE, {})),
+                1, &start, &region,
+                flag ? nullptr : public_heaps[generation_lifetime ? 0 : i], 1,
+                &flag, &offset, &count, D3D12_TILE_MAPPING_FLAG_NONE, {})),
             "logical fixture map");
+  }
   auto payload = std::make_unique<D3D12SparseMappingPayload>();
   require(resources[0]->CaptureTileMappingOwners({plan_mode ? 3u : 2u},
                                                  *payload) == E_INVALIDARG &&
@@ -265,13 +274,23 @@ int CheckSparseMappingPayload(const char *mode, uint32_t seed) {
   require(MTLCommandBuffer_status(init) == WMTCommandBufferStatusCompleted,
           "init failed");
   if (!std::strncmp(mode, "plan-queue", 10)) {
+    const bool generation = !std::strncmp(mode, "plan-queue-generation", 21),
+               generation_aba = !std::strcmp(mode, "plan-queue-generation-aba"),
+               generation_self =
+                   !std::strcmp(mode, "plan-queue-generation-self"),
+               generation_capacity =
+                   !std::strcmp(mode, "plan-queue-generation-capacity"),
+               generation_failure =
+                   !std::strcmp(mode, "plan-queue-generation-failure") ||
+                   !std::strcmp(mode, "plan-queue-generation-failure-late");
     const bool partial = !std::strcmp(mode, "plan-queue-partial"),
                rejected = !std::strcmp(mode, "plan-queue-rejected"),
                capacity_removal =
                    !std::strcmp(mode, "plan-queue-capacity-removal"),
                removal = !std::strcmp(mode, "plan-queue-removal"),
                release = !std::strcmp(mode, "plan-queue-release"),
-               capacity = !std::strcmp(mode, "plan-queue-capacity"),
+               capacity = !std::strcmp(mode, "plan-queue-capacity") ||
+                          generation_capacity,
                empty = !std::strcmp(mode, "plan-queue-empty"),
                negative = !std::strcmp(mode, "plan-queue-wrong-word"),
                prepare_fail = !std::strcmp(mode, "plan-queue-prepare-failure");
@@ -293,15 +312,28 @@ int CheckSparseMappingPayload(const char *mode, uint32_t seed) {
     auto gate = metal.newSharedEvent();
     require(gate != nullptr, "queue gate");
     std::array<std::unique_ptr<D3D12SparseBufferMappingPlan>, 3> plans;
-    for (unsigned i = 0; i < 2; ++i)
+    for (unsigned i = 0; i < 2; ++i) {
+      const auto flag = generation_null && !i ? D3D12_TILE_RANGE_FLAG_NULL
+                                              : D3D12_TILE_RANGE_FLAG_NONE;
+      const unsigned heap = generation_lifetime && i ? 1
+                            : i || generation        ? 2
+                                                     : 0;
+      auto update_region = region;
+      if (generation_lifetime && i)
+        update_region.NumTiles = 2;
+      const UINT update_count = update_region.NumTiles;
       require(SUCCEEDED(resources[i]->PrepareBufferTileUpdate(
-                  1, &start, &region, public_heaps[i ? 2 : 0], 1, nullptr,
-                  &offset, &count, D3D12_TILE_MAPPING_FLAG_NONE, plans[i])),
+                  1, &start, &update_region,
+                  flag ? nullptr : public_heaps[heap], 1, &flag, &offset,
+                  &update_count, D3D12_TILE_MAPPING_FLAG_NONE, plans[i])),
               "queue update plan");
+    }
     auto copy_size = region;
     copy_size.NumTiles = 2;
-    require(SUCCEEDED(resources[1]->PrepareBufferTileCopy(
-                resources[0], &start, &start, &copy_size,
+    auto copy_start = start;
+    copy_start.X = generation_self ? 1 : 0;
+    require(SUCCEEDED(resources[generation_self ? 0 : 1]->PrepareBufferTileCopy(
+                resources[0], &copy_start, &start, &copy_size,
                 D3D12_TILE_MAPPING_FLAG_NONE, plans[2])),
             "queue copy plan");
     SetEnvironmentVariableA("DXMT_TEST_SPARSE_SUBMISSION", nullptr);
@@ -311,6 +343,15 @@ int CheckSparseMappingPayload(const char *mode, uint32_t seed) {
                 plans[0],
             "queue opt-in");
     SetEnvironmentVariableA("DXMT_TEST_SPARSE_SUBMISSION", "1");
+    if (generation_lifetime) {
+      std::unique_ptr<D3D12SparseBufferMappingPlan> initial;
+      require(SUCCEEDED(resources[1]->PrepareBufferTileUpdate(
+                  1, &start, &region, public_heaps[0], 1, nullptr, &offset,
+                  &count, D3D12_TILE_MAPPING_FLAG_NONE, initial)) &&
+                  SUCCEEDED(queue->SubmitSparsePlanForTesting(
+                      initial, gate, terminal, UINT_MAX, nullptr, nullptr)),
+              "initial destination native mapping");
+    }
     if (prepare_fail) {
       require(queue->SubmitSparsePlanForTesting(plans[0], gate, terminal,
                                                 UINT_MAX, nullptr,
@@ -329,7 +370,7 @@ int CheckSparseMappingPayload(const char *mode, uint32_t seed) {
       public_device->Release();
       return 0;
     }
-    if (capacity || capacity_removal) {
+    if ((capacity && !generation_capacity) || capacity_removal) {
       require(SUCCEEDED(queue->Wait(unblock.ptr, 1)), "capacity wait");
       for (unsigned i = 0; i < 31; ++i)
         require(SUCCEEDED(queue->Signal(fence.ptr, i + 1)), "capacity fill");
@@ -382,9 +423,88 @@ int CheckSparseMappingPayload(const char *mode, uint32_t seed) {
                 plans[1], gate, terminal, UINT_MAX, nullptr, nullptr)) &&
                 !plans[1],
             "queue destination submit");
+    if (generation_lifetime) {
+      // The copy was prepared while the destination named heap0. Complete
+      // the intervening update, so only the new admission capture can retain
+      // heap1 after the copy replaces the destination's logical reference.
+      require(SUCCEEDED(queue->Signal(fence.ptr, 61)),
+              "old target drain signal");
+      gate.signalValue(1);
+      HANDLE completed = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+      require(completed &&
+                  SUCCEEDED(fence->SetEventOnCompletion(61, completed)) &&
+                  WaitForSingleObject(completed, 10000) == WAIT_OBJECT_0,
+              "old target drain");
+      CloseHandle(completed);
+      gate = metal.newSharedEvent();
+      require(gate != nullptr, "old target copy gate");
+      public_heaps[1]->Release();
+      public_heaps[1] = nullptr;
+      require(!deaths(), "old target released before copy");
+    }
+    if (generation_aba) {
+      std::unique_ptr<D3D12SparseBufferMappingPlan> back;
+      require(SUCCEEDED(resources[0]->PrepareBufferTileUpdate(
+                  1, &start, &region, public_heaps[0], 1, nullptr, &offset,
+                  &count, D3D12_TILE_MAPPING_FLAG_NONE, back)) &&
+                  SUCCEEDED(queue->SubmitSparsePlanForTesting(
+                      back, gate, terminal, UINT_MAX, nullptr, nullptr)),
+              "generation ABA source restore");
+    }
+    if (generation_failure) {
+      SetEnvironmentVariableA("DXMT_TEST_SPARSE_BUFFER_COPY_FAILURE",
+                              "admission");
+      SetEnvironmentVariableA(
+          "DXMT_TEST_SPARSE_BUFFER_COPY_FAIL_AT",
+          !std::strcmp(mode, "plan-queue-generation-failure-late") ? "2" : "1");
+      require(queue->SubmitSparsePlanForTesting(plans[2], gate, terminal,
+                                                UINT_MAX, nullptr,
+                                                nullptr) == E_OUTOFMEMORY &&
+                  plans[2] && SUCCEEDED(device->GetDeviceRemovedReason()),
+              "generation resolution allocation failure");
+      SetEnvironmentVariableA("DXMT_TEST_SPARSE_BUFFER_COPY_FAILURE", nullptr);
+      SetEnvironmentVariableA("DXMT_TEST_SPARSE_BUFFER_COPY_FAIL_AT", nullptr);
+      std::printf("GENERATION_RETRY retained=1 removed=0 calls=0\n");
+    }
     HRESULT last = S_OK;
     HANDLE issued = nullptr, resume = nullptr;
-    if (removal) {
+    if (generation_capacity) {
+      // The copy was prepared before the remap; let that remap finish, then
+      // hold this copy at capacity. ResolveAdmission must run after the wait.
+      require(SUCCEEDED(queue->Signal(fence.ptr, 61)), "capacity setup signal");
+      gate.signalValue(1);
+      HANDLE completed = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+      require(completed &&
+                  SUCCEEDED(fence->SetEventOnCompletion(61, completed)) &&
+                  WaitForSingleObject(completed, 10000) == WAIT_OBJECT_0,
+              "capacity setup drain");
+      CloseHandle(completed);
+      gate = metal.newSharedEvent();
+      require(gate && SUCCEEDED(queue->Wait(unblock.ptr, 1)),
+              "copy capacity gate");
+      for (unsigned i = 0; i < 31; ++i)
+        require(SUCCEEDED(queue->Signal(fence.ptr, i + 1)),
+                "copy capacity fill");
+      std::promise<void> entered;
+      auto started = entered.get_future();
+      auto next = std::async(std::launch::async, [&] {
+        entered.set_value();
+        return queue->SubmitSparsePlanForTesting(plans[2], gate, terminal,
+                                                 UINT_MAX, nullptr, nullptr);
+      });
+      require(started.wait_for(std::chrono::seconds(10)) ==
+                      std::future_status::ready &&
+                  next.wait_for(std::chrono::milliseconds(40)) ==
+                      std::future_status::timeout &&
+                  plans[2] && fence->GetCompletedValue() == 61,
+              "copy capacity admitted early");
+      std::printf("GENERATION_CAPACITY pending=32 copy=blocked retained=1\n");
+      require(SUCCEEDED(unblock->Signal(1)), "copy capacity unblock");
+      require(next.wait_for(std::chrono::seconds(10)) ==
+                  std::future_status::ready,
+              "copy capacity admission");
+      last = next.get();
+    } else if (removal) {
       issued = CreateEventW(nullptr, TRUE, FALSE, nullptr);
       resume = CreateEventW(nullptr, TRUE, FALSE, nullptr);
       require(issued && resume, "removal events");
@@ -416,12 +536,24 @@ int CheckSparseMappingPayload(const char *mode, uint32_t seed) {
             "sealed record transfer");
     WMT::Buffer backing;
     UINT64 at = UINT64_MAX;
-    require(SUCCEEDED(resources[1]->GetTileMapping(0, backing, at)) &&
+    const unsigned logical_heap = generation && !generation_aba    ? 2
+                                  : partial || removal || rejected ? 2
+                                                                   : 0;
+    require(SUCCEEDED(resources[generation_self ? 0 : 1]->GetTileMapping(
+                generation_self ? 1 : 0, backing, at)) &&
                 at == 0 &&
-                backing.handle == heaps[partial || removal || rejected ? 2 : 0]
-                                      ->GetTileBackingBuffer()
-                                      .handle,
+                (generation_null
+                     ? !backing
+                     : backing.handle ==
+                           heaps[logical_heap]->GetTileBackingBuffer().handle),
             "logical prefix publication");
+    if (generation_lifetime)
+      require(!deaths(), "current old target not retained by copy admission");
+    if (generation)
+      std::printf(
+          "GENERATION_LOGICAL heap=%u self=%u aba=%u capacity=%u retry=%u\n",
+          logical_heap, generation_self, generation_aba, generation_capacity,
+          generation_failure);
     if (empty) {
       std::unique_ptr<D3D12SparseBufferMappingPlan> skip;
       D3D12_TILE_RANGE_FLAGS flag = D3D12_TILE_RANGE_FLAG_SKIP;
@@ -480,8 +612,53 @@ int CheckSparseMappingPayload(const char *mode, uint32_t seed) {
     require(fence->GetCompletedValue() ==
                 (partial || removal || rejected ? UINT64_MAX : 77),
             "queue FIFO final fence");
+    if (generation_lifetime)
+      require(destroyed[3] == 1 && deaths() == 1,
+              "current old target not retired after terminal proof");
     unsigned bad = 0, guard = 0;
-    if (!release) {
+    if (generation_null) {
+      // Native unmapped reads are not an oracle. The destination's unaffected
+      // third tile must retain its seeded heap2 contents.
+      for (unsigned resource = 0; resource < 2; ++resource)
+        for (unsigned tile = 0; tile < (resource ? 2u : 3u); ++tile)
+          require(!resources[resource]->IsTileMapped(tile),
+                  "NULL copy logical map");
+      WMT::Buffer tail;
+      UINT64 tail_offset = 0;
+      require(SUCCEEDED(resources[1]->GetTileMapping(2, tail, tail_offset)) &&
+                  tail && tail_offset == 2 * TileBytes,
+              "NULL copy changed unaffected tail");
+      std::fill(out, out + page_words + guards, 0xa5a55a5au);
+      auto read = MTLCommandQueue_commandBuffer(classic.handle);
+      enc = MTLCommandBuffer_blitCommandEncoder(read);
+      require(read && enc, "NULL tail read objects");
+      wmtcmd_blit_copy_from_buffer_to_buffer c = {};
+      c.type = WMTBlitCommandCopyFromBufferToBuffer;
+      c.src = dest.handle;
+      c.src_offset = 2 * TileBytes;
+      c.dst = output.handle;
+      c.copy_length = TileBytes;
+      MTLBlitCommandEncoder_encodeCommands(enc,
+                                           reinterpret_cast<wmtcmd_base *>(&c));
+      MTLCommandEncoder_endEncoding(enc);
+      MTLCommandBuffer_commit(read);
+      MTLCommandBuffer_waitUntilCompleted(read);
+      require(MTLCommandBuffer_status(read) == WMTCommandBufferStatusCompleted,
+              "NULL tail read completion");
+      for (uint64_t w = 0; w < page_words; ++w)
+        bad += out[w] != pattern(1, w + 2 * page_words);
+      for (uint64_t w = page_words; w < page_words + guards; ++w)
+        guard += out[w] != 0xa5a55a5au;
+      require(!bad && !guard, "NULL unaffected tail oracle");
+      std::printf(
+          "GENERATION_NULL words=%llu native_unmapped_read=0 bad=%u guard=%u\n",
+          (unsigned long long)page_words, bad, guard);
+      for (auto r : public_resources)
+        r->Release();
+      for (auto h : public_heaps)
+        if (h)
+          h->Release();
+    } else if (!release) {
       std::fill(out, out + 2 * words + guards, 0xa5a55a5au);
       auto read = MTLCommandQueue_commandBuffer(classic.handle);
       enc = MTLCommandBuffer_blitCommandEncoder(read);
@@ -498,20 +675,29 @@ int CheckSparseMappingPayload(const char *mode, uint32_t seed) {
           unsigned heap = n && w / page_words >= (rejected             ? 0u
                                                   : partial || removal ? 1u
                                                                        : 2u);
-          auto want = pattern(heap, w);
+          if (generation)
+            heap = generation_aba ? (n && w / page_words >= 2 ? 1 : 0) : 1;
+          if (generation_lifetime && n && w / page_words >= 2)
+            heap = 0;
+          const auto pattern_word =
+              generation_self && !n && w >= page_words ? w - page_words : w;
+          auto want = pattern(heap, pattern_word);
           if (negative && !n && w + 1 == words)
             want ^= 1;
           bad += out[n * words + w] != want;
         }
       for (uint64_t w = 2 * words; w < 2 * words + guards; ++w)
         guard += out[w] != 0xa5a55a5au;
+      if (bad || guard)
+        std::printf("QUEUE_PLAN_MISMATCH bad=%u guard=%u\n", bad, guard);
       require(bad == unsigned(negative) && !guard, "queue GPU oracle");
       std::printf("QUEUE_PLAN_READBACK words=%llu bad=%u guard=%u\n",
                   (unsigned long long)(2 * words), bad, guard);
       for (auto r : public_resources)
         r->Release();
       for (auto h : public_heaps)
-        h->Release();
+        if (h)
+          h->Release();
     }
     require(deaths() == 5, "queue COM final destruction");
     std::printf("QUEUE_PLAN_RESULT seed=%u mode=%s terminal=%u destroyed=5 "

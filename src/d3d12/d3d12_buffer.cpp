@@ -175,11 +175,63 @@ class MTLD3D12Buffer : public MTLD3D12Pageable<MTLD3D12Resource> {
     }
 
     HRESULT
+    ResolveAdmission() {
+      // Caller owns serialized mapping admission. Capture source contents and
+      // overwritten destination owners together, after any capacity wait.
+      // Locals outlive the locks so old private refs never die under them.
+      std::vector<TileUpdate> resolved;
+      std::vector<Com<MTLD3D12Heap, false>> heaps;
+      if (source)
+        FailBufferCopyPreparationForTesting("admission");
+      if (updates.size() > (heaps.max_size() - payload.heaps.size()) / 2)
+        return E_OUTOFMEMORY;
+      heaps.reserve(payload.heaps.size() + updates.size() * 2);
+      // Preserve prior captures until normal retirement outside queue locks,
+      // including references from a failed native preparation that is retried.
+      heaps.insert(heaps.end(), payload.heaps.begin(), payload.heaps.end());
+      if (source)
+        resolved.reserve(updates.size());
+      {
+        std::unique_lock<dxmt::mutex> dst_lock(destination->tile_mapping_mutex_, std::defer_lock);
+        std::unique_lock<dxmt::mutex> src_lock;
+        if (source && source != destination) {
+          src_lock = std::unique_lock<dxmt::mutex>(source->tile_mapping_mutex_, std::defer_lock);
+          std::lock(dst_lock, src_lock);
+        } else {
+          dst_lock.lock();
+        }
+        for (size_t i = 0; i < updates.size(); ++i) {
+          const auto &old = destination->tile_mappings_[updates[i].resource_tile];
+          if (old.heap)
+            heaps.push_back(old.heap);
+          if (source) {
+            const auto &saved = source->tile_mappings_[source_start + i];
+            resolved.push_back({updates[i].resource_tile, saved.heap, saved.heap_tile});
+            if (saved.heap)
+              heaps.push_back(saved.heap);
+          } else if (updates[i].heap) {
+            // Includes transient updates overwritten by a later duplicate tile.
+            heaps.push_back(updates[i].heap);
+          }
+        }
+      }
+      if (source)
+        FailBufferCopyPreparationForTesting("admission");
+      if (source)
+        updates.swap(resolved);
+      payload.heaps.swap(heaps);
+      return S_OK;
+    }
+
+    HRESULT
     PrepareNative(WMT::SparseMappingQueue queue) override try {
       if (!queue || payload.completion || finished)
         return E_INVALIDARG;
       if (!destination->GetMetalBuffer() || (source && !source->GetMetalBuffer()))
         return E_OUTOFMEMORY;
+      HRESULT hr = ResolveAdmission();
+      if (FAILED(hr))
+        return hr;
       operations.clear();
       operations.reserve(updates.size());
       for (size_t i = 0; i < updates.size(); ++i) {
