@@ -367,6 +367,17 @@ commands and hashes in `result-msc-special-reflection-20261104/`. These are
 offline CLI observations, not a loaded dylib identity, D3D12 descriptor ABI
 proof, or a test of ordinary resources sharing either special space.
 
+An offline CLI collision control compiled ordinary HLSL resources in the
+test-only special spaces without using the Metal HLSL macros. Without special
+space options, reflection reported the `b1` cbuffer as a CBV and the `t0`
+texture as an SRV. With the respective space option enabled, the same cbuffer
+was reflected as `MSC_FC_1` instead of a normal resource, while the same
+texture ceased to appear as a normal SRV. A wrong-space fixture was rejected
+by the test. This is a concrete reason not to enable these spaces globally for
+arbitrary game shaders. The reusable `run_msc_space_collision.py` records
+commands and hashes under `result-msc-space-both-20261104/`. It is an offline
+reflection test, not a D3D12 GPU descriptor or production fallback test.
+
 The root-validation comparison now includes `ValidateDXIL`, alongside unset,
 zero and bound-resource validation. Three processes per mode each compiled six
 valid and six missing-resource instances. All valid roots compiled and all
