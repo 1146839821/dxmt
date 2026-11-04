@@ -9,6 +9,11 @@
 #include <stdexcept>
 #include <vector>
 #include <utility>
+#include <future>
+#include <chrono>
+#include <cstddef>
+#include <memory>
+#include "../../src/winemetal/winemetal.h"
 
 namespace {
 constexpr UINT TileBytes = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
@@ -27,6 +32,301 @@ void Check(const char *operation, HRESULT hr) {
     std::cerr << operation << ": 0x" << std::hex << static_cast<unsigned long>(hr) << std::dec << "\n";
     throw std::runtime_error(operation);
   }
+}
+void CheckSparseFeedback(const char *mode) {
+  using namespace std::chrono_literals;
+  static_assert(sizeof(WMTSparseBarrierResult) == 56);
+  static_assert(offsetof(WMTSparseBarrierResult, native_error_code) == 16);
+  static_assert(offsetof(WMTSparseBarrierResult, native_error) == 24);
+  static_assert(offsetof(WMTSparseBarrierResult, gpu_start_time) == 32);
+  static_assert(offsetof(WMTSparseBarrierResult, callback_count) == 48);
+  auto require = [](bool value, const char *message) {
+    if (!value)
+      throw std::runtime_error(message);
+  };
+  // Resolve only in feedback modes, preserving native Windows use of the
+  // existing probe.
+  HMODULE bridge = GetModuleHandleA("winemetal.dll");
+  require(bridge != nullptr, "feedback probe requires loaded DXMT WineMetal");
+  auto NSObject_release = reinterpret_cast<decltype(&::NSObject_release)>(
+      GetProcAddress(bridge, "NSObject_release"));
+  require(NSObject_release != nullptr,
+          "missing WineMetal export NSObject_release");
+  auto NSAutoreleasePool_alloc_init =
+      reinterpret_cast<decltype(&::NSAutoreleasePool_alloc_init)>(
+          GetProcAddress(bridge, "NSAutoreleasePool_alloc_init"));
+  require(NSAutoreleasePool_alloc_init != nullptr,
+          "missing WineMetal export NSAutoreleasePool_alloc_init");
+  auto WMTCopyAllDevices = reinterpret_cast<decltype(&::WMTCopyAllDevices)>(
+      GetProcAddress(bridge, "WMTCopyAllDevices"));
+  require(WMTCopyAllDevices != nullptr,
+          "missing WineMetal export WMTCopyAllDevices");
+  auto NSArray_count = reinterpret_cast<decltype(&::NSArray_count)>(
+      GetProcAddress(bridge, "NSArray_count"));
+  require(NSArray_count != nullptr, "missing WineMetal export NSArray_count");
+  auto NSArray_object = reinterpret_cast<decltype(&::NSArray_object)>(
+      GetProcAddress(bridge, "NSArray_object"));
+  require(NSArray_object != nullptr, "missing WineMetal export NSArray_object");
+  auto MTLDevice_supportsFamily =
+      reinterpret_cast<decltype(&::MTLDevice_supportsFamily)>(
+          GetProcAddress(bridge, "MTLDevice_supportsFamily"));
+  require(MTLDevice_supportsFamily != nullptr,
+          "missing WineMetal export MTLDevice_supportsFamily");
+  auto MTLDevice_supportsPlacementSparse =
+      reinterpret_cast<decltype(&::MTLDevice_supportsPlacementSparse)>(
+          GetProcAddress(bridge, "MTLDevice_supportsPlacementSparse"));
+  require(MTLDevice_supportsPlacementSparse != nullptr,
+          "missing WineMetal export MTLDevice_supportsPlacementSparse");
+  auto MTLDevice_newSparseMappingQueue =
+      reinterpret_cast<decltype(&::MTLDevice_newSparseMappingQueue)>(
+          GetProcAddress(bridge, "MTLDevice_newSparseMappingQueue"));
+  require(MTLDevice_newSparseMappingQueue != nullptr,
+          "missing WineMetal export MTLDevice_newSparseMappingQueue");
+  auto MTLDevice_newSharedEvent =
+      reinterpret_cast<decltype(&::MTLDevice_newSharedEvent)>(
+          GetProcAddress(bridge, "MTLDevice_newSharedEvent"));
+  require(MTLDevice_newSharedEvent != nullptr,
+          "missing WineMetal export MTLDevice_newSharedEvent");
+  auto SparseMappingQueue_prepareBarrierBeforeResourceState = reinterpret_cast<
+      decltype(&::SparseMappingQueue_prepareBarrierBeforeResourceState)>(
+      GetProcAddress(bridge,
+                     "SparseMappingQueue_prepareBarrierBeforeResourceState"));
+  require(SparseMappingQueue_prepareBarrierBeforeResourceState != nullptr,
+          "missing WineMetal export "
+          "SparseMappingQueue_prepareBarrierBeforeResourceState");
+  auto SparseBarrierCompletion_submit =
+      reinterpret_cast<decltype(&::SparseBarrierCompletion_submit)>(
+          GetProcAddress(bridge, "SparseBarrierCompletion_submit"));
+  require(SparseBarrierCompletion_submit != nullptr,
+          "missing WineMetal export SparseBarrierCompletion_submit");
+  auto SparseBarrierCompletion_wait =
+      reinterpret_cast<decltype(&::SparseBarrierCompletion_wait)>(
+          GetProcAddress(bridge, "SparseBarrierCompletion_wait"));
+  require(SparseBarrierCompletion_wait != nullptr,
+          "missing WineMetal export SparseBarrierCompletion_wait");
+  auto SparseMappingQueue_waitForEvent =
+      reinterpret_cast<decltype(&::SparseMappingQueue_waitForEvent)>(
+          GetProcAddress(bridge, "SparseMappingQueue_waitForEvent"));
+  require(SparseMappingQueue_waitForEvent != nullptr,
+          "missing WineMetal export SparseMappingQueue_waitForEvent");
+  auto SparseMappingQueue_signalEvent =
+      reinterpret_cast<decltype(&::SparseMappingQueue_signalEvent)>(
+          GetProcAddress(bridge, "SparseMappingQueue_signalEvent"));
+  require(SparseMappingQueue_signalEvent != nullptr,
+          "missing WineMetal export SparseMappingQueue_signalEvent");
+  auto MTLSharedEvent_signalValue =
+      reinterpret_cast<decltype(&::MTLSharedEvent_signalValue)>(
+          GetProcAddress(bridge, "MTLSharedEvent_signalValue"));
+  require(MTLSharedEvent_signalValue != nullptr,
+          "missing WineMetal export MTLSharedEvent_signalValue");
+  auto MTLSharedEvent_waitUntilSignaledValue =
+      reinterpret_cast<decltype(&::MTLSharedEvent_waitUntilSignaledValue)>(
+          GetProcAddress(bridge, "MTLSharedEvent_waitUntilSignaledValue"));
+  require(MTLSharedEvent_waitUntilSignaledValue != nullptr,
+          "missing WineMetal export MTLSharedEvent_waitUntilSignaledValue");
+  for (const char *symbol :
+       {"SparseMappingQueue_prepareBarrierBeforeResourceState",
+        "SparseBarrierCompletion_submit", "SparseBarrierCompletion_wait"}) {
+    auto code =
+        reinterpret_cast<const unsigned char *>(GetProcAddress(bridge, symbol));
+    std::printf("LOADED_CODE winemetal.dll %s ", symbol);
+    for (unsigned i = 0; i < 16; ++i)
+      std::printf("%02x", code[i]);
+    std::printf("\n");
+  }
+  LARGE_INTEGER frequency, begin, prepared_at, submitted_at;
+  QueryPerformanceFrequency(&frequency);
+  struct OpenGateOnExit {
+    obj_handle_t event;
+    decltype(MTLSharedEvent_signalValue) signal;
+    ~OpenGateOnExit() { signal(event, 1); }
+  };
+  auto own = [NSObject_release](obj_handle_t handle) {
+    return std::shared_ptr<obj_handle_t>(
+        handle ? new obj_handle_t(handle) : nullptr,
+        [NSObject_release](obj_handle_t *value) {
+          if (value)
+            NSObject_release(*value);
+          delete value;
+        });
+  };
+  auto prepare = [&](const auto &queue) {
+    return own(SparseMappingQueue_prepareBarrierBeforeResourceState(*queue));
+  };
+  auto submit = [&](const auto &completion) {
+    return SparseBarrierCompletion_submit(*completion) != 0;
+  };
+  auto wait = [&](const auto &completion, uint64_t timeout,
+                  WMTSparseBarrierResult &result) {
+    return SparseBarrierCompletion_wait(*completion, timeout, &result) != 0;
+  };
+  auto pool = own(NSAutoreleasePool_alloc_init());
+  auto devices = own(WMTCopyAllDevices());
+  require(devices && NSArray_count(*devices),
+          "native Metal device unavailable");
+  obj_handle_t device = NSArray_object(*devices, 0);
+  require(MTLDevice_supportsFamily(device, WMTGPUFamilyApple7) &&
+              MTLDevice_supportsFamily(device, WMTGPUFamilyMetal4) &&
+              MTLDevice_supportsPlacementSparse(device),
+          "actual placement sparse capability unavailable");
+  auto queue = own(MTLDevice_newSparseMappingQueue(device));
+  require(bool(queue), "native sparse queue unavailable");
+  const bool delay = !std::strcmp(mode, "feedback-delay");
+  const bool reverse = !std::strcmp(mode, "feedback-reverse");
+  const bool synthetic = !std::strcmp(mode, "feedback-synthetic");
+  const bool submitted = !std::strcmp(mode, "feedback-submitted");
+  const bool abandoned = !std::strcmp(mode, "feedback-release");
+  const bool prepare_failure = !std::strncmp(mode, "feedback-prepare-", 17);
+  QueryPerformanceCounter(&begin);
+  auto completion = prepare(queue);
+  QueryPerformanceCounter(&prepared_at);
+  if (prepare_failure) {
+    require(!completion, "expected prepare failure was not observed");
+    std::cout << "SPARSE_FEEDBACK prepare_failure=PASS mode=" << mode << "\n";
+    return;
+  }
+  require(bool(completion), "barrier preparation failed");
+  WMTSparseBarrierResult result = {};
+  require(!SparseMappingQueue_prepareBarrierBeforeResourceState(0) &&
+              !SparseBarrierCompletion_submit(0) &&
+              !SparseBarrierCompletion_wait(0, 0, &result) &&
+              !SparseBarrierCompletion_wait(*completion, 0, nullptr),
+          "invalid transport arguments accepted");
+  require(wait(completion, UINT64_MAX, result) &&
+              result.state == WMTSparseBarrierPrepared &&
+              !result.callback_count,
+          "prepare unexpectedly submitted work");
+  // Abandoned prepared objects must be releasable without waiting on a
+  // callback.
+  if (!reverse) {
+    auto prepared = prepare(queue);
+    require(bool(prepared), "prepare-release failed");
+  }
+  auto gate = own(MTLDevice_newSharedEvent(device));
+  auto done = own(MTLDevice_newSharedEvent(device));
+  require(gate && done, "feedback event creation failed");
+  OpenGateOnExit open_gate{*gate, MTLSharedEvent_signalValue};
+  SparseMappingQueue_waitForEvent(*queue, *gate, 1);
+  LARGE_INTEGER submit_begin;
+  QueryPerformanceCounter(&submit_begin);
+  require(submit(completion) != submitted,
+          "unexpected synchronous submit status");
+  QueryPerformanceCounter(&submitted_at);
+  std::printf("SPARSE_FEEDBACK_COST prepare_us=%.3f submit_us=%.3f "
+              "validation_sensitive=1\n",
+              (prepared_at.QuadPart - begin.QuadPart) * 1e6 /
+                  frequency.QuadPart,
+              (submitted_at.QuadPart - submit_begin.QuadPart) * 1e6 /
+                  frequency.QuadPart);
+  require(!submit(completion), "duplicate submit accepted");
+  require(wait(completion, 10, result) &&
+              result.state == WMTSparseBarrierPending &&
+              !result.native_feedback_received,
+          "closed GPU gate did not keep completion pending");
+  auto second = reverse ? prepare(queue) : decltype(completion)();
+  if (reverse)
+    require(second && submit(second), "second reverse credential failed");
+  SparseMappingQueue_signalEvent(*queue, *done, 1);
+  MTLSharedEvent_signalValue(*gate, 1);
+  require(MTLSharedEvent_waitUntilSignaledValue(*done, 1, 10000),
+          "feedback GPU event timeout");
+  if (abandoned) {
+    // Keep an explicit independent owner for inspection; drop the caller's
+    // handles.
+    auto observer = completion;
+    completion = nullptr;
+    queue = nullptr;
+    require(wait(observer, 10000, result) &&
+                result.state == WMTSparseBarrierCompleted,
+            "caller release lost native completion");
+    require(result.native_feedback_received == 1 && result.callback_count == 1,
+            "release callback evidence invalid");
+    // Drop the final caller credential reference while another benign barrier
+    // is genuinely pending. Its copied native callback must keep the payload
+    // alive.
+    auto owner = own(MTLDevice_newSparseMappingQueue(device));
+    auto orphan_gate = own(MTLDevice_newSharedEvent(device));
+    auto orphan_done = own(MTLDevice_newSharedEvent(device));
+    require(owner && orphan_gate && orphan_done, "orphan setup failed");
+    OpenGateOnExit open_orphan_gate{*orphan_gate, MTLSharedEvent_signalValue};
+    SparseMappingQueue_waitForEvent(*owner, *orphan_gate, 1);
+    auto orphan = prepare(owner);
+    require(orphan && submit(orphan), "orphan barrier submit failed");
+    require(wait(orphan, 0, result) && result.state == WMTSparseBarrierPending,
+            "orphan not pending");
+    SparseMappingQueue_signalEvent(*owner, *orphan_done, 1);
+    std::printf("SPARSE_FEEDBACK orphan=%llx pending=1 last_caller_release=1\n",
+                static_cast<unsigned long long>(*orphan));
+    orphan = nullptr;
+    MTLSharedEvent_signalValue(*orphan_gate, 1);
+    require(MTLSharedEvent_waitUntilSignaledValue(*orphan_done, 1, 10000),
+            "orphan native event timeout");
+    // This mode deliberately drops every credential owner. Allow its bounded
+    // 200 ms test report to drain before process exit; external trace validation
+    // must still observe the orphan's actual feedback and terminal destruction.
+    Sleep(1000);
+    std::cout << "SPARSE_FEEDBACK caller_release=PASS observer=LIVE "
+                 "callback_count=1\n";
+    return;
+  }
+  if (delay || reverse) {
+    // This only observes feedback; it never turns GPU event progress into a
+    // report.
+    ULONGLONG deadline = GetTickCount64() + 10000;
+    do {
+      require(wait(completion, 0, result), "feedback polling failed");
+      if (result.native_feedback_received)
+        break;
+      Sleep(1);
+    } while (GetTickCount64() < deadline);
+    require(result.native_feedback_received &&
+                result.state == WMTSparseBarrierPending,
+            "delayed report did not remain pending after actual feedback");
+    if (reverse) {
+      WMTSparseBarrierResult later = {};
+      require(wait(second, 10000, later) &&
+                  later.state == WMTSparseBarrierCompleted,
+              "higher report missing");
+      require(wait(completion, 0, result) &&
+                  result.state == WMTSparseBarrierPending,
+              "higher report incorrectly completed lower ticket");
+      std::cout
+          << "SPARSE_FEEDBACK reverse=PASS higher_terminal=1 lower_pending=1\n";
+    }
+    auto waiter = std::async(std::launch::async, [&] {
+      auto waiter_pool = own(NSAutoreleasePool_alloc_init());
+      WMTSparseBarrierResult waited = {};
+      return wait(completion, 10000, waited) &&
+             waited.state == WMTSparseBarrierCompleted;
+    });
+    require(waiter.wait_for(25ms) == std::future_status::timeout,
+            "report waiter completed prematurely");
+    require(waiter.get(), "delayed report waiter failed");
+    std::cout
+        << "SPARSE_FEEDBACK report_delay=PASS actual_feedback=1 pending=1\n";
+  }
+  require(wait(completion, 10000, result), "native feedback wait failed");
+  require(result.state ==
+              (synthetic ? WMTSparseBarrierError : WMTSparseBarrierCompleted),
+          "wrong terminal report");
+  require(result.native_feedback_received == 1 && result.callback_count == 1 &&
+              result.synthetic_error == unsigned(synthetic) &&
+              !result.native_error && !result.native_error_code &&
+              result.gpu_end_time >= result.gpu_start_time &&
+              result.gpu_start_time > 0,
+          "native/synthetic feedback evidence mismatch");
+  // Early/repeated consumption must preserve exactly the same terminal
+  // evidence.
+  WMTSparseBarrierResult repeated = {};
+  require(wait(completion, 0, repeated) &&
+              !std::memcmp(&result, &repeated, sizeof(result)),
+          "terminal report not retained for later waiter");
+  queue = nullptr; // The credential retains its native queue through terminal
+                   // cleanup.
+  std::cout << "SPARSE_FEEDBACK mode=" << mode << " terminal=" << result.state
+            << " callback_count=" << result.callback_count
+            << " native_error=0 synthetic=" << synthetic
+            << " early_repeat=PASS ABI=56\n";
 }
 D3D12_HEAP_PROPERTIES Properties(D3D12_HEAP_TYPE type) {
   D3D12_HEAP_PROPERTIES p = {};
@@ -677,7 +977,10 @@ int main(int argc, char **argv) {
                  "[wrong-oracle|queue-init-failure|barrier-update|barrier-copy|"
                  "buffer-update|buffer-unmap|buffer-copy|buffer-copy-null|"
                  "buffer-self|buffer-self-null|buffer-self-mixed|buffer-self-"
-                 "multiheap]]\n";
+                 "multiheap|feedback-normal|feedback-delay|feedback-reverse|"
+                 "feedback-synthetic|feedback-submitted|feedback-release|"
+                 "feedback-prepare-command_buffer|feedback-prepare-allocator|"
+                 "feedback-prepare-encoder]]\n";
     return 2;
   }
   try {
@@ -695,8 +998,19 @@ int main(int argc, char **argv) {
          std::strcmp(argv[5], "buffer-self") &&
          std::strcmp(argv[5], "buffer-self-null") &&
          std::strcmp(argv[5], "buffer-self-mixed") &&
-         std::strcmp(argv[5], "buffer-self-multiheap")))
+         std::strcmp(argv[5], "buffer-self-multiheap") &&
+         std::strcmp(argv[5], "feedback-normal") &&
+         std::strcmp(argv[5], "feedback-delay") &&
+         std::strcmp(argv[5], "feedback-reverse") &&
+         std::strcmp(argv[5], "feedback-synthetic") &&
+         std::strcmp(argv[5], "feedback-submitted") &&
+         std::strcmp(argv[5], "feedback-release") &&
+         std::strcmp(argv[5], "feedback-prepare-command_buffer") &&
+         std::strcmp(argv[5], "feedback-prepare-allocator") &&
+         std::strcmp(argv[5], "feedback-prepare-encoder")))
       return 2;
+    if (argc == 6 && !std::strncmp(argv[5], "feedback-", 9))
+      CheckSparseFeedback(argv[5]);
     if (argc == 6 && (!std::strcmp(argv[5], "barrier-update") ||
                       !std::strcmp(argv[5], "barrier-copy") ||
                       !std::strcmp(argv[5], "buffer-update") ||

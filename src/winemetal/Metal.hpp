@@ -906,8 +906,26 @@ public:
   }
 };
 
+class SparseBarrierCompletion : public Object {
+public:
+  bool
+  submit() {
+    return SparseBarrierCompletion_submit(handle) != 0;
+  }
+
+  bool
+  wait(uint64_t timeout_ms, WMTSparseBarrierResult &result) {
+    return SparseBarrierCompletion_wait(handle, timeout_ms, &result) != 0;
+  }
+};
+
 class SparseMappingQueue : public Object {
 public:
+  Reference<SparseBarrierCompletion>
+  prepareBarrierBeforeResourceState() {
+    return Reference<SparseBarrierCompletion>(SparseMappingQueue_prepareBarrierBeforeResourceState(handle));
+  }
+
   void
   addResidencySet(ResidencySet residency_set) {
     SparseMappingQueue_addResidencySet(handle, residency_set.handle);

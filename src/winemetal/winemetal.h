@@ -2475,6 +2475,35 @@ WINEMETAL_API void SparseMappingQueue_barrierBeforeResourceState(obj_handle_t qu
 // Checked additive entry: 1 means synchronous submission succeeded, 0 means failure.
 WINEMETAL_API uint32_t SparseMappingQueue_tryBarrierBeforeResourceState(obj_handle_t queue);
 
+enum WMTSparseBarrierState : uint32_t {
+  WMTSparseBarrierPrepared = 0,
+  WMTSparseBarrierPending = 1,
+  WMTSparseBarrierCompleted = 2,
+  WMTSparseBarrierError = 3,
+};
+
+struct WMTSparseBarrierResult {
+  enum WMTSparseBarrierState state;
+  uint32_t native_feedback_received;
+  uint32_t synthetic_error; // Test transport result, never a native GPU error.
+  uint32_t reserved;
+  int64_t native_error_code;
+  obj_handle_t native_error; // Borrowed; valid while the completion credential lives.
+  double gpu_start_time;
+  double gpu_end_time;
+  uint64_t callback_count;
+};
+STATIC_ASSERT(sizeof(WMTSparseBarrierResult) == 56);
+
+// Returns an owned NSObject-compatible credential; no GPU work is submitted.
+WINEMETAL_API obj_handle_t SparseMappingQueue_prepareBarrierBeforeResourceState(obj_handle_t queue);
+// Admits once. A post-commit host failure still requires waiting for actual completion.
+WINEMETAL_API uint32_t SparseBarrierCompletion_submit(obj_handle_t completion);
+// UINT64_MAX waits indefinitely; zero polls. Timeout leaves Pending. Return value
+// reports transport success only; callers must inspect state for completion.
+WINEMETAL_API uint32_t
+SparseBarrierCompletion_wait(obj_handle_t completion, uint64_t timeout_ms, struct WMTSparseBarrierResult *result);
+
 WINEMETAL_API void SparseMappingQueue_updateBufferMappings(
     obj_handle_t queue, obj_handle_t buffer, obj_handle_t heap,
     const struct WMTUpdateSparseBufferMappingOperation *operations, uint64_t count

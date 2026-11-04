@@ -52,7 +52,18 @@ enum winemetal_unixcall {
   unix_mtlcomputecommandencoder_setintersectionfunctiontable,
   unix_mtldevice_supportsargumentbufferstier2 = 194,
   unix_mtldevice_sparsetexturetilesize = 196,
+  // Append after all existing tables, including MSC ordinals through 199.
+  unix_sparsemappingqueue_preparebarrier = 200,
+  unix_sparsebarriercompletion_submit,
+  unix_sparsebarriercompletion_wait,
 };
+
+struct unixcall_sparsebarriercompletion_wait {
+  obj_handle_t completion;
+  uint64_t timeout_ms;
+  struct WMTSparseBarrierResult result;
+};
+STATIC_ASSERT(sizeof(struct unixcall_sparsebarriercompletion_wait) == 72);
 
 struct unixcall_mtldevice_sparsetexturetilesize {
   obj_handle_t device;

@@ -4170,6 +4170,218 @@ _SparseMappingQueue_barrierBeforeResourceState(void *obj) {
   return STATUS_UNSUCCESSFUL;
 }
 
+_Static_assert(sizeof(struct WMTSparseBarrierResult) == 56, "Sparse feedback result ABI");
+_Static_assert(sizeof(struct unixcall_sparsebarriercompletion_wait) == 72, "Sparse feedback request ABI");
+
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000
+// One native workload's evidence. No PE callbacks, resource-state registry or scheduler.
+API_AVAILABLE(macos(26.0))
+@interface WMTSparseBarrierCompletion : NSObject {
+  id<MTL4CommandQueue> queue_;
+  id<MTL4CommandBuffer> command_buffer_;
+  id<MTL4CommandAllocator> allocator_;
+  NSCondition *condition_;
+  NSError *error_;
+  struct WMTSparseBarrierResult result_;
+  uint64_t report_delay_ms_;
+  BOOL synthetic_error_;
+  BOOL submitted_host_failure_;
+  BOOL trace_;
+}
+- (id)initWithQueue:(id<MTL4CommandQueue>)queue;
+- (BOOL)submit;
+- (void)recordFeedback:(id<MTL4CommitFeedback>)feedback;
+- (void)publishReport;
+- (void)wait:(uint64_t)timeout_ms result:(struct WMTSparseBarrierResult *)result;
+@end
+
+@implementation WMTSparseBarrierCompletion
+- (id)initWithQueue:(id<MTL4CommandQueue>)queue {
+  if (!(self = [super init]))
+    return nil;
+  queue_ = [queue retain];
+  condition_ = [[NSCondition alloc] init];
+  trace_ = getenv("DXMT_TEST_SPARSE_FEEDBACK_TRACE") != NULL;
+  if (trace_)
+    fprintf(stderr, "SPARSE_FEEDBACK_OWNER create=%p\n", self);
+  const char *failure = sparse_barrier_failure_for_testing();
+  id<MTLDevice> device = [queue device];
+  command_buffer_ = failure && !strcmp(failure, "command_buffer") ? nil : [device newCommandBuffer];
+  allocator_ = failure && !strcmp(failure, "allocator") ? nil : [device newCommandAllocator];
+  if (!queue_ || !condition_ || !command_buffer_ || !allocator_) {
+    [self release];
+    return nil;
+  }
+  [command_buffer_ beginCommandBufferWithAllocator:allocator_];
+  id<MTL4ComputeCommandEncoder> encoder =
+      failure && !strcmp(failure, "encoder") ? nil : [command_buffer_ computeCommandEncoder];
+  if (!encoder) {
+    [command_buffer_ endCommandBuffer];
+    [self release];
+    return nil;
+  }
+  [encoder barrierAfterStages:MTLStageAll
+            beforeQueueStages:MTLStageResourceState
+            visibilityOptions:MTL4VisibilityOptionResourceAlias];
+  [encoder endEncoding];
+  [command_buffer_ endCommandBuffer];
+  submitted_host_failure_ = failure && !strcmp(failure, "submitted");
+
+  // Opt-in report transport controls. Actual feedback is always received first.
+  const char *delay = getenv("DXMT_TEST_SPARSE_FEEDBACK_DELAY_MS");
+  if (delay && !strcmp(delay, "reverse")) {
+    static atomic_uint_fast64_t calls = 0;
+    report_delay_ms_ = atomic_fetch_add_explicit(&calls, 1, memory_order_relaxed) % 2 ? 0 : 200;
+  } else if (delay) {
+    char *end = NULL;
+    unsigned long long value = strtoull(delay, &end, 10);
+    if (end && !*end && value <= 2000)
+      report_delay_ms_ = value;
+  }
+  const char *synthetic = getenv("DXMT_TEST_SPARSE_FEEDBACK_SYNTHETIC_ERROR");
+  synthetic_error_ = synthetic && !strcmp(synthetic, "1");
+  if (report_delay_ms_ || synthetic_error_)
+    fprintf(
+        stderr, "DXMT_TEST_SPARSE_FEEDBACK delay_ms=%llu synthetic_error=%u\n", (unsigned long long)report_delay_ms_,
+        (unsigned)synthetic_error_
+    );
+  return self;
+}
+
+- (BOOL)submit {
+  [condition_ lock];
+  if (result_.state != WMTSparseBarrierPrepared) {
+    [condition_ unlock];
+    return NO;
+  }
+  MTL4CommitOptions *options = [[MTL4CommitOptions alloc] init];
+  if (!options) {
+    [condition_ unlock];
+    return NO;
+  }
+  // The commit owns the block, which retains self. Self never owns these options.
+  [options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+    @autoreleasepool {
+      [self recordFeedback:feedback];
+    }
+  }];
+  result_.state = WMTSparseBarrierPending;
+  [condition_ unlock];
+  id<MTL4CommandBuffer> buffers[] = {command_buffer_};
+  [queue_ commit:buffers count:1 options:options];
+  [options release];
+  return !submitted_host_failure_;
+}
+
+- (void)recordFeedback:(id<MTL4CommitFeedback>)feedback {
+  NSError *error = [feedback.error retain];
+  [condition_ lock];
+  error_ = error;
+  result_.native_error = (obj_handle_t)error_;
+  result_.native_error_code = error_.code;
+  result_.gpu_start_time = feedback.GPUStartTime;
+  result_.gpu_end_time = feedback.GPUEndTime;
+  result_.callback_count++;
+  result_.native_feedback_received = 1;
+  if (trace_)
+    fprintf(
+        stderr, "SPARSE_FEEDBACK_OWNER native=%p callbacks=%llu\n", self, (unsigned long long)result_.callback_count
+    );
+  [condition_ unlock];
+  if (report_delay_ms_) {
+    // Never block Metal's feedback queue. The copied dispatch block retains self.
+    dispatch_after(
+        dispatch_time(DISPATCH_TIME_NOW, report_delay_ms_ * NSEC_PER_MSEC),
+        dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+          @autoreleasepool {
+            [self publishReport];
+          }
+        }
+    );
+  } else {
+    [self publishReport];
+  }
+}
+
+- (void)publishReport {
+  [condition_ lock];
+  result_.synthetic_error = synthetic_error_;
+  result_.state = error_ || synthetic_error_ ? WMTSparseBarrierError : WMTSparseBarrierCompleted;
+  if (trace_)
+    fprintf(stderr, "SPARSE_FEEDBACK_OWNER report=%p state=%u\n", self, (unsigned)result_.state);
+  [condition_ broadcast];
+  [condition_ unlock];
+}
+
+- (void)wait:(uint64_t)timeout_ms result:(struct WMTSparseBarrierResult *)result {
+  [condition_ lock];
+  if (timeout_ms == UINT64_MAX) {
+    while (result_.state == WMTSparseBarrierPending)
+      [condition_ wait];
+  } else if (timeout_ms) {
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:(double)timeout_ms / 1000.0];
+    while (result_.state == WMTSparseBarrierPending && [condition_ waitUntilDate:deadline]) {
+    }
+  }
+  *result = result_;
+  [condition_ unlock];
+}
+
+- (void)dealloc {
+  // Prepared work was never submitted; submitted work is retained by its callback
+  // (and a delayed report, when requested) through actual native completion.
+  if (trace_)
+    fprintf(
+        stderr, "SPARSE_FEEDBACK_OWNER destroy=%p state=%u callbacks=%llu\n", self, (unsigned)result_.state,
+        (unsigned long long)result_.callback_count
+    );
+  [command_buffer_ release];
+  [allocator_ release];
+  [queue_ release];
+  [error_ release];
+  [condition_ release];
+  [super dealloc];
+}
+@end
+#endif
+
+static NTSTATUS
+_SparseMappingQueue_prepareBarrier(void *obj) {
+  struct unixcall_generic_obj_obj_ret *params = obj;
+  params->ret = 0;
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000
+  if (@available(macOS 26.0, *)) {
+    if (params->handle)
+      params->ret = (obj_handle_t)[[WMTSparseBarrierCompletion alloc] initWithQueue:(id)params->handle];
+  }
+#endif
+  return params->ret ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+}
+
+static NTSTATUS
+_SparseBarrierCompletion_submit(void *obj) {
+  struct unixcall_generic_obj_noret *params = obj;
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000
+  if (@available(macOS 26.0, *))
+    return [(WMTSparseBarrierCompletion *)params->handle submit] ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+#endif
+  return STATUS_UNSUCCESSFUL;
+}
+
+static NTSTATUS
+_SparseBarrierCompletion_wait(void *obj) {
+  struct unixcall_sparsebarriercompletion_wait *params = obj;
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000
+  if (@available(macOS 26.0, *)) {
+    if (params->completion) {
+      [(WMTSparseBarrierCompletion *)params->completion wait:params->timeout_ms result:&params->result];
+      return STATUS_SUCCESS;
+    }
+  }
+#endif
+  return STATUS_UNSUCCESSFUL;
+}
+
 static const char *
 sparse_buffer_update_failure_for_testing(void) {
   const char *phase = getenv("DXMT_TEST_SPARSE_BUFFER_UPDATE_FAILURE");
@@ -4848,10 +5060,14 @@ const void *__wine_unix_call_funcs[] = {
     &thunk_DXMTMSCPatchSamplerLOD,
     &thunk_DXMTMSCGetIdentityV1,
     &thunk_DXMTMSCPatchTypedBuffer,
+    &_SparseMappingQueue_prepareBarrier,
+    &_SparseBarrierCompletion_submit,
+    &_SparseBarrierCompletion_wait,
 };
-_Static_assert(sizeof(__wine_unix_call_funcs) / sizeof(__wine_unix_call_funcs[0]) ==
-                   unix_dxmt_msc_patch_typed_buffer + 1,
-               "MSC identity Unix-call ordinal mismatch");
+_Static_assert(
+    sizeof(__wine_unix_call_funcs) / sizeof(__wine_unix_call_funcs[0]) == unix_sparsebarriercompletion_wait + 1,
+    "Sparse completion Unix-call ordinal mismatch"
+);
 
 #ifndef DXMT_NATIVE
 const void *__wine_unix_call_wow64_funcs[] = {
@@ -5055,8 +5271,13 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &thunk32_DXMTMSCPatchSamplerLOD,
     &thunk_DXMTMSCGetIdentityV1,
     &thunk32_DXMTMSCPatchTypedBuffer,
+    &_SparseMappingQueue_prepareBarrier,
+    &_SparseBarrierCompletion_submit,
+    &_SparseBarrierCompletion_wait,
 };
-_Static_assert(sizeof(__wine_unix_call_wow64_funcs) / sizeof(__wine_unix_call_wow64_funcs[0]) ==
-                   unix_dxmt_msc_patch_typed_buffer + 1,
-               "MSC identity WOW64 ordinal mismatch");
+_Static_assert(
+    sizeof(__wine_unix_call_wow64_funcs) / sizeof(__wine_unix_call_wow64_funcs[0]) ==
+        unix_sparsebarriercompletion_wait + 1,
+    "Sparse completion WOW64 ordinal mismatch"
+);
 #endif

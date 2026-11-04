@@ -302,8 +302,89 @@ P95 is nearest rank. Controlled held/early/reverse cases, validation/ASan proces
 
 Public Feature Level, Shader Model and Tiled Resources Tier are unchanged. Metal3 shadow backing, existing Reserved Resource tests, D3D11 and MSC runtime compatibility are untouched. Rollback of this round is the focused report append; external evidence is retained, not deployed.
 
+### Next bridge slice Design Card — 2026-11-05
+
+- Goal/baseline: additive native barrier feedback transport at e9152dcc; original .gitignore only. Gate 0 source/SDK and E2/E3 evidence refreshed. Continuation authorizes this bounded N13 implementation.
+- Evidence: old checked barrier has synchronous status only. E3 default feedback queue passes real sparse readbacks; custom feedback-queue teardown remains unverified. Mullion per-work result semantics are a reference; no scheduler/source is copied.
+- Scope/invariants: INV-03/04/08/11/12/14; existing WineMetal native/C/thunk/WMT layers and existing reserved-buffer test. No second resource-state owner or scheduler.
+- Proposal: prepare owns encoded command objects without submitting; submit admits once; timed wait returns prepared/pending/terminal result. Callback captures only native payload, preserves native error/timestamps and wakes per-credential waiters. Existing NSObject ownership handles release.
+- ABI: append native/WoW64 call identifiers after ordinal 199; fixed-width embedded requests/results and asserted sizes/offsets. Old exports/indices unchanged; no callback to PE pointers.
+- Tests: bounded per-prepare report delay and separately labelled synthetic error after real feedback; no blocked Metal callback queue or unsafe GPU work. Verify early/delayed/reverse/timeout/duplicate-submit/prepared-release and caller-release cases.
+- Non-scope: D3D12 FIFO/device-removal integration, mapping-error certification, backend replacement and capability changes.
+- Cost: one native object/condition and retained command objects per opted-in barrier, one options/callback per submission; no new normal GPU waits/draw work. Existing production callers do not opt in this round.
+- Validation/DoD: x64/x86 builds, exact ABI layout audit, paired x64 Wine transport, real reserved-resource readback and nearest fault/retirement regression with validation and artifact identity. Measure native transport and distinguish injected delay.
+- Risks/rollback: callback cycles, publication races, missing terminal evidence and WoW64 drift. Timeout never invents success/removal. Revert the focused additive commit; retain native-fault/missing-callback and unavailable-target limitations explicitly.
+
 ### Git State / Next Recommended Slice
 
 Only this report is committed with repository history style; no push. The original `.gitignore` remains untouched and unstaged; no other repository work is introduced. E3/delivery-manifest.json records the resulting commit, final Git state, file identities and audit outcome.
 
 Recommend one next N13 slice: add a native barrier-completion credential through the **existing WineMetal bridge**, using the default feedback queue and a native-owned result/group, with prepare/submit/wait/release and benign-work delayed/early/reverse/synthetic-error transport checks. Keep old entry points and ABI-table ordering; validate x64/x86 paired artifacts and exact ownership. Do not yet attach it to D3D12 FIFO retirement or claim the asynchronous error gap closed. This narrows the next gate to transport and lifetime before the separate existing-Submission integration. Stop here for review/authorization; no production implementation begins in this prototype round. The broader development goal remains active.
+
+## WineMetal sparse completion bridge — delivery, 2026-11-05
+
+### Task Summary / Baseline Evidence
+
+**Gate 0–4 complete for additive native completion transport only.** D3D12 FIFO consumption is not implemented in this round. Broad sparse asynchronous error handling remains open.
+
+Baseline: feat/d3d12 at e9152dccbe9180e59cdb0d177dc0caef525cdf24, 13 ahead / 0 behind local origin/feat/d3d12 (not refreshed). Only original .gitignore dirty; SHA256 764aac09922db4654ca6de63fd20cf014739d9292623eb979f448f38e609b759 preserved. M1 Max / Apple7, macOS27.2 26B123, Xcode27.2 27B52, Metal32023.922, Wine11.0, compiled MSC SDK API4.0.3; runtime MSC product version is not queried.
+
+E4: /Users/zhangbo/Documents/Vibe-Codeding/dxmt-test/n95-capability-gate/result-sparse-feedback-bridge-20261105. baseline.json, before-* source copies, SDK headers, sources.json/Apple documentation JSON, build/process logs, loaded export bytes, Unix UUID/path, artifact hashes and ownership traces are retained. Earlier E2 Mullion93de32b9145885ceb2e45be7d445e56d62499b3c remains the pinned source reference; no Mullion code copied. Microsoft lifetime/synchronization and Apple commit-feedback contracts recorded above remain applicable. Default feedback queue only.
+
+### Findings / Design Decisions
+
+- **SPEC_REQUIRED / LOCAL_PASS:** separate commit admission, actual native feedback receipt and report publication. Prepared never submits. Pending persists through bounded test-report delay after actual feedback; timeout is transport success with nonterminal state, not completion. Submitted-host-failure injection returns false after commit but cannot permit early retirement.
+- **LOCAL_PASS:** native payload retains queue/allocator/command buffer/NSError. Metal's copied block owns the payload; payload does not own commit options, avoiding a cycle. Delayed dispatch owns it until report publication. Actual creation/native/report/destruction traces cover prepared release, caller release, last-caller release while GPU-gated and one callback. This is not general leak-freedom or missing-callback teardown proof.
+- **LOCAL_PASS:** append ordinals200–202; both 203-entry tables preserve their exact original 200-entry prefixes. Result56 bytes embedded in request72; no retained PE pointer/callback. Error handle is borrowed while credential lives. Compile-time sizes/offsets and actual WoW64 execution checked.
+- **LOCAL_PASS:** feedback modes resolve exports dynamically. Final original probe import table has no WineMetal dependency, preserving native-Windows import behavior; native Windows execution remains NOT_RUN.
+- Reuse existing NSObject/Reference owners and native condition, one credential per opted-in barrier. No scheduler, second resource-state map or extra normal draw/GPU wait. Existing callers and d3d12_command_queue.cpp are byte-identical to baseline. Reject FIFO expansion/custom-feedback-queue workaround in this slice.
+
+### Changed Files / Source Evidence
+
+| File | Purpose / evidence |
+| --- | --- |
+| src/winemetal/winemetal.h:2478–2505 | States, fixed-width result, owned prepare/one-shot submit/wait contracts. SOURCE. |
+| src/winemetal/winemetal_thunks.h:55–66 | Additive ordinals and embedded request. SOURCE / ABI audit. |
+| src/winemetal/winemetal_thunks.c:1603–1628 | Explicit status checks, copyout and null-output rejection. SOURCE / real transport. |
+| src/winemetal/Metal.hpp:909–927 | Existing ownership wrapper exposes credential. SOURCE / build. |
+| src/winemetal/unix/winemetal_unix.c:4173–4385 | Native owner/encoding/default callback/publication/wait/cleanup and bounded opt-in controls. SOURCE / ownership traces. Tables near5063/5274. |
+| tests/dx12/dx12_reserved_buffer.cpp:36–336 | Actual capability queries, dynamic exports, GPU gates, ABI/null/duplicate/delay/reverse/error/release checks and exceptional-exit gate cleanup. CLI near980. SOURCE / GPU. |
+| docs/sparse-handoff-retirement-audit.md:305 onward | Design Card, evidence, delivery and limits. DESIGN. |
+
+### Validation Results
+
+| Check | Result / boundary |
+| --- | --- |
+| x64 release complete default-target build, D3D12/tests/NVAPI/NVNGX enabled | **PASS**, build-final.log and earlier full logs. Existing Managed-storage deprecation warnings retained. |
+| x86 release script-profile default-target build, D3D12/tests disabled | **PASS**, build-x86-script-profile.log and build-x86-final.log. Extra x86 D3D12-enabled build **FAIL** in unchanged d3d12_raytracing.cpp:210: uint64 offset narrows into 32-bit D3D12_RANGE/SIZE_T. build-x86.log retained; outside scope. Script-profile PASS is not x86 D3D12 PASS. |
+| Final x64 nine feedback modes | **LOCAL_PASS**, normal/delay/reverse/synthetic/submitted-host-failure/release/three preparation failures. Each also passes existing MSC GPU buffer readback311296 DWORDs. Both Metal validation modes enabled. |
+| Nearest regressions | **LOCAL_PASS**, ordinary buffer, submitted-barrier removal behavior, fenced texture handoff retirement, packed-tail readback. Two wrong-oracle processes reject with expected exit1. |
+| Final x64 aggregate | **13 successful exits + 2 expected negative exits**; ten full buffer checks =3112960 DWORDs. Additional retirement/packed checks not included in buffer total. acceptance-audit.json / acceptance.log. |
+| Actual WoW64 transport | **LOCAL_PASS**, PE32 pointer4/result56/request72, normal/delay/release/synthetic through paired x86 PE/x64 Unix. Exact export bytes/loaded Unix UUID checked. External fixture, not x86 D3D12 execution. |
+| D3D11 nearest smoke | **LOCAL_PASS**, external hardware-device default-to-staging CopyResource/Map compares256 DWORDs; actual native DXMT module path and Metal validation checked. Not full rendering coverage. |
+| Static delivery | **PASS**, scoped clang-format/diff check/table prefixes, no WineMetal static import, final build-stage pairing, original .gitignore and unchanged D3D12 production queue. |
+| Actual native GPU error, missing callback, physical OOM | **NOT_RUN**. Synthetic error is separately labelled after actual benign-work feedback, not NSError/device-loss reproduction. |
+| Native Windows/other GPUs/Metal3 fallback execution | **NOT_RUN**; unavailable differential targets classified TARGET_DEVICE_NOT_AVAILABLE. No hardware block for available M1 Max. |
+
+Reproduction: python3 E4/final_runs.py, followed by python3 E4/audit.py (expand E4 to full path above). Isolated Wine prefix/stage/cache, paired PE/Unix modules and exact source/artifact identities are retained. Earlier transport-*, delivery-* and final-* runs are supplemental, excluded from acceptance totals.
+
+Retained setup/audit failures: first WoW64 launch selected the parent x64 DLL and failed LoadLibrary; separate executable directory with x86 DLL corrected selection. Next process passed GPU/ABI but export parser only accepted x64; PE32 parser validated the retained result without rerunning it. First release-only external process exited before its deliberately delayed report; trace audit rejected it. A bounded drain and mandatory native/report/destruction evidence closed that fixture gap. Repository release mode also drains and opens GPU gates on exceptions. These are not native GPU faults or accepted ownership results.
+
+Six final validation-enabled process-first samples: prepare median709.20µs/range654.00–880.80µs; submit median219.35µs/range197.50–435.30µs. Includes validation/instrumentation, not warm steady state or A/B production costs. Report delay excluded from these call durations. No speedup/no-regression claim. Production callers do not use new allocations/conditions/callbacks yet.
+
+### Capability Impact / Regression Risks / Remaining Blockers
+
+No FL/SM/Tiled Tier promotion. Metal3 shadow backing, D3D11 implementation, Airconv/MSC and existing Reserved Resource semantics unchanged. New exports require paired PE/Unix artifacts.
+
+- **BACKEND_NOT_IMPLEMENTED:** existing Submission/FIFO integration, error-before-success/fence publication, cancellation/unblocking and safe main-work retirement. Transport alone does not close production semantics.
+- **SPEC_UNVERIFIED:** attribution for separate void mapping failures, custom feedback-queue teardown, safe reclamation without terminal evidence. Immediate allocator release is avoided, not certified.
+- **MSC_SEMANTIC_GAP:** none newly established; broader shader/counter/descriptor/sparse conformance stays separate.
+- **TARGET_DEVICE_NOT_AVAILABLE / NOT_RUN:** unavailable Windows/other-GPU differentials. Actual M1 Max Apple7/Metal4/PlacementSparse queries succeed; no Apple7 PlacementSparse hardware block.
+
+Rollback: focused additive commit. Test controls opt-in/bounded/separately labelled. No PE callback/custom feedback queue retained. Missing callback can retain submitted payload indefinitely; timeout does not invent terminal success or allow early retirement.
+
+### Git State / Next Recommended Slice
+
+Commit seven source/test/report files with repository style, no push; original .gitignore unstaged, no staged/untracked residue. Resulting HEAD/tracking/hashes recorded post-commit in E4/delivery-manifest.json.
+
+Next one N13 slice: **attach credentials to the existing Submission/FIFO completion owner**, gate success/fence publication on required native terminal evidence; test benign delay/reverse/synthetic errors, submitted-host-failure cancellation and safe retirement. Preserve existing owners/waits, no second scheduler/state truth or capability promotion. Stop after this transport delivery; no automatic FIFO implementation in this round.

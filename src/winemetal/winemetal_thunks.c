@@ -1600,6 +1600,33 @@ SparseMappingQueue_tryBarrierBeforeResourceState(obj_handle_t queue) {
   return WINE_UNIX_CALL(unix_sparsemappingqueue_barrierbeforeresourcestate, &params) == 0;
 }
 
+WINEMETAL_API obj_handle_t
+SparseMappingQueue_prepareBarrierBeforeResourceState(obj_handle_t queue) {
+  struct unixcall_generic_obj_obj_ret params = {queue, 0};
+  if (WINE_UNIX_CALL(unix_sparsemappingqueue_preparebarrier, &params))
+    return 0;
+  return params.ret;
+}
+
+WINEMETAL_API uint32_t
+SparseBarrierCompletion_submit(obj_handle_t completion) {
+  struct unixcall_generic_obj_noret params = {completion};
+  return WINE_UNIX_CALL(unix_sparsebarriercompletion_submit, &params) == 0;
+}
+
+WINEMETAL_API uint32_t
+SparseBarrierCompletion_wait(obj_handle_t completion, uint64_t timeout_ms, struct WMTSparseBarrierResult *result) {
+  if (!result)
+    return 0;
+  struct unixcall_sparsebarriercompletion_wait params = {0};
+  params.completion = completion;
+  params.timeout_ms = timeout_ms;
+  if (WINE_UNIX_CALL(unix_sparsebarriercompletion_wait, &params))
+    return 0;
+  *result = params.result;
+  return 1;
+}
+
 WINEMETAL_API void
 SparseMappingQueue_updateBufferMappings(
     obj_handle_t queue, obj_handle_t buffer, obj_handle_t heap,
