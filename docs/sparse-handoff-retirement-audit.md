@@ -226,3 +226,84 @@ Prototype DoD: actual queried device identity; real mapped/unmapped full-data or
 - **CAPABILITY IMPACT:** none. No new MSC_SEMANTIC_GAP or BLOCKED_BY_HARDWARE conclusion. The M1 Max target is available; missing asynchronous feedback is BACKEND_NOT_IMPLEMENTED, while exact release/void-mapping error contracts remain SPEC_UNVERIFIED. Other GPUs/Windows-native differential remain TARGET_DEVICE_NOT_AVAILABLE / NOT_RUN.
 - **GIT:** baseline above; only this report is committed with repository style, no push. The original `.gitignore` edit stays untouched. Final commit ID, status and evidence hashes are in E2/delivery-manifest.json.
 - **NEXT:** execute one external native feedback-timing/ownership prototype on M1 Max with real R32 sparse readback and controlled report delay, before approving any additive bridge ABI. Stop before production integration and review its results against this Design Card. The broad development goal remains active.
+
+## N13 native feedback timing / ownership prototype — execution report
+
+2026-11-05. **Gate 0 / 1 / 2 / 3 / 4 complete for the external prototype only.** The default-feedback-queue prototype passes. A separate custom-feedback-queue teardown configuration fails locally and is not accepted. No production bridge implementation or capability promotion is included.
+
+### Task Summary / Baseline Evidence / Changed Files
+
+Selected node: N13. Execute the prerequisite in the preceding Design Card, distinguishing native workload completion, GPU-event progress, CPU report delivery, consumer completion and safe retirement. Baseline `feat/d3d12`, `2a618d8e91400540eb9f562c84a74d3a087bc4a4`; local tracking ref 0 behind / 12 ahead at start. Only the original `.gitignore` edit was present, SHA256 `764aac09922db4654ca6de63fd20cf014739d9292623eb979f448f38e609b759`. No remote refs are refreshed in this round. Mullion remains the pinned source reference `93de32b9145885ceb2e45be7d445e56d62499b3c` retained in E2, not a new Mullion runtime result.
+
+New evidence E3: `/Users/zhangbo/Documents/Vibe-Codeding/dxmt-test/n95-capability-gate/result-sparse-feedback-native-prototype-20261105`. All prototype sources, runners, binaries, SDK snapshots, logs, crash reports and manifests are outside the repository. The sole repository change is this report append; its preceding bytes are preserved exactly. Production sources, repository tests, build settings and deployment are unchanged.
+
+Fresh environment: Apple M1 Max, macOS 27.2 `26B123`, Xcode 27.2 `27B52`, Metal compiler `32023.922`, native arm64. Every final process queries the real device: Apple7=true, Metal4=true, PlacementSparse=true, Apple8/Apple9=false; R32Uint 64-KiB pages return a 128×128×1 tile. The fixture creates a 256×128 placement-sparse texture and a 131072-byte placement heap. Its reported **Metal** sparse texture tier is 2; this is not a D3D12 Tiled Resources Tier declaration.
+
+`E3/baseline.json` records starting Git state, source/header hashes and environment. `E3/runs.json` pairs every final process with exact source/binary/log hashes and loaded Metal/AGX/MetalTools image paths and UUIDs. Metal UUID is `4309245A-A57C-32FE-A6F9-54918647F25D`; AGXMetalG13X UUID is `79D56015-6C6E-3021-B27B-3D0D4EF1472E`. Release prototype SHA256: `0836803fd3938cb7bb99ecdbe4305d3f830354c9a004488d2b820e94f7b29dda`; source SHA256: `736ed4d0961d9973e32eb3d09a5e2059af42c644461d2c10753f1ccba59cf877`. The pipeline is native MSL on a classic compute encoder; no Wine or MSC is loaded. This does not validate PE/Unix pairing or MSC shader semantics.
+
+### Source / SDK / Mullion evidence and design decisions
+
+| Conclusion | Source and evidence type |
+| --- | --- |
+| Existing DXMT barrier still returns synchronous admission status and installs no completion feedback. Existing FIFO retirement still waits only the classic main command buffer. | `src/winemetal/unix/winemetal_unix.c:4131–4167`; `src/d3d12/d3d12_command_queue.cpp:456–515,585–623`. SOURCE_AUDIT, refreshed through CodeGraph; BACKEND_NOT_IMPLEMENTED remains open. |
+| Actual Metal feedback supplies native error and host-time GPU timestamps for its committed workload. Mapping methods remain separate void operations. | E3/MTL4CommitFeedback.h:19–40; E3/MTL4CommandQueue.h:237–275,353–371. SDK_CONTRACT. Successful barrier feedback is not mapping-error coverage. |
+| The prototype keeps native command buffers, allocators, options, resources and explicit queue ownership through real feedback and main completion. It resets each allocator only after the callback application body has drained. | E3/sparse_feedback.mm:50–124,250–393. SOURCE_AUDIT / LOCAL_PASS. Reset and release of fixture-owned references are counted; internal Metal object deallocation or global leak freedom is not inferred. |
+| A real native result and its test-controlled report are separate per-ticket states. A report received before its waiter remains available; releasing ticket 22's report does not complete ticket 21. | E3/sparse_feedback.mm:50–105,395–468; final REPORT_GATE / EARLY_REPORT / REVERSE_REPORTS records. LOCAL_PASS for this prototype, not production behavior. |
+| Caller queue-handle release is safe in the tested sequence because an explicit fixture owner remains through callbacks and drain. The callback captures only its result payload and completion group, not the queue, work/options owner or any PE object. | E3/sparse_feedback.mm:274–299,360–393,449–468. SOURCE_AUDIT / LOCAL_PASS. This does not test destruction of the last in-flight queue/resource reference. |
+| Mullion's distinction between GPU progress and unsettled CPU feedback remains useful; its held-work scheduler is not transplanted. | E2/mullion-queue.cpp:529–562; E2/mullion-bridge.c:5656–5681,5721–5737. Retained SOURCE_AUDIT, no new MULLION_OBSERVED result. |
+
+The native sequence mirrors the current hybrid handoff: classic main signal → Metal4 queue wait → ResourceState visibility barrier committed with options/feedback → real map/unmap → Metal4 signal → classic wait/upload/compute readback. Both texture and backing heap, plus upload/output buffers, are explicitly resident. Each mapped upload uses nonuniform per-tile/per-word data with changing seeds; every unmapped texel must read zero. CPU output is prefilled with nonzero canaries, and 32 trailing guard words must remain unchanged. The external Python checker independently recomputes the full-output hash. No native `CopyTiles` API is claimed; this slice uses full-data shader readback, with the existing D3D12 CopyTiles regressions left intact.
+
+No callback queue is blocked to create a passing schedule. The test holds a separate report gate **after actual native callback receipt** while real event/readback completion is already observed. This is SIMULATED_REPORT_DELAY, not naturally delayed driver feedback or a synthetic GPU error. A native completion group covers the callback's application body; captures and options contain no ownership cycle. Exactly-once counts cover per-ticket result destruction and clearing fixture-owned native handles after actual completion, not every internal driver allocation.
+
+### Validation Results / test matrix
+
+Final batch: 15 processes, all independently audited. Four validated positive processes include one ASan build; eight additional positive processes run with API/Shader Validation explicitly disabled for timing. Three validated negative controls exit 2 as expected. Every process uses the same final source; ASan uses a separately hashed binary.
+
+| Case | Result / evidence |
+| --- | --- |
+| Actual capabilities, 64-KiB map/upload/read → NULL unmap/zero | **LOCAL_PASS:** 12 positive processes × 22 full readbacks = 264 readbacks / 8,650,752 checked DWORDs; 88 readbacks have API+Shader Validation enabled. Every readback includes 32 unchanged guards. E3/runs.json and per-process logs. |
+| Native feedback and timestamps | **LOCAL_PASS:** all 330 final-batch callbacks, including benign GPU work underlying the negative controls, report error=nil exactly once and have ordered host-time timestamps. This is success evidence only; no native GPU fault was induced. |
+| Held reports, early reports, reverse reports | **LOCAL_PASS:** 48 positive pending checks, 24 early-report cases and 12 reverse pairs. Held map/unmap reports remain withheld for 51.61–55.99 ms after actual receipt; consumers complete only after release. This is controlled transport evidence. |
+| Caller handle drop / allocator and result ownership | **LOCAL_PASS:** 12 positive caller-handle-drop cases retain the explicit fixture queue owner. Across all 15 final processes, 330 result payloads are created/destroyed, 330 owned native handle sets retire and 330 allocators reset, each once after actual completion. Weak payload references expire after full fixture drain. |
+| Wrong expected word | **EXPECTED_REJECTION:** exactly one mismatch in each of 11 mapped readbacks; unmapped outputs remain correct. The independently computed true-data hashes still match. |
+| Omitted compute dispatch | **EXPECTED_REJECTION:** all 22 outputs retain the nonzero canary and are rejected. An unexecuted shader cannot pass the unmapped-zero oracle. |
+| Consumer ignores report gate | **EXPECTED_REJECTION:** four premature-consumption checks fail; actual GPU work and native feedback still complete normally. No fake native error is reported. |
+| API/Shader Validation and ASan | **PASS for final batch:** expected validation-enable messages and actual debug device/PSO classes checked; no API/Shader error diagnostics. The full default-queue ASan positive run passes with leak detection disabled; this is CPU memory-safety evidence, not a global leak audit. |
+| Production build, Wine/MSC, D3D11, Metal3 target, x86, Windows-native, Mullion runtime | **NOT_RUN:** production code is unchanged and the selected slice is an external native prototype. These are not replaced by the native positive result. |
+| Real asynchronous error, missing GPU event, missing callback, PE device/fence propagation, 32-entry FIFO backpressure | **NOT_RUN:** required before production integration acceptance. A timeout would terminate the probe as failure, never fabricate completion or device removal. |
+
+### Retained failures / runtime qualification
+
+The initial external compile failed because a C++ member named `id` hid the Objective-C type; it was renamed to `serial`. `compile-initial-failure.log` is retained. This was a probe build error, not a repository build regression.
+
+The first GPU process completed all 22 readbacks and received feedback but then crashed during cleanup of a **custom** descriptor `feedbackQueue`. This whole process is **LOCAL_FAIL**, excluded from final PASS/timing totals. A reduced ARC reproducer creates no GPU work (`E3/queue_teardown.mm:5–31`): explicit strong dispatch-queue and Metal-queue owners still reproduce a post-Metal-queue-release dispatch crash both with and without validation. Removing that post-release dispatch instead exposes `API MISUSE: Over-release of an object` in the fixture destructor. An ASan run also retains the libdispatch crash. Using the default Metal feedback queue is the passing control. Logs, binaries, crash reports and source/flag combinations are retained in E3.
+
+This local configuration failure is observed, but the exact runtime/SDK ownership-contract cause is **SPEC_UNVERIFIED**; do not label it a proved DXMT defect, a native GPU fault, or an Apple7 hardware limit. The accepted prototype uses the documented default feedback queue plus an independent completion group. Do not add an undocumented extra-retain workaround or introduce a custom feedback queue in the bridge based on these results.
+
+An additional diagnostic run with `OBJC_DEBUG_MISSING_POOLS=YES` exits successfully but emits 371 autorelease warnings. The captured first warning stack is MetalTools `_decodeReportLogState` / `preCompletionHandlers` on `com.Metal.CompletionQueueDispatch`, before the user completion handler (`E3/missing-pool-backtrace.log`); the debugger session was deliberately stopped/killed and is not a completed GPU acceptance run. Explicit pools remain around the prototype feedback body and main scope. Do not call this supplemental diagnostic clean, assume every warning has the same origin, or claim leak freedom. Final standard validation runs omit this optional ObjC diagnostic flag while retaining both Metal validation modes and stderr reporting.
+
+### Timing / remaining blockers / capability impact
+
+Eight unvalidated positive processes provide 16 process-first-cycle samples and 112 warm barrier samples. “First cycle” does not mean a cleared driver/shader cache. GPU timestamps are documented host seconds; each is checked against the probe's converted mach-absolute host clock. Event/readback observation times are CPU upper bounds sampled after main completion, not exact GPU event timestamps.
+
+| Metric, microseconds | First-cycle median / P95 / range, n=16 | Warm median / P95 / range, n=112 |
+| --- | --- | --- |
+| Actual callback receipt minus barrier GPU end | 120.04 / 371.42 / 88.17–371.42 | 124.79 / 238.04 / 63.96–743.79 |
+| Native commit call CPU duration | 10.48 / 56.21 / 6.42–56.21 | 5.06 / 8.54 / 3.25–35.92 |
+| Mapping plus signal call CPU duration | 84.10 / 348.71 / 13.21–348.71 | 7.52 / 18.87 / 4.83–93.08 |
+
+P95 is nearest rank. Controlled held/early/reverse cases, validation/ASan processes, failures and debugger runs are excluded. No natural callback arrived after the CPU's event/readback observation in the 12 positive processes; the sampling point does **not** prove callbacks always precede actual GPU event signals. Controlled report delay validates the proposed consumer invariant only. No A/B production overhead, admission-ring saturation, speedup or “no regression” conclusion follows from these native timings.
+
+- **BACKEND_NOT_IMPLEMENTED:** production WineMetal feedback transport, per-Submission consumption, asynchronous error cancellation and FIFO fence-publication closure remain open. The prototype does not close them.
+- **SPEC_UNVERIFIED:** custom-feedback-queue teardown ownership cause; exact immediate allocator/command-buffer release contract; error observability of separate void mapping operations; safe teardown without any terminal evidence. The prototype deliberately retains allocations through actual completion.
+- **MSC_SEMANTIC_GAP:** none newly established. MSC, its counter/descriptor ABI and compatibility behavior are outside this native-MSL slice and remain unvalidated here.
+- **TARGET_DEVICE_NOT_AVAILABLE / NOT_RUN:** Windows-native and other GPU differential targets. The real M1 Max target is available and passes the accepted placement-sparse path; no BLOCKED_BY_HARDWARE conclusion is justified for it.
+
+Public Feature Level, Shader Model and Tiled Resources Tier are unchanged. Metal3 shadow backing, existing Reserved Resource tests, D3D11 and MSC runtime compatibility are untouched. Rollback of this round is the focused report append; external evidence is retained, not deployed.
+
+### Git State / Next Recommended Slice
+
+Only this report is committed with repository history style; no push. The original `.gitignore` remains untouched and unstaged; no other repository work is introduced. E3/delivery-manifest.json records the resulting commit, final Git state, file identities and audit outcome.
+
+Recommend one next N13 slice: add a native barrier-completion credential through the **existing WineMetal bridge**, using the default feedback queue and a native-owned result/group, with prepare/submit/wait/release and benign-work delayed/early/reverse/synthetic-error transport checks. Keep old entry points and ABI-table ordering; validate x64/x86 paired artifacts and exact ownership. Do not yet attach it to D3D12 FIFO retirement or claim the asynchronous error gap closed. This narrows the next gate to transport and lifetime before the separate existing-Submission integration. Stop here for review/authorization; no production implementation begins in this prototype round. The broader development goal remains active.
