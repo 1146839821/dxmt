@@ -23,6 +23,7 @@
 #include "dxmt_format.hpp"
 #include "dxmt_sampler.hpp"
 #include "log/log.hpp"
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <mutex>
@@ -133,7 +134,7 @@ class MTLD3D12DescriptorHeapImpl : public MTLD3D12Pageable<MTLD3D12DescriptorHea
 
   D3D12_DESCRIPTOR_HEAP_DESC desc_;
 
-  dxmt::mutex descriptor_mutex_;
+  mutable dxmt::mutex descriptor_mutex_;
   std::atomic<uint64_t> mutation_generation_{0};
   std::vector<ShaderVisibleDescriptorCPUStorage> descriptors_;
   // Level zero has one bit per resource-bearing slot. Each higher level has
@@ -730,6 +731,14 @@ public:
         resource_index_levels_,
         resource_count_
     };
+  }
+
+  bool
+  HasTypedNullDescriptors() const override {
+    std::lock_guard lock(descriptor_mutex_);
+    return std::any_of(descriptors_.begin(), descriptors_.end(), [](const auto &descriptor) {
+      return descriptor.type == ShaderVisibleDescriptorType::Null && descriptor.NullView.kind != NullViewKind::None;
+    });
   }
 
   uint64_t

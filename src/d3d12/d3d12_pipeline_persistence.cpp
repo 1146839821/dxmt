@@ -1109,8 +1109,12 @@ public:
     if (!desc)
       return E_INVALIDARG;
     char typed_patch_test[2] = {};
-    if (GetEnvironmentVariableA("DXMT_TEST_MSC_TYPED_BUFFER_PATCH", typed_patch_test, sizeof(typed_patch_test)) == 1 &&
-        typed_patch_test[0] == '1')
+    const bool typed_sidecar_gate =
+        (GetEnvironmentVariableA("DXMT_MSC_TYPED_BUFFER_EXECUTION", typed_patch_test, sizeof(typed_patch_test)) == 1 &&
+         typed_patch_test[0] == '1') ||
+        (GetEnvironmentVariableA("DXMT_TEST_MSC_TYPED_BUFFER_PATCH", typed_patch_test, sizeof(typed_patch_test)) == 1 &&
+         typed_patch_test[0] == '1');
+    if (typed_sidecar_gate)
       return E_NOTIMPL;
     char lod_patch_test[2] = {};
     if (GetEnvironmentVariableA("DXMT_TEST_MSC_LOD_PATCH", lod_patch_test, sizeof(lod_patch_test)) == 1 &&

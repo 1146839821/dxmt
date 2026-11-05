@@ -712,7 +712,9 @@ public:
   D3D12ShaderBackend shader_backend = D3D12ShaderBackend::None;
   bool msc_uses_texture_load = false;
   bool msc_test_lod_patch = false;
-  bool msc_test_typed_buffer_patch = false;
+  // The typed-buffer sidecar is an explicit opt-in execution gate. It remains
+  // disabled by default until the production NULL contract is promoted.
+  bool msc_typed_buffer_sidecar = false;
   D3D12PipelineCacheData pipeline_cache;
 
   struct DescriptorFootprintRange {

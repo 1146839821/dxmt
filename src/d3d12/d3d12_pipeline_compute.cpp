@@ -28,6 +28,19 @@
 
 namespace dxmt {
 
+namespace {
+bool
+IsMSCTypedBufferSidecarEnabled() {
+  char enabled[2] = {};
+  if (GetEnvironmentVariableA("DXMT_MSC_TYPED_BUFFER_EXECUTION", enabled, sizeof(enabled)) == 1 && enabled[0] == '1')
+    return true;
+  // Preserve the existing isolated regression switch while the production gate
+  // remains opt-in and off by default.
+  return GetEnvironmentVariableA("DXMT_TEST_MSC_TYPED_BUFFER_PATCH", enabled, sizeof(enabled)) == 1 &&
+         enabled[0] == '1';
+}
+} // namespace
+
 class MTLD3D12ComputePipelineStateImpl : public MTLD3D12Pageable<MTLD3D12ComputePipelineState> {
 
   D3D12AirconvShader shader_cs;
@@ -100,9 +113,7 @@ public:
       if (FAILED(hr))
         return hr;
 
-      char typed_patch_test[2] = {};
-      if (GetEnvironmentVariableA("DXMT_TEST_MSC_TYPED_BUFFER_PATCH", typed_patch_test, sizeof(typed_patch_test)) == 1 &&
-          typed_patch_test[0] == '1') {
+      if (IsMSCTypedBufferSidecarEnabled()) {
         auto *root = static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature);
         const HRESULT layout_hr = root ? root->InitializeMSCCombinedSidecarLayout() : E_INVALIDARG;
         if (!root || FAILED(layout_hr) || root->MSCArgumentBufferSize > UINT32_MAX || !root->MSCCombinedSidecarLayout) {
@@ -137,7 +148,7 @@ public:
           converted.metallib = std::move(patched);
           const auto *root_bytes = static_cast<const uint8_t *>(root_signature);
           msc_test_lod_root_signature.assign(root_bytes, root_bytes + root_signature_size);
-          msc_test_typed_buffer_patch = true;
+          msc_typed_buffer_sidecar = true;
         } catch (const std::bad_alloc &) {
           return E_OUTOFMEMORY;
         }
@@ -147,7 +158,7 @@ public:
       char patch_test[2] = {};
       if (GetEnvironmentVariableA("DXMT_TEST_MSC_LOD_PATCH", patch_test, sizeof(patch_test)) == 1 &&
           patch_test[0] == '1') {
-        if (msc_test_typed_buffer_patch)
+        if (msc_typed_buffer_sidecar)
           return E_NOTIMPL;
         auto *root = static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature);
         if (!root || FAILED(root->InitializeMSCLodSidecarLayout()) || root->MSCArgumentBufferSize > UINT32_MAX)
@@ -293,7 +304,7 @@ public:
 
   virtual HRESULT STDMETHODCALLTYPE
   GetCachedBlob(ID3DBlob **blob) {
-    if (msc_test_lod_patch || msc_test_typed_buffer_patch) {
+    if (msc_test_lod_patch || msc_typed_buffer_sidecar) {
       if (!blob)
         return E_POINTER;
       *blob = nullptr;

@@ -4175,7 +4175,8 @@ public:
     }
 
     if (use_typed_sidecar) {
-      if (!descriptor_heap || !writeMSCResourceSidecars(*pRootSig, descriptor_heap, pStaging, 64, Ptr, allocation_size)) {
+      if (!descriptor_heap ||
+          !writeMSCResourceSidecars(*pRootSig, descriptor_heap, pStaging, 64, Ptr, allocation_size)) {
         recording_error_ = E_INVALIDARG;
         FailRecording(__func__, "MSC typed buffer sidecar table unavailable");
         return 0;
@@ -4187,6 +4188,10 @@ public:
       }
       EncodeMSCBufferResourceUse(buffer.handle, compute, render_stages);
       EncodeMSCBufferResourceUse(allocator_->gpu_heap_buffer_.handle, compute, render_stages);
+    } else if (descriptor_heap && descriptor_heap->HasTypedNullDescriptors()) {
+      recording_error_ = E_NOTIMPL;
+      FailRecording(__func__, "MSC typed NULL descriptor requires the typed-buffer sidecar gate");
+      return 0;
     }
     if (use_lod_sidecar) {
       EncodeMSCBufferResourceUse(allocator_->gpu_heap_buffer_.handle, compute, render_stages);
@@ -4953,7 +4958,7 @@ public:
       return false;
 
     const bool use_msc = pso_compute_->shader_backend == D3D12ShaderBackend::MetalShaderConverter;
-    if (pso_compute_->msc_test_lod_patch || pso_compute_->msc_test_typed_buffer_patch) {
+    if (pso_compute_->msc_test_lod_patch || pso_compute_->msc_typed_buffer_sidecar) {
       const void *blob = nullptr;
       const size_t size = rootsig_compute_ ? rootsig_compute_->GetBlob(&blob) : 0;
       const auto &expected = pso_compute_->msc_test_lod_root_signature;
@@ -5037,7 +5042,7 @@ public:
         auto Offset = use_msc
                           ? EncodeMSCArgumentBuffer(
                                 rootsig_compute_.ptr(), rootarg_compute_staging_, descriptor_heap_.ptr(), sampler_heap_.ptr(),
-                                test_lod_upload, true, static_cast<WMTRenderStages>(0), pso_compute_->msc_test_typed_buffer_patch
+                                test_lod_upload, true, static_cast<WMTRenderStages>(0), pso_compute_->msc_typed_buffer_sidecar
                             )
                           : EncodeRootArgument(rootsig_compute_.ptr(), rootarg_compute_staging_);
         if (!use_msc || rootsig_compute_->MSCArgumentBufferSize) {
@@ -6140,7 +6145,7 @@ public:
       if (pso_compute_.ptr() == compute_pso)
         return;
       if (!pso_compute_ || pso_compute_->msc_test_lod_patch != compute_pso->msc_test_lod_patch ||
-          pso_compute_->msc_test_typed_buffer_patch != compute_pso->msc_test_typed_buffer_patch)
+          pso_compute_->msc_typed_buffer_sidecar != compute_pso->msc_typed_buffer_sidecar)
         dirty_state_.set(DirtyState::ComputeRootArguments);
       pso_compute_ = compute_pso;
       pso_graphics_ = nullptr;

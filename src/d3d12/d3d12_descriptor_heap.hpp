@@ -308,6 +308,7 @@ public:
 
   virtual ShaderVisibleDescriptorRead ReadDescriptor(UINT Index) = 0;
   virtual ShaderVisibleDescriptorReadBatch ReadDescriptorBatch() = 0;
+  virtual bool HasTypedNullDescriptors() const = 0;
   virtual uint64_t GetMutationGeneration() const = 0;
 
   virtual void CopyDescriptors(UINT From, MTLD3D12DescriptorHeap *pHeapTo, UINT DescriptorTo, UINT CopyCount) = 0;

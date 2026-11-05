@@ -26,6 +26,7 @@ def main():
     parser.add_argument("--unaligned", action="store_true", help="use an offset within the aligned texture view")
     parser.add_argument("--zero-offset", action="store_true", help="use a zero-offset texture view")
     parser.add_argument("--experimental-patch", action="store_true", help="enable the experimental MSC sidecar path")
+    parser.add_argument("--production-gate", action="store_true", help="enable the opt-in MSC typed-buffer execution gate")
     parser.add_argument("--late-copy", action="store_true", help="copy the buffer view after Close and before submission")
     parser.add_argument("--heap-switch", action="store_true", help="switch between heaps with distinct view lengths")
     parser.add_argument("--encoder-break", action="store_true", help="insert a blit between the two heap-switch dispatches")
@@ -49,6 +50,8 @@ def main():
     parser.add_argument("--null-uav-live", action="store_true", help="negative control using a live UAV")
     parser.add_argument("--srv", choices=("null", "live", "null-to-live", "live-to-null", "null-to-live-skip", "live-to-null-skip", "null-to-live-only", "null-to-live-only-skip", "null-to-live-only-pending", "null-to-live-only-pending-skip", "null-to-live-only-rerecord", "null-to-live-only-rerecord-wrong", "copy-to-live", "copy-to-null", "copy-to-live-skip", "copy-to-null-skip", "multi", "multi-skip", "multi-wrong", "multi-merge", "multi-merge-skip", "multi-split", "multi-split-skip"), help="test a typed SRV and optional post-Close update")
     args = parser.parse_args()
+    if args.experimental_patch and args.production_gate:
+        parser.error("--experimental-patch and --production-gate are mutually exclusive")
     if args.srv and (not args.buffer or not args.scalar or any(getattr(args, name) for name in (
         "null_uav", "null_uav_live", "unaligned", "zero_offset", "late_copy", "heap_switch",
         "encoder_break", "pending_reset", "indirect_reject", "indirect", "indirect_count",
@@ -92,6 +95,8 @@ def main():
                DYLD_PRINT_LIBRARIES="1")
     if args.experimental_patch:
         env["DXMT_TEST_MSC_TYPED_BUFFER_PATCH"] = "1"
+    if args.production_gate:
+        env["DXMT_MSC_TYPED_BUFFER_EXECUTION"] = "1"
     identities = [f"LOADED_CODE {dll} {symbol} {pe_export_bytes(stage / dll, symbol)}" for dll, symbol in
                   (("d3d12.dll", "D3D12CreateDevice"), ("winemetal.dll", "DXMTMSCPatchSamplerLOD"))]
     rows = []

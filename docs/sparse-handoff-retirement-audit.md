@@ -3485,6 +3485,56 @@ for the retained NULL identity, starting with a backend-specific R32 read path
 and explicit rejection for unsupported operations. Keep the current zero-ABI
 default until that gate has positive and negative GPU evidence.
 
+### E32 — Opt-in MSC typed-buffer execution gate (2026-11-05)
+
+**Goal and boundary.** The existing MSC typed-buffer sidecar path is now an
+explicit opt-in execution gate for the bounded R32 buffer workload. Setting
+`DXMT_MSC_TYPED_BUFFER_EXECUTION=1` enables the same sidecar patch and argument
+layout used by the isolated regression path. The default remains disabled.
+Graphics, indirect, raytracing, non-R32 formats, and generic NULL descriptors
+are outside this slice.
+
+**Implementation.** `src/d3d12/d3d12_pipeline_compute.cpp:30-43,117-152`
+accepts the production gate and records the sidecar state on the compute PSO.
+`src/d3d12/d3d12_command_list.cpp:4177-4195,4960-5045,6147` binds the combined
+sidecar and rejects a bound typed NULL descriptor with `E_NOTIMPL` when the gate
+is disabled, instead of silently submitting the zero descriptor ABI.
+`src/d3d12/d3d12_descriptor_heap.hpp:311` and
+`src/d3d12/d3d12_descriptor_heap.cpp:736-744` expose the locked CPU-owner scan
+used by that explicit rejection. Pipeline persistence refuses to load a cached
+compute PSO while the gate is enabled, preventing a cache ABI mismatch.
+
+**Validation.** The final x64 release build passed after these source changes.
+With `DXMT_MSC_TYPED_BUFFER_EXECUTION=1`, the R32 FLOAT/UINT/SINT typed NULL SRV
+readback passed with Metal API/GPU validation enabled, and the corresponding
+NULL UAV read/write/discard workload passed for all three formats. With the gate
+unset, the same NULL SRV workload exited during recording and emitted
+`MSC typed NULL descriptor requires the typed-buffer sidecar gate`; no GPU
+submission was made. Existing typed live SRV behavior remains covered by the
+previous production sparse-view evidence; one exploratory live-mode run still
+reports the known dimensions=64 versus 4 mismatch and is not attributed to this
+gate.
+
+**Capability and risk.** This is an opt-in MSC execution contract, not a public
+Feature Level, Shader Model, tiled-resource, or NULL-descriptor capability
+promotion. The default path and Metal 3 shadow backing remain unchanged. The
+current rejection scans the bound descriptor heap conservatively; a later slice
+should narrow it to shader-reachable typed NULL slots before considering default
+activation. Production NULL semantics therefore remain gated and require more
+shader-stage and operation coverage.
+
+**Changed files and delivery.** The focused source changes are in
+`src/d3d12/d3d12_device.hpp`, `src/d3d12/d3d12_descriptor_heap.hpp`,
+`src/d3d12/d3d12_descriptor_heap.cpp`, `src/d3d12/d3d12_pipeline_compute.cpp`,
+`src/d3d12/d3d12_pipeline_persistence.cpp`, and
+`src/d3d12/d3d12_command_list.cpp`; the reproducible runner flag is in
+`tests/dx12/run_r32_typed_uav.py`. This remains one independently reviewable
+slice and will be committed without pushing.
+
+**Next slice.** Replace the conservative heap-wide rejection with a
+shader-reachable descriptor check, then add negative UAV/atomic and persistence
+coverage before any default enablement discussion.
+
 ### 7. Git State / Next Recommended Slice
 
 Delivery commit uses fix(d3d12) repository style and includes only the metadata,
