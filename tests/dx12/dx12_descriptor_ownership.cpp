@@ -10,6 +10,8 @@
 #include <iostream>
 #include <chrono>
 #include <cstring>
+#include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <set>
 #include <thread>
@@ -2372,6 +2374,381 @@ bool CheckTypedViewFormats(UINT mode = 0, bool cost = false) {
   return good;
 }
 
+bool CheckNativeBufferViewPublication(const char *srv_path,
+                                      const char *uav_path, UINT seed,
+                                      bool wrong_word) {
+  struct Objects {
+    ID3D12Device *device = nullptr;
+    ID3D12Resource *sparse = nullptr, *input = nullptr, *replacement = nullptr;
+    ID3D12Resource *upload = nullptr, *output = nullptr, *readback = nullptr;
+    ID3D12DescriptorHeap *source = nullptr, *mirror = nullptr,
+                         *visible = nullptr;
+    ID3D12CommandQueue *queue = nullptr;
+    ID3D12CommandAllocator *allocator = nullptr;
+    ID3D12GraphicsCommandList *list = nullptr;
+    ID3D12Fence *fence = nullptr;
+    ID3D12RootSignature *root = nullptr;
+    ID3D12PipelineState *pso = nullptr;
+    ~Objects() {
+      Release(list);
+      Release(allocator);
+      Release(queue);
+      Release(fence);
+      Release(pso);
+      Release(root);
+      Release(visible);
+      Release(mirror);
+      Release(source);
+      Release(readback);
+      Release(output);
+      Release(upload);
+      Release(replacement);
+      Release(input);
+      Release(sparse);
+      Release(device);
+    }
+  };
+  constexpr UINT words = 1024, guards = 32, bytes = words * 4;
+  constexpr UINT canary = 0xa5a55a5a;
+  bool passed = true;
+  UINT cases = 0, gpu_reads = 0;
+  for (bool visible_source : {false, true})
+    for (UINT kind : {0u, 1u})
+      for (bool seeded : {false, true}) {
+        Objects o;
+        if (!CheckHR("publication device",
+                     D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+                                       IID_PPV_ARGS(&o.device))))
+          return false;
+        auto *device = static_cast<dxmt::MTLD3D12Device *>(o.device);
+        const auto desc = BufferDescription(
+            65536, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        auto props = DefaultHeap();
+        if (!CheckHR("publication reserved",
+                     o.device->CreateReservedResource(
+                         &desc, D3D12_RESOURCE_STATE_COMMON, nullptr,
+                         IID_PPV_ARGS(&o.sparse))) ||
+            !CheckHR("publication input",
+                     o.device->CreateCommittedResource(
+                         &props, D3D12_HEAP_FLAG_NONE, &desc,
+                         D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                         IID_PPV_ARGS(&o.input))) ||
+            !CheckHR("publication replacement",
+                     o.device->CreateCommittedResource(
+                         &props, D3D12_HEAP_FLAG_NONE, &desc,
+                         D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                         IID_PPV_ARGS(&o.replacement))))
+          return false;
+        auto *bad =
+            static_cast<dxmt::MTLD3D12Resource *>(o.sparse)->buffer.ptr();
+        if (!bad || !bad->current())
+          return false; // This diagnostic requires the real native sparse path.
+        D3D12_DESCRIPTOR_HEAP_DESC hd = {};
+        hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        hd.NumDescriptors = 2;
+        hd.Flags = visible_source ? D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE
+                                  : D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+        if (!CheckHR("publication source", o.device->CreateDescriptorHeap(
+                                               &hd, IID_PPV_ARGS(&o.source))))
+          return false;
+        hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        if (!CheckHR("publication mirror", o.device->CreateDescriptorHeap(
+                                               &hd, IID_PPV_ARGS(&o.mirror))) ||
+            !CheckHR("publication visible", o.device->CreateDescriptorHeap(
+                                                &hd, IID_PPV_ARGS(&o.visible))))
+          return false;
+        auto *source = static_cast<dxmt::MTLD3D12DescriptorHeap *>(o.source);
+        auto *mirror = static_cast<dxmt::MTLD3D12DescriptorHeap *>(o.mirror);
+        const auto handle = o.source->GetCPUDescriptorHandleForHeapStart();
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv = {};
+        srv.Format = DXGI_FORMAT_R32_UINT;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Buffer.NumElements = words;
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uav = {};
+        uav.Format = DXGI_FORMAT_R32_UINT;
+        uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        uav.Buffer.NumElements = words;
+        const auto write = [&](ID3D12Resource *r) {
+          if (kind)
+            o.device->CreateUnorderedAccessView(r, nullptr, &uav, handle);
+          else
+            o.device->CreateShaderResourceView(r, &srv, handle);
+        };
+        if (seeded)
+          write(o.input);
+        struct Snapshot {
+          dxmt::ShaderVisibleDescriptorCPUStorage cpu;
+          uint8_t air[32], msc[24];
+          uint64_t generation;
+        };
+        const auto mapped = [&](uint64_t va) -> const uint8_t * {
+          uint64_t offset = 0;
+          auto *a = device->LookupBufferByVA(va, &offset);
+          return a && a->mappedMemory(0)
+                     ? static_cast<const uint8_t *>(a->mappedMemory(0)) + offset
+                     : nullptr;
+        };
+        const auto snapshot = [&]() {
+          Snapshot s{};
+          s.cpu = ReadDescriptorFields(source, 0);
+          s.generation = source->GetMutationGeneration();
+          o.device->CopyDescriptorsSimple(
+              1, o.mirror->GetCPUDescriptorHandleForHeapStart(), handle,
+              hd.Type);
+          auto gpu = o.mirror->GetGPUDescriptorHandleForHeapStart();
+          auto *air = mapped(gpu.ptr);
+          auto *msc = mapped(mirror->GetMSCDescriptorTableAddress(gpu));
+          if (!air || !msc)
+            std::abort();
+          std::memcpy(s.air, air, sizeof(s.air));
+          std::memcpy(s.msc, msc, sizeof(s.msc));
+          return s;
+        };
+        const auto before = snapshot();
+        auto *resource = static_cast<dxmt::MTLD3D12Resource *>(o.sparse);
+        HRESULT hr =
+            kind ? resource->CreateUnorderedAccessView(nullptr, &uav, handle)
+                 : resource->CreateShaderResourceView(&srv, handle);
+        bool good = hr == E_FAIL;
+        write(o.sparse); // Exercise the public void entry point too.
+        const auto after = snapshot();
+        good &= std::memcmp(&before.cpu, &after.cpu, sizeof(before.cpu)) == 0 &&
+                std::memcmp(before.air, after.air, sizeof(before.air)) == 0 &&
+                std::memcmp(before.msc, after.msc, sizeof(before.msc)) == 0 &&
+                before.generation == after.generation;
+        std::cout << "VIEW_PUBLICATION visible=" << visible_source
+                  << " kind=" << kind << " seeded=" << seeded << " hr=0x"
+                  << std::hex << UINT(hr) << std::dec
+                  << " native_view_rejected=" << (hr == E_FAIL)
+                  << " unchanged=" << good << std::endl;
+        ++cases;
+        if (!good)
+          return false; // Never dispatch a published nil on the old
+                        // implementation.
+        if (!seeded)
+          continue;
+
+        D3D12_COMMAND_QUEUE_DESC qd = {};
+        if (!CheckHR("publication queue", o.device->CreateCommandQueue(
+                                              &qd, IID_PPV_ARGS(&o.queue))) ||
+            !CheckHR(
+                "publication allocator",
+                o.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                 IID_PPV_ARGS(&o.allocator))) ||
+            !CheckHR("publication list",
+                     o.device->CreateCommandList(
+                         0, D3D12_COMMAND_LIST_TYPE_DIRECT, o.allocator,
+                         nullptr, IID_PPV_ARGS(&o.list))) ||
+            !CheckHR("publication fence",
+                     o.device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                           IID_PPV_ARGS(&o.fence))))
+          return false;
+        props.Type = D3D12_HEAP_TYPE_UPLOAD;
+        auto transfer_desc = BufferDescription(2 * bytes);
+        if (!CheckHR("publication upload",
+                     o.device->CreateCommittedResource(
+                         &props, D3D12_HEAP_FLAG_NONE, &transfer_desc,
+                         D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                         IID_PPV_ARGS(&o.upload))))
+          return false;
+        void *mem = nullptr;
+        if (!CheckHR("publication upload map", o.upload->Map(0, nullptr, &mem)))
+          return false;
+        for (UINT i = 0; i < 2 * words; ++i)
+          static_cast<UINT *>(mem)[i] =
+              (seed ^ (i * 0x9e3779b9u)) + (i >= words ? 0x13579bdfu : 0);
+        o.upload->Unmap(0, nullptr);
+        props.Type = D3D12_HEAP_TYPE_DEFAULT;
+        transfer_desc = BufferDescription(
+            (words + guards) * 4, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        if (!CheckHR("publication output",
+                     o.device->CreateCommittedResource(
+                         &props, D3D12_HEAP_FLAG_NONE, &transfer_desc,
+                         D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                         IID_PPV_ARGS(&o.output))))
+          return false;
+        props.Type = D3D12_HEAP_TYPE_READBACK;
+        transfer_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+        if (!CheckHR("publication readback",
+                     o.device->CreateCommittedResource(
+                         &props, D3D12_HEAP_FLAG_NONE, &transfer_desc,
+                         D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                         IID_PPV_ARGS(&o.readback))))
+          return false;
+        const auto transition = [&](ID3D12Resource *r, D3D12_RESOURCE_STATES a,
+                                    D3D12_RESOURCE_STATES b) {
+          D3D12_RESOURCE_BARRIER t{};
+          t.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+          t.Transition = {r, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, a, b};
+          o.list->ResourceBarrier(1, &t);
+        };
+        const auto wait = [&](UINT64 value) {
+          if (!CheckHR("publication signal", o.queue->Signal(o.fence, value)))
+            return false;
+          HANDLE e = CreateEventA(nullptr, FALSE, FALSE, nullptr);
+          if (!e)
+            return false;
+          bool ok = CheckHR("publication event",
+                            o.fence->SetEventOnCompletion(value, e)) &&
+                    WaitForSingleObject(e, 10000) == WAIT_OBJECT_0;
+          CloseHandle(e);
+          return ok;
+        };
+        o.list->CopyBufferRegion(o.input, 0, o.upload, 0, bytes);
+        o.list->CopyBufferRegion(o.replacement, 0, o.upload, bytes, bytes);
+        auto state = kind ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS
+                          : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        transition(o.input, D3D12_RESOURCE_STATE_COPY_DEST, state);
+        transition(o.replacement, D3D12_RESOURCE_STATE_COPY_DEST, state);
+        if (!CheckHR("publication init close", o.list->Close()))
+          return false;
+        ID3D12CommandList *lists[] = {o.list};
+        o.queue->ExecuteCommandLists(1, lists);
+        if (!wait(1))
+          return false;
+        // D3D12 applications keep resources alive until their GPU use
+        // completes. Snapshot identity proves the old descriptor target
+        // survived rejection.
+        Release(o.mirror);
+
+        D3D12_DESCRIPTOR_RANGE ranges[2] = {};
+        ranges[0] = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0, 0};
+        ranges[1] = {kind ? D3D12_DESCRIPTOR_RANGE_TYPE_UAV
+                          : D3D12_DESCRIPTOR_RANGE_TYPE_SRV,
+                     1, kind ? 1u : 0u, 0, 1};
+        D3D12_ROOT_PARAMETER param{};
+        param.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        param.DescriptorTable = {2, ranges};
+        D3D12_ROOT_SIGNATURE_DESC rs{1, &param, 0, nullptr,
+                                     D3D12_ROOT_SIGNATURE_FLAG_NONE};
+        ID3DBlob *blob = nullptr;
+        if (!CheckHR("publication serialize",
+                     D3D12SerializeRootSignature(
+                         &rs, D3D_ROOT_SIGNATURE_VERSION_1, &blob, nullptr)))
+          return false;
+        HRESULT root_hr = o.device->CreateRootSignature(
+            0, blob->GetBufferPointer(), blob->GetBufferSize(),
+            IID_PPV_ARGS(&o.root));
+        Release(blob);
+        if (!CheckHR("publication root", root_hr))
+          return false;
+        FILE *file = std::fopen(kind ? uav_path : srv_path, "rb");
+        if (!file)
+          return false;
+        std::fseek(file, 0, SEEK_END);
+        long size = std::ftell(file);
+        std::rewind(file);
+        std::vector<uint8_t> shader(size > 0 ? size : 0);
+        bool loaded = size > 0 && std::fread(shader.data(), 1, shader.size(),
+                                             file) == shader.size();
+        std::fclose(file);
+        if (!loaded)
+          return false;
+        D3D12_COMPUTE_PIPELINE_STATE_DESC pd{};
+        pd.pRootSignature = o.root;
+        pd.CS = {shader.data(), shader.size()};
+        if (!CheckHR("publication PSO", o.device->CreateComputePipelineState(
+                                            &pd, IID_PPV_ARGS(&o.pso))))
+          return false;
+        auto dest = o.visible->GetCPUDescriptorHandleForHeapStart();
+        const UINT stride = o.device->GetDescriptorHandleIncrementSize(hd.Type);
+        auto input_dest = dest;
+        input_dest.ptr += stride;
+        D3D12_UNORDERED_ACCESS_VIEW_DESC output_view{};
+        output_view.Format = DXGI_FORMAT_R32_TYPELESS;
+        output_view.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        output_view.Buffer.NumElements = words + guards;
+        output_view.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+        o.device->CreateUnorderedAccessView(o.output, nullptr, &output_view,
+                                            dest);
+        o.device->CopyDescriptorsSimple(1, input_dest, handle, hd.Type);
+        if (!CheckHR("publication reset allocator", o.allocator->Reset()) ||
+            !CheckHR("publication reset list",
+                     o.list->Reset(o.allocator, o.pso)))
+          return false;
+        // Seed all output words and guards through the existing upload
+        // resource.
+        if (!CheckHR("publication seed map", o.upload->Map(0, nullptr, &mem)))
+          return false;
+        for (UINT i = 0; i < words + guards; i++)
+          static_cast<UINT *>(mem)[i] = canary;
+        o.upload->Unmap(0, nullptr);
+        o.list->CopyBufferRegion(o.output, 0, o.upload, 0,
+                                 (words + guards) * 4);
+        transition(o.output, D3D12_RESOURCE_STATE_COPY_DEST,
+                   D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        o.list->SetComputeRootSignature(o.root);
+        ID3D12DescriptorHeap *heaps[] = {o.visible};
+        o.list->SetDescriptorHeaps(1, heaps);
+        o.list->SetComputeRootDescriptorTable(
+            0, o.visible->GetGPUDescriptorHandleForHeapStart());
+        o.list->Dispatch(words / 64, 1, 1);
+        transition(o.output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                   D3D12_RESOURCE_STATE_COPY_SOURCE);
+        o.list->CopyBufferRegion(o.readback, 0, o.output, 0,
+                                 (words + guards) * 4);
+        transition(o.output, D3D12_RESOURCE_STATE_COPY_SOURCE,
+                   D3D12_RESOURCE_STATE_COPY_DEST);
+        if (!CheckHR("publication draw close", o.list->Close()))
+          return false;
+        for (UINT phase = 0; phase < 3; phase++) {
+          if (phase == 2) {
+            write(o.replacement);
+            o.device->CopyDescriptorsSimple(1, input_dest, handle, hd.Type);
+          }
+          o.queue->ExecuteCommandLists(1, lists);
+          if (!wait(phase + 2))
+            return false;
+          if (!CheckHR("publication result map",
+                       o.readback->Map(0, nullptr, &mem)))
+            return false;
+          UINT bad_words = 0, guard_bad = 0;
+          for (UINT i = 0; i < words; i++) {
+            UINT want =
+                ((seed ^ ((i + (phase == 2 ? words : 0)) * 0x9e3779b9u)) +
+                 (phase == 2 ? 0x13579bdfu : 0)) +
+                1;
+            if (wrong_word && phase == 0 && i == words - 1)
+              want ^= 1;
+            bad_words += static_cast<UINT *>(mem)[i] != want;
+          }
+          for (UINT i = words; i < words + guards; i++)
+            guard_bad += static_cast<UINT *>(mem)[i] != canary;
+          o.readback->Unmap(0, nullptr);
+          good &= bad_words == 0 && guard_bad == 0;
+          ++gpu_reads;
+          std::cout << "VIEW_READBACK visible=" << visible_source
+                    << " kind=" << kind << " phase=" << phase
+                    << " replay=" << (phase != 0) << " words=" << words
+                    << " bad=" << bad_words << " guard=" << guard_bad
+                    << std::endl;
+        }
+        // Explicit null replacement is an ABI/publication control. Do not
+        // dispatch a nil typed texture as a substitute for null binding
+        // support.
+        const auto generation = source->GetMutationGeneration();
+        write(nullptr);
+        o.device->CopyDescriptorsSimple(1, input_dest, handle, hd.Type);
+        auto *visible = static_cast<dxmt::MTLD3D12DescriptorHeap *>(o.visible);
+        const auto gpu = o.visible->GetGPUDescriptorHandleForHeapStart();
+        const auto *air = mapped(gpu.ptr) + stride;
+        const auto *msc = mapped(visible->GetMSCDescriptorTableAddress(gpu)) +
+                          sizeof(dxmt_msc_descriptor_entry);
+        uint64_t id = 1;
+        std::memcpy(&id, air, sizeof(id));
+        const dxmt_msc_descriptor_entry zero{};
+        good &= id == 0 && std::memcmp(msc, &zero, sizeof(zero)) == 0 &&
+                source->GetMutationGeneration() == generation + 1;
+        std::cout << "VIEW_NULL visible=" << visible_source << " kind=" << kind
+                  << " pass=" << good << std::endl;
+        passed &= good;
+      }
+  std::cout << "VIEW_RESULT cases=" << cases << " readbacks=" << gpu_reads
+            << " seed=" << seed << " pass=" << passed << std::endl;
+  return passed;
+}
+
 bool CheckTypedBufferSidecarMetadata() {
   struct Objects {
     ID3D12Device *device = nullptr;
@@ -2491,6 +2868,13 @@ int main(int argc, char **argv) {
       std::cout << "\n";
     }
   }
+  if ((argc == 5 || argc == 6) &&
+      std::string(argv[1]) == "--native-buffer-view-publication")
+    return CheckNativeBufferViewPublication(
+               argv[2], argv[3], std::strtoul(argv[4], nullptr, 0),
+               argc == 6 && std::string(argv[5]) == "wrong-word")
+               ? 0
+               : 1;
   if (argc == 2 && std::string(argv[1]) == "--typed-buffer-sidecar")
     return CheckTypedBufferSidecarMetadata() ? 0 : 1;
   if (argc == 2 && std::string(argv[1]) == "--buffer-view-ranges")

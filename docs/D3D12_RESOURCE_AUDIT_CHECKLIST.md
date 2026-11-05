@@ -116,8 +116,11 @@ and does not justify another unchanged local MS_LOAD or Submit timing matrix.
   readback, but R32Uint read/atomic buffer texture views return nil before/after
   mapping while ordinary controls pass. This is not an Apple7 placement-sparse
   hardware blocker; universal native compatibility remains SPEC_UNVERIFIED.
-  Typed descriptor publication guards are the next contained slice; MSC counter
-  ABI and coherent typed-sparse representation remain separate OPEN blockers.
+  Typed descriptor publication now preflights native texture/ID and preserves the
+  previous descriptor on failure (2026-11-05 publication-guard slice). This is
+  containment, not typed-sparse support: MSC counter ABI and coherent typed-sparse
+  representation remain separate OPEN blockers. Null typed GPU execution and
+  post-COM-release residency are unproven; see the retained red diagnostics.
   See [native buffer-view contract audit](sparse-handoff-retirement-audit.md#sparse-buffer-texture-view-contract--n15n09-audit-2026-11-05).
 
 - [x] N09 typed-buffer format admission rejects unsupported native SRV/UAV

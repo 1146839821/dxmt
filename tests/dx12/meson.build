@@ -1357,6 +1357,12 @@ if dxc_command.length() > 0
     command: dxc_command + [ '-D', 'PROBE_TYPED_READ=1', '-E', 'probe_read', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
     build_by_default: false,
   )
+  custom_target('dx12_reserved_buffer_typed_uav_read_fixture',
+    input: 'reserved_buffer.hlsl',
+    output: 'reserved_buffer.typed_uav.cs.cso',
+    command: dxc_command + [ '-D', 'PROBE_TYPED_UAV_READ=1', '-E', 'probe_read', '-T', 'cs_6_0', '@INPUT@', '-Fo', '@OUTPUT@' ],
+    build_by_default: false,
+  )
   custom_target('dx12_reserved_texture_read_fixture',
     input: 'reserved_texture.hlsl',
     output: 'reserved_texture.read.cs.cso',

@@ -512,6 +512,12 @@ public:
   AddUnorderedAccessView(UINT Index, Buffer *UAVBuffer, BufferViewKey View, BufferSlice Slice) {
     if (Index >= descriptors_.size())
       return E_INVALIDARG;
+    // A native format can be valid while this allocation cannot provide its
+    // texture view (for example a placement-sparse buffer). Resolve before
+    // mutating either descriptor ABI or releasing the previous resources.
+    const auto *buffer_view = UAVBuffer ? &UAVBuffer->view_(View) : nullptr;
+    if (buffer_view && (!buffer_view->texture || !buffer_view->gpu_resource_id))
+      return E_FAIL;
     std::lock_guard lock(descriptor_mutex_);
     ReleaseDescriptorResources(Index);
     buffer_resources_[Index] = UAVBuffer;
@@ -523,15 +529,14 @@ public:
     if (mapped_argument_buffer_) { 
       auto &gpu_storage = mapped_argument_buffer_[Index];
       if (UAVBuffer) {
-        auto &buffer_view = UAVBuffer->view_(View);
-        gpu_storage.UAVTexelBuffer.resource_id = buffer_view.gpu_resource_id;
+        gpu_storage.UAVTexelBuffer.resource_id = buffer_view->gpu_resource_id;
         gpu_storage.UAVTexelBuffer.metadata = ((uint64_t)Slice.elementCount << 32) | (uint64_t)(Slice.firstElement);
         auto texel_size = MTLGetTexelSize(UAVBuffer->pixelFormat(View));
         uint64_t metadata = Slice.byteLength;
         metadata |= ((uint64_t)(Slice.byteOffset / texel_size) & 0xff) << 32;
         metadata |= 1ull << 63;
         SetMSCDescriptor(
-            Index, {UAVBuffer->current()->gpuAddress() + Slice.byteOffset, buffer_view.gpu_resource_id, metadata}
+            Index, {UAVBuffer->current()->gpuAddress() + Slice.byteOffset, buffer_view->gpu_resource_id, metadata}
         );
       } else {
         gpu_storage.UAVTexelBuffer.resource_id = 0;
@@ -559,7 +564,7 @@ public:
       counter_view = Counter->createView({WMTPixelFormatR32Uint, false, CounterOffsetInBytes, sizeof(UINT)});
       const auto &view = Counter->view_(counter_view);
       if (!view.texture || !view.gpu_resource_id)
-        return E_OUTOFMEMORY;
+        return E_FAIL;
       counter_resource_id = view.gpu_resource_id;
     }
     std::lock_guard lock(descriptor_mutex_);
@@ -594,6 +599,12 @@ public:
   virtual HRESULT AddShaderResourceView(UINT Index, Buffer *Buffer, BufferViewKey View, BufferSlice Slice) {
     if (Index >= descriptors_.size())
       return E_INVALIDARG;
+    // A native format can be valid while this allocation cannot provide its
+    // texture view (for example a placement-sparse buffer). Resolve before
+    // mutating either descriptor ABI or releasing the previous resources.
+    const auto *buffer_view = Buffer ? &Buffer->view_(View) : nullptr;
+    if (buffer_view && (!buffer_view->texture || !buffer_view->gpu_resource_id))
+      return E_FAIL;
     std::lock_guard lock(descriptor_mutex_);
     ReleaseDescriptorResources(Index);
     buffer_resources_[Index] = Buffer;
@@ -605,14 +616,13 @@ public:
     if (mapped_argument_buffer_) { 
       auto &gpu_storage = mapped_argument_buffer_[Index];
       if (Buffer) {
-        auto &buffer_view = Buffer->view_(View);
-        gpu_storage.UAVTexelBuffer.resource_id = buffer_view.gpu_resource_id;
+        gpu_storage.UAVTexelBuffer.resource_id = buffer_view->gpu_resource_id;
         gpu_storage.UAVTexelBuffer.metadata = ((uint64_t)Slice.elementCount << 32) | (uint64_t)(Slice.firstElement);
         auto texel_size = MTLGetTexelSize(Buffer->pixelFormat(View));
         uint64_t metadata = Slice.byteLength;
         metadata |= ((uint64_t)(Slice.byteOffset / texel_size) & 0xff) << 32;
         metadata |= 1ull << 63;
-        SetMSCDescriptor(Index, {Buffer->current()->gpuAddress() + Slice.byteOffset, buffer_view.gpu_resource_id, metadata});
+        SetMSCDescriptor(Index, {Buffer->current()->gpuAddress() + Slice.byteOffset, buffer_view->gpu_resource_id, metadata});
       } else {
         gpu_storage.UAVTexelBuffer.resource_id = 0;
         gpu_storage.UAVTexelBuffer.metadata = 0;

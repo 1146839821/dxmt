@@ -1,5 +1,8 @@
 RWByteAddressBuffer output_buffer : register(u0);
-#ifdef PROBE_TYPED_READ
+#if defined(PROBE_TYPED_UAV_READ)
+RWBuffer<uint> input_buffer : register(u1);
+uint read_input(uint index) { return input_buffer[index]; }
+#elif defined(PROBE_TYPED_READ)
 Buffer<uint> input_buffer : register(t0);
 uint read_input(uint index) { return input_buffer[index]; }
 #else

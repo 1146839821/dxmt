@@ -2876,3 +2876,205 @@ E26 probe/evidence is retained outside the repo. Original .gitignore SHA256 rema
 No production code or vendored header changed. Commit subject follows repository
 docs(d3d12) style; no push. E26 delivery-manifest.json records the final commit,
 worktree, source/artifact identities and validation summary after commit.
+
+## Native buffer-view publication guard — N15/N09 implementation, 2026-11-05
+
+### 1. Task Summary / Gate Conclusions
+
+The preceding Native Buffer-View Publication Guard Design Card is implemented in
+the existing descriptor owner. Actual native placement-sparse typed SRV/UAV view
+failure now returns internal E_FAIL before releasing previous resources, changing
+descriptor bytes, resource index or mutation generation. Public CreateSRV/UAV
+remain void and use their existing failure diagnostic. This contains an unsafe
+publication; it does **not** implement the requested legal typed sparse access.
+
+Gate 0/1: PASS for this authorized bounded repair, using E26 native evidence and
+the preceding card. Gate 2: implemented. Gate 3: LOCAL_PASS for the final matrix
+below, with explicit limitations. Gate 4: scoped source/artifact/Git audit PASS;
+default common sparse activation stays HELD. Overall sparse/MSC work is incomplete.
+
+Evidence E27:
+/Users/zhangbo/Documents/Vibe-Codeding/dxmt-test/n95-capability-gate/result-buffer-view-publication-20261105.
+
+### 2. Baseline Evidence
+
+- Target feat/d3d12, baseline 8c1d207e2a21086ab95af333df38cced85bbc861; cached
+  origin/feat/d3d12 behind local by21, remote reference not fetched this slice.
+  Only the original .gitignore edit existed before implementation.
+- Apple M1 Max / Apple7, macOS27.2(26B123), Xcode27.2(27B52), Metal Toolchain27.2,
+  Wine11.0; compiled MSC SDK API4.0.3, runtime product version unknown. This device
+  has Metal4/placement-sparse support. E26's actual nil native views remain the
+  narrower observed limitation, never BLOCKED_BY_HARDWARE.
+- Release x64 build with tests and D3D12 enabled, patched external LLVM, configuration
+  matching .github/build_dxmt.sh. Build:
+  /Users/zhangbo/Documents/Vibe-Codeding/dxmt-test/n95-capability-gate/dxmt-metal272-identity-audit-20261104.
+- New isolated stage-buffer-view-publication-20261105 and
+  prefix-buffer-view-publication-20261105; independent baseline stage. Existing
+  Wine/CrossOver environments and prior evidence stages were not deployed over.
+- Mullion reference remains pinned93de32b9145885ceb2e45be7d445e56d62499b3c; retained
+  exact source/hash in E26, not a new runtime result.
+
+### 3. Findings / Source and Specification Evidence
+
+| ID / evidence type | Source | Conclusion and limit |
+| --- | --- | --- |
+| P1 SOURCE_OBSERVED / LOCAL_FAIL baseline | src/d3d12/d3d12_descriptor_heap.cpp:511–549,599–635; baseline-regression.log | Previous writers returned S_OK for actual nil typed views and mutated descriptor state. Identical final fixture against the old DLL exits1 at the first empty-slot case: hr=0, rejected=0, unchanged=0. It stops before GPU dispatch. |
+| P2 SOURCE_OBSERVED | Same file:168–175,518–523,605–610 | New preflight returns before ReleaseDescriptorResources and all CPU/AIR/MSC/index/generation mutations. Existing heap-owned Rc vectors therefore remain untouched on failure. Runtime bytes/generation/copy/replay corroborate; COM-release residency is not proved. |
+| P3 NATIVE_OBSERVED | E26 final native matrix; installed MTLBuffer.h newTextureWithDescriptor:offset:bytesPerRow: nullable return; E26 apple-view-correct.source | Actual sparse buffer-backed typed/atomic views returned nil while ordinary controls and raw sparse mapping worked. Nullable native return does not identify OOM or establish a universal unsupported-hardware rule. |
+| P4 SPEC_REQUIRED / implementation policy | E27 ms-create-srv.source, ms-create-uav.source; src/d3d12/d3d12_device.cpp:1170–1241 | Microsoft entry points create descriptors and permit explicit null resource with a suitable description. Internal E_FAIL/preserve-old-slot is backend failure containment, not a Microsoft-defined successful typed view or substitute null. Public ABI and diagnostics stay unchanged. |
+| P5 MULLION_SOURCE_OBSERVED | E26 mullion-descriptor.source:276–301,325–360; dxil source:3808–3816 | Mullion also publishes a texture ID for typed buffers, with its own layout/subrange logic. Its raw counter pointer ABI differs from MSC texture atomics; copying its counter binding does not resolve this native typed-view failure. No Mullion code was transplanted. |
+
+Primary Microsoft sources were fetched into E27 and hashed in primary-sources.json.
+Apple headers/docs and pinned Mullion source remain hash-addressed in E26. No
+Windows-native or live Mullion observation is claimed.
+
+### 4. Design Decisions
+
+Resolve one cached BufferView before acquiring descriptor_mutex_, as already done
+by the adjacent counter path; require both texture and nonzero ID. Keep that same
+view for publication rather than doing a second lookup. BufferAllocation owns
+cached views through unique_ptr (src/dxmt/dxmt_buffer.hpp:174), so vector movement
+does not move the pointed-to object. No concurrent-resource-rename guarantee is
+added. Existing native view-cache behavior, including failed cached views, is
+unchanged. Counter preflight now also returns E_FAIL instead of asserting OOM
+without an allocation-failure cause. This is an internal HRESULT classification.
+
+Explicit null writes bypass native view resolution and retain existing publication
+semantics. Raw/structured paths, ABI layouts, residency owners and submission
+policy are unchanged. No new per-draw lookup, lock, resource map or Metal use call
+is added. This does not establish zero overhead for descriptor creation.
+
+Rejected alternatives remain those in the Design Card: silent null substitution,
+raw reinterpretation, copied sparse backing and MSC pointer-counter substitution
+would change requested semantics without coherence/alias/atomic proof.
+
+### 5. Changed Files
+
+- src/d3d12/d3d12_descriptor_heap.cpp:511–635: typed SRV/UAV preflight and truthful
+  counter native-view failure; existing owner and error handling retained.
+- tests/dx12/dx12_descriptor_ownership.cpp:2377–2750,2871–2877: diagnostic CLI, real
+  reserved buffer failure, CPU/AIR/MSC snapshot and mutation-generation comparisons,
+  copy/replay GPU oracle, valid replacement/null publication and one-bit negative.
+- tests/dx12/reserved_buffer.hlsl:1–9: optional typed-UAV read variant using u1,
+  existing output/algorithm unchanged.
+- tests/dx12/meson.build:1360–1367: optional cs_6_0 typed-UAV fixture target.
+- This report and D3D12_RESOURCE_AUDIT_CHECKLIST.md: results, remaining blockers
+  and next Design Card. No new repository module/runner, vendored-header change
+  or D3D10/11 source change.
+
+### 6. Validation Results
+
+Final formatted default-target x64 release build: **PASS**,390 steps, including
+fresh Metal AIR/metallib generation (build-formatted.log/result.json). Scoped
+clang-format and git diff --check: PASS. delivery-artifact-audit.json checks the
+stage/build pairing for all PE DLLs and WineMetal Unix library, descriptor fixture
+and DXIL hashes. Actual Wine native loaded paths, available exported code bytes,
+Unix image UUID and MSC dylib identity were checked. MSC SHA256 remains
+cc487a757f431c83483346c06a3ae8558910ecc510ce59b1e4f905d5d6d72bd4.
+
+| Final case | Processes | Status / exact scope |
+| --- | ---: | --- |
+| Baseline regression detector | 1 | Expected exit1 before dispatch; demonstrates old successful nil publication. |
+| Candidate positive, seeds0x11223344/0x75312abc | 2 | LOCAL_PASS:16 publication cases across CPU/visible heaps × SRV/UAV × empty/seeded slot;24 GPU readbacks,24,576 data words and768 guards; old target, same-list replay and live ordinary replacement. Eight explicit null ABI publications pass. |
+| One-bit expected-value negative, seed0x19357acb | 1 | Expected exit1: exactly4 one-word mismatches,8 remaining readbacks clean, all guards clean.12 dispatches are not twelve positive passes. |
+| Descriptor ranges / formats / typed sidecar / counter contract | 4 | LOCAL_PASS using existing modes, including existing negative admission checks. |
+| Device/feature/InfoQueue contract | 1 | LOCAL_PASS existing full dx12_feature_support executable, including InfoQueue retention cases. |
+| Ordinary MSC Append/Consume | 1 | LOCAL_PASS offset4096/firstElement3, payload/counter/guard and copy/mutation/reuse/pending-release checks. This is not sparse counter support. |
+| Existing raw reserved buffer | 1 | LOCAL_PASS mapped read/write/remap/NULL/cross-queue,311,296 words. |
+| D3D11 shader backend boundary | 1 | LOCAL_PASS legacy SHEX/SHDR through AIRCONV; DXIL-only/no executable/hybrid correctly rejected. |
+| Valid typed descriptor publication cost, ABBA | 4 | LOCAL_PASS diagnostic loops; performance interpretation below. |
+
+All16 final processes enable API and GPU Shader Validation and contain none of the
+audited invalid-usage/assertion/shader-error/address-fault/aborted-command/recording
+failure diagnostics. Expected HRESULT/error logs from negative admission tests are
+not treated as unexpected GPU failures. Exact commands/environment are in each
+process.json and runs.json; run_delivery.py, run_cost.py and audit_delivery.py are
+external reproducible orchestration, not repository infrastructure additions.
+
+Warm descriptor-write diagnostic: two processes/build,25 rounds/process,10,000
+writes/round; discard first round per process,48 samples/build. Both validations
+enabled; same fixture/shader/runtime bytes, only D3D12 baseline/candidate differs.
+
+| Microseconds/write | Baseline median / P95 / range | Candidate median / P95 / range |
+| --- | --- | --- |
+| Valid typed SRV/UAV writes |0.215995 /0.234630 /0.211430–0.271720 |0.228130 /0.239040 /0.220350–0.244640 |
+
+Observed median +0.012135us/write (~5.6%). Distributions overlap and instrumentation
+is enabled: **INCONCLUSIVE performance impact**, no no-regression/zero-cost claim.
+This is descriptor publication timing, not draw/queue/GPU throughput.
+
+Retained non-final diagnostics: publication-initial.log exposed nonresident-texture
+reads after early application COM release and invalid null typed dispatch. The
+final fixture keeps application resources alive through completion and tests null
+publication without dispatching null. The first observation remains a separate
+ownership/residency question; this slice does not claim it fixed or prove the
+original release sequence invalid. Null typed GPU execution remains LOCAL_FAIL in
+that diagnostic, not PASS. Initial non-exported test-link calls were replaced by
+existing resource virtual entry points; no production exports were added. Initial
+new-target discovery and artifact-auditor path/symbol assumptions were corrected;
+original failed logs remain. These setup failures are not GPU passes.
+
+x86, other GPUs/OS, Windows native, live Mullion, complete D3D11 suite and actual
+Metal3 fallback: NOT_RUN. Existing raw sparse test on this Metal4-capable device
+does not establish fallback coverage.
+
+### 7. Capability Impact / Remaining Blockers
+
+Feature Level, Shader Model, Tiled Resources Tier and all public Options are
+unchanged. Native sparse common-issue default remains HELD. Metal3 shadow path and
+MSC runtime ABI are unchanged. The following remain OPEN:
+
+- BACKEND_NOT_IMPLEMENTED: coherent typed placement-sparse buffer representation;
+  failure containment does not turn a legal typed sparse request into success.
+- MSC_SEMANTIC_GAP: external sparse counter still cannot satisfy texture-atomic ABI.
+- SPEC_UNVERIFIED: native sparse buffer/texture-view compatibility or a supported
+  alternative that preserves alias/coherence/atomic behavior.
+- BACKEND_NOT_IMPLEMENTED / investigation required: null typed GPU binding red
+  diagnostic; post-COM-release residency contract remains UNVERIFIED.
+- TARGET_DEVICE_NOT_AVAILABLE: Windows native/live Mullion/other GPU comparisons,
+  never the available M1 Max.
+
+### 8. Regression Risks / Rollback
+
+New failures intentionally preserve the previous descriptor; public void callers
+receive only the existing diagnostic, not a new success/fallback contract. This
+can expose previously silent failures to applications. No general allocation
+failure injection, memory pressure, race/rename or all-format proof is supplied.
+CPU/AIR/MSC bytes and generation/copy/replay are runtime-tested; unchanged ownership
+and resource-index update order additionally rely on the audited early return.
+Keep resource references alive for final GPU oracle; do not claim complete lifetime
+coverage. Revert this focused commit independently if necessary.
+
+### 9. Git State / Delivery Audit
+
+Commit only the six intended source/test/documentation files; keep the original
+.gitignore edit outside the commit with SHA256
+764aac09922db4654ca6de63fd20cf014739d9292623eb979f448f38e609b759.
+No branch switch, reset, fetch, push or PR. E27 delivery-manifest.json records the
+resulting commit, exact worktree state and final evidence hashes after commit.
+
+### 10. Next Recommended Slice — Coherent Sparse Typed Representation Design Card
+
+- **Goal:** resolve the actual activation blocker: identify a supported native
+  representation for legal typed placement-sparse SRV/UAV, including aliasing with
+  raw access and the MSC counter requirement. Audit/design only before a new Gate.
+- **Baseline/evidence:** E26 native nil matrix and E27 fail-before-publication fix;
+  Apple M1 Max placement sparse available. Retain exact MSC and AIRCONV ABI needs.
+- **Scope/module boundary:** existing Buffer/View, WineMetal sparse bridge and
+  converter binding contracts; compare pinned Mullion implementation and current
+  SDK documentation. No new resource owner, scheduler or capability promotion.
+- **Proposed work:** enumerate supported representations, distinguish documented
+  contracts from experiments, and produce one minimal alias/coherency GPU probe
+  only if the chosen representation has an explicit native contract. If no such
+  contract exists, preserve this blocker with exact missing evidence, not a raw
+  substitution or shadow copy advertised as equivalent.
+- **Test plan:** full-word GPU typed read/write plus raw alias observation across
+  mapA/mapB/NULL/remap, offset/page edges and cross-queue ordering; ordinary and
+  one-bit negative controls. Counter atomic/read-after-write must be independently
+  proven for MSC. Keep null-binding/lifetime reds as explicit separate gaps.
+- **Risks/non-scope:** buffer-backed texture nil may be a native contract boundary;
+  shared heap pages alone do not prove coherent layouts. No default activation,
+  MSC ABI replacement or broad Metal3/D3D11 changes.
+- **Rollback/DoD:** read-only report and independently runnable external experiment
+  if justified; source/spec/Mullion evidence, one chosen architecture and explicit
+  remaining blockers. Implementation requires a concrete next Gate authorization.
