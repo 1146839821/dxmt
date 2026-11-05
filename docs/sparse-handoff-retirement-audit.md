@@ -2467,3 +2467,186 @@ Final SHA/status/source and artifact hashes are in E24/delivery-manifest.json;
 one docs(d3d12) commit, no push, only original .gitignore remains unstaged.
 Next recommended slice is the single common-owner implementation card above;
 this audit stops before implementation. Overall goal remains active.
+
+## Common Native Sparse Issue — Controlled Delivery and Activation Hold, 2026-11-05
+
+### Task Summary
+
+One N13 implementation/validation slice of the preceding Design Card.
+**Controlled buffer+texture common issue is LOCAL_PASS; default public activation
+is HELD, not complete.** The consumer gate found two pre-existing sparse-buffer
+view failures. Both resource types share the new owner only under the existing
+DXMT_TEST_SPARSE_SUBMISSION=1 seam, or after that queue accepts a controlled plan.
+Normal queues keep their previous eager public mapping route. No partial
+buffer-only production activation is delivered. Overall goal remains active.
+Gate0/1 complete; Gate2 controlled implementation complete; Gate3 queue/copy/raw
+consumer passes, typed/counter LOCAL_FAIL; Gate4 delivery complete with activation
+explicitly refused. This updates the approved card based on real validation.
+
+### Baseline Evidence
+
+feat/d3d12, baseline acd8c0d6f61b2869362be14087eb1fae0bb60348; cached origin
+before commit ahead19/behind0, not fetched. User .gitignore SHA256
+764aac09922db4654ca6de63fd20cf014739d9292623eb979f448f38e609b759 unchanged.
+Actual M1 Max Apple7=1/Apple8=0/Apple9=0/Metal4=1/placement=1, macOS27.2(26B123),
+Xcode27.2(27B52), Wine11.0, Metal32023.922; compiled MSC SDK API4.0.3, runtime
+product version unknown. No capability override. Earlier64KiB evidence stands.
+
+E25 = ../dxmt-test/n95-capability-gate/result-sparse-common-issue-20261105.
+Build = ../dxmt-test/n95-capability-gate/dxmt-metal272-identity-audit-20261104;
+isolated stage/prefix = stage-sparse-common-issue-20261105 /
+prefix-sparse-common-issue-20261105 under that base. Full x64 release/default
+build follows .github/build_dxmt.sh options with verified patched LLVM; no
+shared install/sudo/patch reapply/user prefix edits. x86 default build has
+D3D12 disabled, matching the script: PASS means D3D10/11/bridge compile only.
+
+SPEC_REQUIRED: retained E24/sources.json primary snapshots of Microsoft
+Update/CopyTileMappings, GPU Wait and RS1.1 volatility contracts, installed
+Metal4 queue/residency headers; see preceding Specification / Mullion Reference.
+Primary web endpoints returned no content on this continuation, so source
+snapshots are cited, not new web retrieval. SOURCE_AUDIT: Mullion remains pinned
+93de32b9145885ceb2e45be7d445e56d62499b3c; E24/mullion-queue.source:593–625,
+1280–1375 common Map owner. No transplant or Mullion runtime result.
+
+### Findings
+
+| Finding | Path / evidence type |
+| --- | --- |
+| E24 eager/deferred cycle disappears with common issue for controlled public buffer+texture update/reverse/copy; exact native data completes. | src/d3d12/d3d12_command_queue.cpp:484,800,999,1067; tests/dx12/dx12_reserved_buffer.cpp:276–599; LOCAL_PASS final-common-*. |
+| Mapping retirement alone is not later consumer ownership. Existing logical tile maps retain private heaps. Real raw compute stays paused after mapping completion; public heap is released; sentinel remains until ordered cross-queue unmap after consumer fence. | d3d12_buffer.cpp:133–150,196–222; d3d12_heap.cpp:61–64; reserved_buffer.cpp:3456–3594; SOURCE_AUDIT + LOCAL_PASS final-live-*. Descriptors alone are not claimed to retain arbitrary D3D resource lifetime. |
+| Sparse typed R32_UINT SRV has null native texture, GPU validation reports Null texture access, full-page data fails with both baseline and candidate. | d3d12_buffer.cpp:574–595 → src/dxmt/dxmt_buffer.cpp:118–157; red-typed-{baseline,candidate}.log; LOCAL_FAIL, actual dispatch. |
+| MSC sparse counter texture cannot be created; AddUnorderedAccessView returns E_OUTOFMEMORY and counter texture=0 at offsets0/4096/8192, both baseline and candidate. | d3d12_descriptor_heap.cpp:553–563 → dxmt_buffer.cpp:153–157; red-counter-*.log; SOURCE_AUDIT + LOCAL_FAIL, preflight only, no append/consume dispatch. Initialization/mapping ran on GPU. |
+| Default activation must stay held despite queue passes. | queue.cpp:84–86,879,908–910,999,1067; SOURCE_AUDIT, Design Card step5 and consumer matrix. |
+
+Allocation/view admissibility is separate from placement support. Exact native
+reason for null texture remains SPEC_UNVERIFIED. No hardware impossibility,
+shadow-coherence workaround or changed MSC ABI is inferred.
+
+### Design Decisions
+
+Submission holds a variant of the two existing unique_ptr plans. Same completion
+owner resolves source at ordered issue, prepares terminal first, issues native
+wait/prebarrier/map/seal/signal, waits actual feedback and retires inputs outside
+queue locks. CommitSubmissionLocked defers native barrier for these records.
+Removed devices cannot publish successful public fence progress. No third
+logical map, scheduler/thread/module or backend replacement.
+
+Test switch is read at queue creation; accepting the controlled method sets it
+under commit_mutex_. Later public buffer/texture mappings cannot reintroduce
+eager issue on that queue. Earlier eager work precedes the switch. No arbitrary
+mode switching or production opt-in claim. Failed plan locals release after
+commit_lock unlock. Classic shadow fallback and normal Begin/End stay intact.
+Rejected: buffer-only activation, another heap-history map, permanent pinning,
+descriptor observation changes, typed/raw substitution, counter ABI changes or
+broad backend replacement. Retain the failing gate instead.
+
+### Changed Files
+
+- src/d3d12/d3d12_command_queue.cpp: common variant/admission/issue/retirement,
+  testing-only both-type public routing, removed-device fence guard.
+- tests/dx12/dx12_reserved_buffer.cpp: permanent mixed update/reverse/copy,
+  lifetime/capacity/removal/OOM/one-bit controls; raw volatile rewrite/replay,
+  paused consumer heap sentinel and typed diagnostic.
+- tests/dx12/reserved_buffer.hlsl and meson.build: optional real typed target;
+  ordinary raw semantics retained and regenerated.
+- This report and D3D12_RESOURCE_AUDIT_CHECKLIST.md: gates and next card.
+No vendored, bridge/vtable, shader ABI or D3D11 source changes.
+
+### Validation Results
+
+E25/final-validation-summary.json selects **65 processes**, including eight
+explicit failing semantic diagnostics and two one-bit negative controls, not65
+conformance passes. All have Metal API+GPU validation enabled; normal and negative
+cases have no validation errors. Two typed red cases retain actual GPU errors.
+
+| Check | Result / evidence |
+| --- | --- |
+| Full x64 default build, extra typed/raw/root-SRV fixtures, scoped clang-format, diff --check | PASS; build-gated/final/final2/extra-fixtures/raw-fixtures logs. Existing non-final sentinel destructor warning retained. |
+| Full x86 default build with D3D12 disabled | PASS build-x86-final.log; x86 D3D12/runtime NOT_RUN. |
+| Mixed update/reverse/copy/lifetime/capacity, two seeds | LOCAL_PASS:10 complete114688-word readbacks +32 guards each, exact callbacks/owner drain, healthy device, final-common-*. |
+| Capacity32/blocked33/removal/one-bit | LOCAL_PASS controls:2 removal cases issue0/destroy8;2 expected exit1 identify exactly1 wrong word, guards clean. |
+| Generation/future source/ABA/self overlap/NULL/empty/reject/partial prefix/delay/private-event/error/drain | LOCAL_PASS:22 final-regress-* cases including early/late failures and prefix retention. |
+| Mixed completed buffer prefix then texture PrepareNative OOM | LOCAL_PASS error contract,2 final-prepare-* seeds: texture issue0, OOM removes/wakes fence,8 owners drained. |
+| Raw rewrite after Close/before Execute, replay, paused shader, public heap release, ordered cross-queue unmap | LOCAL_PASS final-live-*2 seeds, each11phases/311296 checked words; heap survives mapping retirement and dies after unmap. |
+| Texture overlap cross-queue/multiheap, packed copy/self/unmap | LOCAL_PASS controlled switch: gated-texture/gated-packed; normal standard shader/view-range pass final-texture-*. |
+| Default synchronous prepare/allocation/submitted texture faults, update+copy | LOCAL_PASS default-fault-*6cases. Earlier default-activation experiment separately passed18 asynchronous texture prepare/snapshot cases; not final default semantics. |
+| Default raw reserved shader / MSC root reserved SRV+UAV / D3D11 boundary / actual Present | LOCAL_PASS final-raw-default/mscsrv/mscuav/d3d11/present. Present exit0 and clean validation; no mixed-sparse Present/clock oracle. |
+| Typed SRV and sparse counter0/4096/8192, baseline+candidate | LOCAL_FAIL semantic-red-summary.json:2 GPU null-texture errors,6 pre-dispatch counter ABI failures. Expected exit1 is capture, never feature PASS. |
+| Actual Metal3 runtime, Windows/Mullion runtime, real GPU-error quiescence, complete typed/counter/residency, mixed-sparse clock/Present | NOT_RUN / SPEC_UNVERIFIED, not hardware-denied on M1 Max. |
+
+Actual staged PE paths/export bytes and loaded Unix path/UUID are checked in
+relevant probes; final build/stage pairing and complete hashes in delivery-
+manifest.json. Bridge UUID E683A9A6-6E7A-367D-8B6D-3ACB5D4BA01F, SHA256
+9c5779c859aac272db71f89d4bdd8f827b7699ec76f1455ce5b976d9c66a61c9;
+MSC SHA256cc487a757f431c83483346c06a3ae8558910ecc510ce59b1e4f905d5d6d72bd4.
+Only isolated staged D3D12/DXGI/D3D11 have builtin marker bytes64:80 blanked.
+
+Retained test/harness issues: allocator arena initially kept final sentinels,
+unused texture was wrongly expected alive, missing compiler/fixture staging,
+external helper missing forward declaration, Present collector lacked argv[1]
+check. Corrected runs are separate evidence, failed attempts not counted PASS.
+Attempted DXMT_D3D12_NATIVE_SPARSE=0 has no implementation and did not disable
+native callbacks: mislabeled regress-metal3-buffer is excluded as Metal3 evidence.
+
+### Costs / Regression Risks
+
+Compiler measured Submission280→288bytes (+8/slot,+256 for32 slots). One existing
+SparseIssue transient allocation; experimental public admission adds it and native
+completion/terminal allocations compared with eager path. Ordinary draw/dispatch
+has no new allocation or heap scan. Native allocation count is not fully measured;
+no zero-cost claim. Single completion owner serializes retirement and retains
+bounded backpressure; scalability not accepted.
+
+Final gated-cost ABBA: same bridge/fixtures/MSC, validation enabled,2processes/
+build/mode,9samples×64calls/process, sample0 separately retained,16warm samples:
+
+| Host enqueue us/call | Baseline median/P95/range | Controlled candidate median/P95/range |
+| --- | --- | --- |
+| update | 1198.525/1246.08/1163.04–1246.08 | 1204.240/1296.46/1139.16–1296.46 |
+| copy | 1224.995/1316.18/1158.12–1316.18 | 1220.395/1288.80/1142.24–1288.80 |
+| self-copy | 1221.250/1291.21/1115.26–1291.21 | 1250.965/1320.05/1196.78–1320.05 |
+
+INCONCLUSIVE overlapping distributions; no speedup/no-regression claim. Earlier
+experimental default activation medians +7.3/+11.7/+10.6% are retained under
+separate identity/cost-summary.json. Positive common CPU-observed release-to-
+readback median17.291ms/P9524.632ms/range11.832–24.632ms(10samples), including
+host scheduling/validation/drain/comparison, not GPU timestamp or overlap proof.
+No valid legacy completion-latency comparison for the cyclic mixed case.
+
+### Capability Impact / Remaining Blockers
+
+Public FL/SM/Tier unchanged. Metal3 fallback, D3D10/11 and MSC ABI remain intact;
+Metal3 runtime not verified here. Default common-owner activation remains
+BACKEND_NOT_IMPLEMENTED (gated pending consumers). Sparse typed native view and
+sparse counter view creation are demonstrated BACKEND_NOT_IMPLEMENTED. Compatible
+MSC texture-atomic counter representation remains MSC_SEMANTIC_GAP /
+SPEC_UNVERIFIED; exact native sparse view admissibility and real error quiescence
+remain SPEC_UNVERIFIED. Windows/other-GPU differential TARGET_DEVICE_NOT_AVAILABLE.
+M1 Max Metal4/placement exists; no BLOCKED_BY_HARDWARE classification.
+
+### Git State / Rollback
+
+One focused feat(d3d12) commit, no push. E25/delivery-manifest.json records final
+SHA/state/source/build/stage hashes and evidence. Original .gitignore is excluded.
+External assets/runners uncommitted. Revert this commit to remove controlled
+common path/tests; default production route needs no rollback.
+
+### Next Recommended Slice — Sparse Buffer Texture-View Contract Design Card
+
+Goal: determine native64KiB sparse R32_UINT read/atomic texture-view admissibility
+and propose one compatible minimum slice. Baseline: this commit, E25 baseline/
+candidate red pairs and actual supported M1 Max. Evidence: buffer.cpp:594,
+descriptor_heap.cpp:559–563, dxmt_buffer.cpp:118–157 and exact validation logs.
+Scope: read-only SDK/source/Mullion comparison plus external native view/readback
+probe. No production changes, activation, shadow coherence workaround, counter
+ABI replacement, capability promotion or new scheduler. Module boundary:
+native allocation/view contract versus BufferView failure propagation and MSC
+texture atomic ABI. Steps: compare ordinary/placement sparse buffers, actual
+usage/alignment/page properties, R32_UINT read-only/atomic creation at offsets
+0/4096/8192, map/NULL/remap and complete readback; inspect actual Mullion lowering
+rather than assume its raw counter implementation ports to MSC. Test ordinary
+positive view, sparse data/guards, one-bit negative, allocation-vs-ABI failure.
+Risks: nil view may be API restriction/usage/alignment/representation; no hardware
+conclusion without primary evidence. Rollback: external probe only. DoD: identify
+exact limitation from source+primary contract+real device, one reviewable next
+implementation card, remaining UNVERIFIED cases, then stop for next Gate.

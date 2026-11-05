@@ -34,6 +34,7 @@
 #include <limits>
 #include <string>
 #include <unordered_map>
+#include <variant>
 
 namespace dxmt {
 
@@ -80,6 +81,9 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
   WMT::Reference<WMT::Fence> fence_;
   WMT::Reference<WMT::Buffer> timestamp_dummy_buffer_;
   WMT::Reference<WMT::SparseMappingQueue> sparse_mapping_queue_;
+  // Public migration stays opt-in until sparse typed/counter consumers pass.
+  // Reuse the existing controlled submission seam; never spoof capability.
+  bool common_sparse_issue_for_testing_ = false;
   WMT::Reference<WMT::SharedEvent> sparse_event_;
   uint64_t sparse_event_value_ = 0;
 
@@ -89,6 +93,7 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
     uint64_t main_signal = 0;
     UINT flags = 0;
     UINT limit = UINT_MAX;
+    bool hold_signal = false;
     HANDLE issued = nullptr;
     HANDLE resume = nullptr;
     ~SparseIssue() {
@@ -103,7 +108,8 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
     uint64_t serial = 0;
     WMT::Reference<WMT::CommandBuffer> command_buffer;
     WMT::Reference<WMT::SparseBarrierCompletion> sparse_barrier;
-    std::unique_ptr<D3D12SparseBufferMappingPlan> sparse_plan;
+    std::variant<std::unique_ptr<D3D12SparseBufferMappingPlan>, std::unique_ptr<D3D12SparseTextureMappingPlan>>
+        sparse_plan;
     std::unique_ptr<SparseIssue> sparse_issue;
     std::shared_ptr<D3D12CommandListSubmission> recording_lifetime;
     struct CommandList {
@@ -482,15 +488,18 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
     // The pre-handoff and every preceding FIFO record have completed. Resolve
     // live source mappings here, never at CPU admission ahead of a queue Wait.
     if (FAILED(device_->GetDeviceRemovedReason())) {
-      submission.sparse_plan.reset();
+      submission.sparse_plan = std::unique_ptr<D3D12SparseBufferMappingPlan>{};
       submission.sparse_barrier = {};
       return;
     }
-    const HRESULT hr = submission.sparse_plan->PrepareNative(sparse_mapping_queue_);
-    if (FAILED(hr) || !submission.sparse_plan->PrepareTerminal(issue.flags)) {
+    const HRESULT hr =
+        std::visit([&](auto &plan) { return plan->PrepareNative(sparse_mapping_queue_); }, submission.sparse_plan);
+    if (FAILED(hr) ||
+        !std::visit([&](auto &plan) { return plan->PrepareTerminal(issue.flags); }, submission.sparse_plan)) {
       device_->MarkDeviceRemoved(FAILED(hr) ? hr : E_OUTOFMEMORY);
       ERR("SPARSE_PLAN_FIFO prepare_failed serial=", submission.serial, " hr=", hr);
-      submission.sparse_plan.reset(); // No native operations have been issued.
+      submission.sparse_plan =
+          std::unique_ptr<D3D12SparseBufferMappingPlan>{}; // No native operations have been issued.
       submission.sparse_barrier = {};
       return;
     }
@@ -499,9 +508,10 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
       sparse_mapping_queue_.waitForEvent(issue.gate, 1);
     const bool pre_submitted = submission.sparse_barrier.submit();
     size_t issued_count = 0;
-    const auto count = submission.sparse_plan->OperationCount();
+    const auto count = std::visit([](auto &plan) { return plan->OperationCount(); }, submission.sparse_plan);
     if (pre_submitted && SUCCEEDED(device_->GetDeviceRemovedReason())) {
-      while (issued_count < count && issued_count < issue.limit && submission.sparse_plan->IssueNext())
+      while (issued_count < count && issued_count < issue.limit &&
+             std::visit([](auto &plan) { return plan->IssueNext(); }, submission.sparse_plan))
         ++issued_count;
     }
     bool resumed = true;
@@ -514,15 +524,20 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
     const auto outcome = accepted       ? WMTSparseMappingHostAccepted
                          : issued_count ? WMTSparseMappingHostFailedAfterIssue
                                         : WMTSparseMappingHostRejected;
-    const bool sealed = submission.sparse_plan->Finish(outcome);
+    const bool sealed = std::visit([&](auto &plan) { return plan->Finish(outcome); }, submission.sparse_plan);
     if (!accepted || !sealed)
       device_->MarkDeviceRemoved(DXGI_ERROR_DEVICE_REMOVED);
     // Admission already reserved this even value for following classic work.
     // Removal signals MAX instead; never enqueue a lower value after removal.
-    if (SUCCEEDED(device_->GetDeviceRemovedReason()))
-      sparse_mapping_queue_.signalEvent(sparse_event_, issue.main_signal + 1);
-    ERR("SPARSE_PLAN_FIFO issue serial=", submission.serial, " issued=", issued_count, " sealed=", sealed,
-        " host=", outcome);
+    if (SUCCEEDED(device_->GetDeviceRemovedReason())) {
+      if (issue.hold_signal)
+        ERR("DXMT_TEST_SPARSE_HOLD_MAPPING_SIGNAL value=", issue.main_signal + 1);
+      else
+        sparse_mapping_queue_.signalEvent(sparse_event_, issue.main_signal + 1);
+    }
+    if (sparse_completion_trace_)
+      ERR("SPARSE_PLAN_FIFO issue serial=", submission.serial, " issued=", issued_count, " sealed=", sealed,
+          " host=", outcome);
   }
 
   void
@@ -584,26 +599,29 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
         }
       }
 
-      if (submission.sparse_plan) {
+      if (std::visit([](auto &plan) { return bool(plan); }, submission.sparse_plan)) {
         WMTSparseMappingResult result = {};
         // One sealed owner, outside all queue locks. Cancellation is not proof.
-        const bool complete = submission.sparse_plan->Wait(UINT64_MAX, result);
+        const bool complete =
+            std::visit([&](auto &plan) { return plan->Wait(UINT64_MAX, result); }, submission.sparse_plan);
         if (!complete || (result.state != WMTSparseMappingGPUComplete && result.state != WMTSparseMappingNotIssued)) {
           device_->MarkDeviceRemoved(DXGI_ERROR_DEVICE_REMOVED);
           // Final native release still drains; never free a possibly-issued prefix.
-        } else if (!submission.sparse_plan->Retire(result)) {
+        } else if (!std::visit([&](auto &plan) { return plan->Retire(result); }, submission.sparse_plan)) {
           device_->MarkDeviceRemoved(DXGI_ERROR_DEVICE_REMOVED);
         }
-        ERR("SPARSE_PLAN_FIFO complete serial=", submission.serial, " state=", result.state,
-            " host=", result.host_outcome, " event=", result.event_value);
-        submission.sparse_plan.reset();
+        if (sparse_completion_trace_)
+          ERR("SPARSE_PLAN_FIFO complete serial=", submission.serial, " state=", result.state,
+              " host=", result.host_outcome, " event=", result.event_value);
+        submission.sparse_plan = std::unique_ptr<D3D12SparseBufferMappingPlan>{};
       }
 
       // Publish before retiring the next submission on this queue. A wait on
       // another queue latches this value even if a later signal rewinds it.
       if (submission.diagnostic_signal_complete)
         PauseLegacySignalForTesting();
-      if (submission.signal_fence && submission.command_buffer.status() == WMTCommandBufferStatusCompleted)
+      if (submission.signal_fence && SUCCEEDED(device_->GetDeviceRemovedReason()) &&
+          submission.command_buffer.status() == WMTCommandBufferStatusCompleted)
         submission.signal_fence->Signal(submission.signal_value);
       if (submission.diagnostic_signal_complete)
         submission.diagnostic_signal_complete->store(true, std::memory_order_release);
@@ -663,9 +681,11 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
 
     submission.serial = next_submission_serial_++;
     submission.command_buffer.commit();
-    // Publish only after submit transitions the credential out of Prepared.
-    // Native feedback may be immediate but never calls back into PE queue state.
-    const bool sparse_submitted = !submission.sparse_barrier || submission.sparse_barrier.submit();
+    // Ordinary handoffs submit before publication. Mapping records defer every
+    // native operation to the FIFO completion owner, after earlier records settle.
+    // Native feedback never calls back into PE queue state.
+    const bool sparse_submitted =
+        submission.sparse_issue || !submission.sparse_barrier || submission.sparse_barrier.submit();
     PublishSubmissionLocked(submission, pending_splits);
     submission_lock.unlock();
     submission_state_->ready.notify_one();
@@ -774,6 +794,47 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
     sparse_event_value_ = mapping_signal;
   }
 
+  // Caller owns commit serialization. Both public resource types and the
+  // controlled seam use this same bounded admission and native issue owner.
+  template <typename Plan>
+  HRESULT
+  EnqueueSparsePlanLocked(std::unique_ptr<Plan> &plan, std::unique_ptr<SparseIssue> issue) {
+    auto pool = WMT::MakeAutoreleasePool();
+    auto barrier = sparse_mapping_queue_.prepareBarrierBeforeResourceState();
+    if (!barrier)
+      return E_OUTOFMEMORY;
+    WMT::CommandBuffer cmdbuf;
+    if (FAILED(NewCommandBuffer(cmdbuf)))
+      return DXGI_ERROR_DEVICE_REMOVED;
+    if (sparse_event_value_)
+      cmdbuf.encodeWaitForEvent(sparse_event_, sparse_event_value_);
+    const uint64_t main_signal = sparse_event_value_ + 1;
+    cmdbuf.encodeSignalEvent(sparse_event_, main_signal);
+    {
+      std::lock_guard lock(submission_state_->mutex);
+      if (stopping_ || FAILED(device_->GetDeviceRemovedReason()))
+        return DXGI_ERROR_DEVICE_REMOVED;
+      // All admissions hold commit_mutex_; completion can only reduce count.
+      assert(submission_count_ < kCommandQueueSize);
+    }
+    Submission submission;
+    submission.command_buffer = cmdbuf;
+    submission.sparse_barrier = std::move(barrier);
+    submission.sparse_plan = std::move(plan);
+    issue->main_signal = main_signal;
+    issue->hold_signal = hold_sparse_signal_for_testing_;
+    hold_sparse_signal_for_testing_ = false;
+    submission.sparse_issue = std::move(issue);
+    // Reserve the completion value before later command buffers are committed.
+    // The completion owner issues the native mapping without taking commit_mutex_.
+    sparse_event_value_ = main_signal + 1;
+    if (!CommitSubmissionLocked(submission)) {
+      plan = std::move(std::get<std::unique_ptr<Plan>>(submission.sparse_plan));
+      return DXGI_ERROR_DEVICE_REMOVED;
+    }
+    return S_OK;
+  }
+
 public:
   MTLD3D12CommandQueueImpl(MTLD3D12Device *pDevice) :
       MTLD3D12Pageable<MTLD3D12CommandQueue, IMTLSwapChainFactory>(pDevice),
@@ -815,43 +876,8 @@ public:
          ) ||
          !DuplicateHandle(GetCurrentProcess(), resume, GetCurrentProcess(), &issue->resume, SYNCHRONIZE, FALSE, 0)))
       return E_INVALIDARG;
-    auto barrier = sparse_mapping_queue_.prepareBarrierBeforeResourceState();
-    if (!barrier)
-      return E_OUTOFMEMORY;
-    WMT::CommandBuffer cmdbuf;
-    if (FAILED(NewCommandBuffer(cmdbuf)))
-      return DXGI_ERROR_DEVICE_REMOVED;
-    if (sparse_event_value_)
-      cmdbuf.encodeWaitForEvent(sparse_event_, sparse_event_value_);
-    const uint64_t main_signal = sparse_event_value_ + 1;
-    cmdbuf.encodeSignalEvent(sparse_event_, main_signal);
-    {
-      std::lock_guard lock(submission_state_->mutex);
-      if (stopping_ || FAILED(device_->GetDeviceRemovedReason()))
-        return DXGI_ERROR_DEVICE_REMOVED;
-      // All admissions hold commit_mutex_; completion can only reduce count.
-      assert(submission_count_ < kCommandQueueSize);
-    }
-    Submission submission;
-    submission.command_buffer = cmdbuf;
-    submission.sparse_barrier = std::move(barrier);
-    submission.sparse_plan = std::move(plan);
-    issue->main_signal = main_signal;
-    submission.sparse_issue = std::move(issue);
-    // Reserve the completion value before later command buffers are committed.
-    // The completion owner issues the native mapping without taking commit_mutex_.
-    sparse_event_value_ = main_signal + 1;
-    cmdbuf.commit();
-    {
-      std::lock_guard lock(submission_state_->mutex);
-      // Queue acceptance transfers intent; native success is asynchronous.
-      submission.serial = next_submission_serial_++;
-      ERR("SPARSE_PLAN_FIFO publish serial=", submission.serial, " count=", submission_count_ + 1, " deferred=1");
-      PublishSubmissionLocked(submission);
-    }
-    commit_lock.unlock();
-    submission_state_->ready.notify_one();
-    return S_OK;
+    common_sparse_issue_for_testing_ = true;
+    return EnqueueSparsePlanLocked(plan, std::move(issue));
   }
 
   HRESULT
@@ -879,6 +905,9 @@ public:
         ) &&
         synthetic_error[0] == '1';
 
+    char controlled[2] = {};
+    common_sparse_issue_for_testing_ =
+        GetEnvironmentVariableA("DXMT_TEST_SPARSE_SUBMISSION", controlled, sizeof(controlled)) && controlled[0] == '1';
     auto metal_device = device_->GetMTLDevice();
     queue_ = metal_device.newCommandQueue(kCommandQueueSize);
     if (!queue_)
@@ -957,20 +986,54 @@ public:
       return;
     }
 
+    auto target = static_cast<MTLD3D12Resource *>(resource);
+    std::unique_ptr<D3D12SparseBufferMappingPlan> buffer_plan;
+    std::unique_ptr<D3D12SparseTextureMappingPlan> texture_plan;
     std::unique_lock<dxmt::mutex> commit_lock(commit_mutex_);
-    uint64_t main_queue_signal = 0;
-    if (!BeginSparseMapping(main_queue_signal))
-      return;
-    auto hr = static_cast<MTLD3D12Resource *>(resource)->UpdateTileMappings(
-        region_count, region_start_coordinates, region_sizes, heap, range_count, range_flags, heap_range_offsets,
-        range_tile_counts, flags, sparse_mapping_queue_
-    );
-    // BeginSparseMapping has already queued the main-queue handoff and the
-    // mapping queue wait. Always close that event pair, including when the
-    // resource-side validation rejects the update, so a failed API call cannot
-    // leave an unsignaled sparse-queue wait behind.
-    if (sparse_mapping_queue_)
-      EndSparseMapping(main_queue_signal);
+    HRESULT hr;
+    if (!sparse_mapping_queue_) {
+      hr = target->UpdateTileMappings(
+          region_count, region_start_coordinates, region_sizes, heap, range_count, range_flags, heap_range_offsets,
+          range_tile_counts, flags, {}
+      );
+    } else if (!common_sparse_issue_for_testing_) {
+      uint64_t main_queue_signal = 0;
+      if (!BeginSparseMapping(main_queue_signal))
+        return;
+      hr = static_cast<MTLD3D12Resource *>(resource)->UpdateTileMappings(
+          region_count, region_start_coordinates, region_sizes, heap, range_count, range_flags, heap_range_offsets,
+          range_tile_counts, flags, sparse_mapping_queue_
+      );
+      // BeginSparseMapping has already queued the main-queue handoff and the
+      // mapping queue wait. Always close that event pair, including when the
+      // resource-side validation rejects the update, so a failed API call cannot
+      // leave an unsignaled sparse-queue wait behind.
+      if (sparse_mapping_queue_)
+        EndSparseMapping(main_queue_signal);
+    } else {
+      try {
+        auto issue = std::make_unique<SparseIssue>();
+        if (target->IsReservedBuffer()) {
+          hr = target->PrepareBufferTileUpdate(
+              region_count, region_start_coordinates, region_sizes, heap, range_count, range_flags, heap_range_offsets,
+              range_tile_counts, flags, buffer_plan
+          );
+          if (SUCCEEDED(hr))
+            hr = WaitForSubmissionSpaceLocked() ? EnqueueSparsePlanLocked(buffer_plan, std::move(issue))
+                                                : DXGI_ERROR_DEVICE_REMOVED;
+        } else {
+          hr = target->PrepareTextureTileUpdate(
+              region_count, region_start_coordinates, region_sizes, heap, range_count, range_flags, heap_range_offsets,
+              range_tile_counts, flags, texture_plan
+          );
+          if (SUCCEEDED(hr))
+            hr = WaitForSubmissionSpaceLocked() ? EnqueueSparsePlanLocked(texture_plan, std::move(issue))
+                                                : DXGI_ERROR_DEVICE_REMOVED;
+        }
+      } catch (const std::bad_alloc &) {
+        hr = E_OUTOFMEMORY;
+      }
+    }
     if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == E_OUTOFMEMORY)
       device_->MarkDeviceRemoved(hr);
     if (FAILED(hr))
@@ -991,18 +1054,51 @@ public:
       return;
     }
 
+    auto target = static_cast<MTLD3D12Resource *>(dst_resource);
+    auto source = static_cast<MTLD3D12Resource *>(src_resource);
+    std::unique_ptr<D3D12SparseBufferMappingPlan> buffer_plan;
+    std::unique_ptr<D3D12SparseTextureMappingPlan> texture_plan;
     std::unique_lock<dxmt::mutex> commit_lock(commit_mutex_);
-    uint64_t main_queue_signal = 0;
-    if (!BeginSparseMapping(main_queue_signal))
-      return;
-    auto hr = static_cast<MTLD3D12Resource *>(dst_resource)->CopyTileMappingsFrom(
-        static_cast<MTLD3D12Resource *>(src_resource), dst_region_start_coordinate, src_region_start_coordinate,
-        region_size, flags, sparse_mapping_queue_
-    );
-    // See UpdateTileMappings above: a rejected copy must still release the
-    // sparse queue handoff established by BeginSparseMapping.
-    if (sparse_mapping_queue_)
-      EndSparseMapping(main_queue_signal);
+    HRESULT hr;
+    if (!sparse_mapping_queue_) {
+      hr = target->CopyTileMappingsFrom(
+          source, dst_region_start_coordinate, src_region_start_coordinate, region_size, flags, {}
+      );
+    } else if (!common_sparse_issue_for_testing_) {
+      uint64_t main_queue_signal = 0;
+      if (!BeginSparseMapping(main_queue_signal))
+        return;
+      hr = static_cast<MTLD3D12Resource *>(dst_resource)
+               ->CopyTileMappingsFrom(
+                   static_cast<MTLD3D12Resource *>(src_resource), dst_region_start_coordinate,
+                   src_region_start_coordinate, region_size, flags, sparse_mapping_queue_
+               );
+      // See UpdateTileMappings above: a rejected copy must still release the
+      // sparse queue handoff established by BeginSparseMapping.
+      if (sparse_mapping_queue_)
+        EndSparseMapping(main_queue_signal);
+    } else {
+      try {
+        auto issue = std::make_unique<SparseIssue>();
+        if (target->IsReservedBuffer()) {
+          hr = target->PrepareBufferTileCopy(
+              source, dst_region_start_coordinate, src_region_start_coordinate, region_size, flags, buffer_plan
+          );
+          if (SUCCEEDED(hr))
+            hr = WaitForSubmissionSpaceLocked() ? EnqueueSparsePlanLocked(buffer_plan, std::move(issue))
+                                                : DXGI_ERROR_DEVICE_REMOVED;
+        } else {
+          hr = target->PrepareTextureTileCopy(
+              source, dst_region_start_coordinate, src_region_start_coordinate, region_size, flags, texture_plan
+          );
+          if (SUCCEEDED(hr))
+            hr = WaitForSubmissionSpaceLocked() ? EnqueueSparsePlanLocked(texture_plan, std::move(issue))
+                                                : DXGI_ERROR_DEVICE_REMOVED;
+        }
+      } catch (const std::bad_alloc &) {
+        hr = E_OUTOFMEMORY;
+      }
+    }
     if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == E_OUTOFMEMORY)
       device_->MarkDeviceRemoved(hr);
     if (FAILED(hr))

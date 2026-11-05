@@ -273,6 +273,332 @@ int CheckSparseMappingPayload(const char *mode, uint32_t seed) {
   MTLCommandBuffer_waitUntilCompleted(init);
   require(MTLCommandBuffer_status(init) == WMTCommandBufferStatusCompleted,
           "init failed");
+  if (!std::strncmp(mode, "plan-common-", 12)) {
+    SetEnvironmentVariableA("DXMT_TEST_SPARSE_SUBMISSION", "1");
+    const bool reverse = !std::strcmp(mode, "plan-common-reverse"),
+               copy = !std::strcmp(mode, "plan-common-copy"),
+               prepare_failure =
+                   !std::strcmp(mode, "plan-common-prepare-failure"),
+               lifetime = !std::strcmp(mode, "plan-common-lifetime"),
+               negative = !std::strcmp(mode, "plan-common-wrong-word"),
+               capacity = !std::strcmp(mode, "plan-common-capacity"),
+               cancellation =
+                   !std::strcmp(mode, "plan-common-capacity-removal");
+    Owned<ID3D12Resource> textures[2], linear_upload, readback;
+    Owned<ID3D12Heap> texture_heap;
+    D3D12_RESOURCE_DESC td = {};
+    td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    td.Width = td.Height = 128;
+    td.DepthOrArraySize = td.MipLevels = td.SampleDesc.Count = 1;
+    td.Format = DXGI_FORMAT_R32_UINT;
+    td.Layout = D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE;
+    for (auto &texture : textures)
+      require(SUCCEEDED(public_device->CreateReservedResource(
+                  &td, D3D12_RESOURCE_STATE_COMMON, nullptr,
+                  IID_PPV_ARGS(&texture.ptr))),
+              "common texture");
+    D3D12_HEAP_DESC th = {};
+    th.SizeInBytes = TileBytes;
+    th.Properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+    th.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_NON_RT_DS_TEXTURES;
+    require(SUCCEEDED(public_device->CreateHeap(
+                &th, IID_PPV_ARGS(&texture_heap.ptr))),
+            "common texture heap");
+    std::atomic<unsigned> texture_deaths{0};
+    for (ID3D12Object *obj : {static_cast<ID3D12Object *>(textures[0].ptr),
+                              static_cast<ID3D12Object *>(textures[1].ptr),
+                              static_cast<ID3D12Object *>(texture_heap.ptr)}) {
+      auto marker = new SparsePayloadSentinel(texture_deaths, 5);
+      require(SUCCEEDED(obj->SetPrivateDataInterface(sentinel_guid, marker)),
+              "common texture sentinel");
+      marker->Release();
+    }
+    const UINT64 read_bytes = 2 * bytes + TileBytes;
+    auto linear = desc;
+    linear.Width = read_bytes + guards * 4;
+    for (auto type : {D3D12_HEAP_TYPE_UPLOAD, D3D12_HEAP_TYPE_READBACK}) {
+      D3D12_HEAP_PROPERTIES properties = {};
+      properties.Type = type;
+      auto &resource =
+          type == D3D12_HEAP_TYPE_UPLOAD ? linear_upload : readback;
+      require(
+          SUCCEEDED(public_device->CreateCommittedResource(
+              &properties, D3D12_HEAP_FLAG_NONE, &linear,
+              type == D3D12_HEAP_TYPE_UPLOAD ? D3D12_RESOURCE_STATE_GENERIC_READ
+                                             : D3D12_RESOURCE_STATE_COPY_DEST,
+              nullptr, IID_PPV_ARGS(&resource.ptr))),
+          "common linear buffer");
+    }
+    uint32_t *data = nullptr;
+    require(SUCCEEDED(linear_upload->Map(0, nullptr,
+                                         reinterpret_cast<void **>(&data))),
+            "common upload map");
+    for (uint64_t w = 0; w < linear.Width / 4; ++w)
+      data[w] = w < page_words ? pattern(0, w) ^ 0x78320abcu : 0xa5a55a5au;
+    linear_upload->Unmap(0, nullptr);
+    ID3D12CommandQueue *pub = nullptr;
+    D3D12_COMMAND_QUEUE_DESC qd = {};
+    require(
+        SUCCEEDED(public_device->CreateCommandQueue(&qd, IID_PPV_ARGS(&pub))),
+        "common queue");
+    auto q = static_cast<MTLD3D12CommandQueue *>(pub);
+    Owned<ID3D12Fence> unblock, done;
+    for (auto f : {&unblock, &done})
+      require(SUCCEEDED(public_device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                                   IID_PPV_ARGS(&f->ptr))),
+              "common fence");
+    require(SUCCEEDED(q->Wait(unblock.ptr, 1)), "common predecessor");
+    if (capacity || cancellation) {
+      for (unsigned i = 0; i < 31; ++i)
+        require(SUCCEEDED(q->Signal(done.ptr, i + 1)), "common capacity fill");
+      std::promise<void> entered;
+      auto started = entered.get_future();
+      auto pending = std::async(std::launch::async, [&] {
+        entered.set_value();
+        UINT one = 1, zero = 0;
+        D3D12_TILE_REGION_SIZE tile = {};
+        tile.NumTiles = 1;
+        q->UpdateTileMappings(textures[0].ptr, 1, &start, &tile,
+                              texture_heap.ptr, 1, nullptr, &zero, &one,
+                              D3D12_TILE_MAPPING_FLAG_NONE);
+      });
+      require(started.wait_for(std::chrono::seconds(10)) ==
+                      std::future_status::ready &&
+                  pending.wait_for(std::chrono::milliseconds(40)) ==
+                      std::future_status::timeout &&
+                  done->GetCompletedValue() == 0 && !texture_deaths,
+              "common 33rd admitted early");
+      std::printf("COMMON_CAPACITY pending=32 next=blocked texture_alive=3\n");
+      if (cancellation)
+        device->MarkDeviceRemoved(DXGI_ERROR_DEVICE_REMOVED);
+      else
+        require(SUCCEEDED(unblock->Signal(1)), "common capacity release");
+      require(pending.wait_for(std::chrono::seconds(10)) ==
+                  std::future_status::ready,
+              "common capacity wake");
+      pending.get();
+      if (cancellation) {
+        pub->Release();
+        for (auto &texture : textures) {
+          texture.ptr->Release();
+          texture.ptr = nullptr;
+        }
+        texture_heap.ptr->Release();
+        texture_heap.ptr = nullptr;
+        for (auto r : public_resources)
+          r->Release();
+        for (auto h : public_heaps)
+          h->Release();
+        require(deaths() == 5 && texture_deaths == 3 &&
+                    done->GetCompletedValue() == UINT64_MAX,
+                "common cancelled ownership");
+        public_device->Release();
+        std::printf("COMMON_CAPACITY_REMOVAL issued=0 destroyed=8 drained=1\n");
+        return 0;
+      }
+    }
+    if (capacity)
+      require(SUCCEEDED(q->Wait(unblock.ptr, 2)), "common second predecessor");
+    std::unique_ptr<D3D12SparseBufferMappingPlan> plan;
+    require(SUCCEEDED(resources[0]->PrepareBufferTileUpdate(
+                1, &start, &region, public_heaps[0], 1, nullptr, &offset,
+                &count, D3D12_TILE_MAPPING_FLAG_NONE, plan)),
+            "common controlled plan");
+    SetEnvironmentVariableA("DXMT_TEST_SPARSE_SUBMISSION", "1");
+    HANDLE issued = CreateEventW(nullptr, TRUE, FALSE, nullptr),
+           resume = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    require(issued && resume &&
+                SUCCEEDED(q->SubmitSparsePlanForTesting(plan, {}, 1, UINT_MAX,
+                                                        issued, resume)) &&
+                !plan,
+            "common controlled admission");
+    auto buffer_update = [&] {
+      q->UpdateTileMappings(public_resources[1], 1, &start, &region,
+                            public_heaps[2], 1, nullptr, &offset, &count,
+                            D3D12_TILE_MAPPING_FLAG_NONE);
+    };
+    UINT one = 1;
+    D3D12_TILE_REGION_SIZE tile = {};
+    tile.NumTiles = 1;
+    auto texture_update = [&] {
+      auto caller_start = start;
+      auto caller_tile = tile;
+      UINT caller_offset = offset, caller_count = one;
+      q->UpdateTileMappings(textures[0].ptr, 1, &caller_start, &caller_tile,
+                            texture_heap.ptr, 1, nullptr, &caller_offset,
+                            &caller_count, D3D12_TILE_MAPPING_FLAG_NONE);
+      caller_start.X = caller_tile.NumTiles = caller_offset = caller_count =
+          UINT_MAX;
+    };
+    if (reverse) {
+      texture_update();
+      buffer_update();
+    } else {
+      buffer_update();
+      texture_update();
+    }
+    if (prepare_failure) {
+      SetEnvironmentVariableA("DXMT_TEST_SPARSE_TEXTURE_UPDATE_FAILURE",
+                              "prepare");
+      HANDLE removed = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+      require(removed && SUCCEEDED(done->SetEventOnCompletion(99, removed)),
+              "common failure event");
+      require(SUCCEEDED(unblock->Signal(1)) &&
+                  WaitForSingleObject(issued, 10000) == WAIT_OBJECT_0,
+              "common failure predecessor");
+      SetEvent(resume);
+      require(WaitForSingleObject(removed, 10000) == WAIT_OBJECT_0 &&
+                  device->GetDeviceRemovedReason() == E_OUTOFMEMORY &&
+                  done->GetCompletedValue() == UINT64_MAX,
+              "common deferred texture failure");
+      pub->Release();
+      for (auto r : public_resources)
+        r->Release();
+      for (auto h : public_heaps)
+        h->Release();
+      for (auto &texture : textures) {
+        texture.ptr->Release();
+        texture.ptr = nullptr;
+      }
+      texture_heap.ptr->Release();
+      texture_heap.ptr = nullptr;
+      require(deaths() == 5 && texture_deaths == 3,
+              "common failed owner drain");
+      for (HANDLE h : {issued, resume, removed})
+        CloseHandle(h);
+      public_device->Release();
+      std::printf("COMMON_PREPARE_FAILURE buffer_prefix=2 texture_issued=0 "
+                  "removed=OOM destroyed=8 drained=1\n");
+      return 0;
+    }
+    if (copy) {
+      auto two = region;
+      two.NumTiles = 2;
+      q->CopyTileMappings(public_resources[1], &start, public_resources[0],
+                          &start, &two, D3D12_TILE_MAPPING_FLAG_NONE);
+      q->CopyTileMappings(textures[1].ptr, &start, textures[0].ptr, &start,
+                          &tile, D3D12_TILE_MAPPING_FLAG_NONE);
+    }
+    Owned<ID3D12CommandAllocator> allocator;
+    Owned<ID3D12GraphicsCommandList> list;
+    require(
+        SUCCEEDED(public_device->CreateCommandAllocator(
+            D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator.ptr))) &&
+            SUCCEEDED(public_device->CreateCommandList(
+                0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.ptr, nullptr,
+                IID_PPV_ARGS(&list.ptr))),
+        "common consumer list");
+    list->CopyBufferRegion(readback.ptr, 0, linear_upload.ptr, 0, linear.Width);
+    D3D12_RESOURCE_BARRIER alias = {};
+    alias.Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING;
+    list->ResourceBarrier(1, &alias);
+    list->CopyTiles(
+        textures[0].ptr, &start, &tile, linear_upload.ptr, 0,
+        D3D12_TILE_COPY_FLAG_LINEAR_BUFFER_TO_SWIZZLED_TILED_RESOURCE);
+    list->ResourceBarrier(1, &alias);
+    for (unsigned i = 0; i < 2; ++i)
+      list->CopyTiles(
+          public_resources[i], &start, &region, readback.ptr, i * bytes,
+          D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER);
+    list->CopyTiles(
+        textures[copy ? 1 : 0].ptr, &start, &tile, readback.ptr, 2 * bytes,
+        D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER);
+    require(SUCCEEDED(list->Close()), "common consumer close");
+    ID3D12CommandList *lists[] = {list.ptr};
+    q->ExecuteCommandLists(1, lists);
+    // Ordered unmaps may drop logical heap refs only after the actual consumer.
+    D3D12_TILE_RANGE_FLAGS null_range = D3D12_TILE_RANGE_FLAG_NULL;
+    q->UpdateTileMappings(public_resources[0], 1, &start, &region, nullptr, 1,
+                          &null_range, nullptr, &count,
+                          D3D12_TILE_MAPPING_FLAG_NONE);
+    q->UpdateTileMappings(textures[0].ptr, 1, &start, &tile, nullptr, 1,
+                          &null_range, nullptr, &one,
+                          D3D12_TILE_MAPPING_FLAG_NONE);
+    require(SUCCEEDED(q->Signal(done.ptr, 99)), "common final signal");
+    if (lifetime) {
+      list.ptr->Release();
+      list.ptr = nullptr;
+      for (auto r : public_resources)
+        r->Release();
+      for (auto h : public_heaps)
+        h->Release();
+      for (auto &texture : textures) {
+        texture.ptr->Release();
+        texture.ptr = nullptr;
+      }
+      texture_heap.ptr->Release();
+      texture_heap.ptr = nullptr;
+      require(!deaths() && texture_deaths == 1,
+              "common released pending owners (unused texture may retire)");
+    }
+    require(done->GetCompletedValue() < 99 &&
+                WaitForSingleObject(issued, 0) == WAIT_TIMEOUT,
+            "common progressed before predecessor");
+    const auto release_time = std::chrono::steady_clock::now();
+    require(SUCCEEDED(unblock->Signal(capacity ? 2 : 1)) &&
+                WaitForSingleObject(issued, 10000) == WAIT_OBJECT_0,
+            "common actual native issue");
+    require(done->GetCompletedValue() < 99 && !deaths() &&
+                texture_deaths == unsigned(lifetime),
+            "common consumer escaped issue gate");
+    SetEvent(resume);
+    HANDLE finished = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    require(finished && SUCCEEDED(done->SetEventOnCompletion(99, finished)) &&
+                WaitForSingleObject(finished, 10000) == WAIT_OBJECT_0 &&
+                done->GetCompletedValue() == 99 &&
+                SUCCEEDED(device->GetDeviceRemovedReason()),
+            "common progress without removal");
+    require(
+        SUCCEEDED(readback->Map(0, nullptr, reinterpret_cast<void **>(&data))),
+        "common readback map");
+    unsigned bad = 0, guard = 0;
+    for (uint64_t w = 0; w < read_bytes / 4; ++w) {
+      uint32_t want;
+      if (w < words)
+        want = pattern(0, w);
+      else if (w < 2 * words) {
+        const auto local = w - words;
+        want = pattern(copy && local < 2 * page_words ? 0 : 1, local);
+      } else
+        want = pattern(0, w - 2 * words) ^ 0x78320abcu;
+      if (negative && w + 1 == read_bytes / 4)
+        want ^= 1;
+      bad += data[w] != want;
+    }
+    for (uint64_t w = read_bytes / 4; w < linear.Width / 4; ++w)
+      guard += data[w] != 0xa5a55a5au;
+    readback->Unmap(0, nullptr);
+    require(bad == unsigned(negative) && !guard, "common full GPU oracle");
+    std::printf("COMMON_LATENCY release_to_readback_us=%.3f cpu_observed=1\n",
+                std::chrono::duration<double, std::micro>(
+                    std::chrono::steady_clock::now() - release_time)
+                    .count());
+    if (!lifetime) {
+      for (auto r : public_resources)
+        r->Release();
+      for (auto h : public_heaps)
+        h->Release();
+      for (auto &texture : textures) {
+        texture.ptr->Release();
+        texture.ptr = nullptr;
+      }
+      texture_heap.ptr->Release();
+      texture_heap.ptr = nullptr;
+      list.ptr->Release();
+      list.ptr = nullptr;
+    }
+    allocator.ptr->Release();
+    allocator.ptr = nullptr;
+    pub->Release();
+    require(deaths() == 5 && texture_deaths == 3, "common final owner drain");
+    for (HANDLE h : {issued, resume, finished})
+      CloseHandle(h);
+    std::printf("COMMON_RESULT mode=%s seed=%u words=%llu bad=%u guard=%u "
+                "removed=0 destroyed=8 drained=1\n",
+                mode, seed, (unsigned long long)(read_bytes / 4), bad, guard);
+    public_device->Release();
+    return negative ? 1 : 0;
+  }
   if (!std::strncmp(mode, "plan-cross-", 11)) {
     const bool forward = !std::strcmp(mode, "plan-cross-forward"),
                future = !std::strcmp(mode, "plan-cross-future"),
@@ -2833,6 +3159,9 @@ int Run(const char *read_path, const char *write_path, UINT seed,
   const bool owned = owned_mode != nullptr;
   const bool same_queue = owned && (std::strstr(owned_mode, "same") != nullptr);
   const bool copy_plan = owned && (std::strstr(owned_mode, "copy") != nullptr);
+  const bool live = owned && std::strstr(owned_mode, "live");
+  const bool typed = owned && std::strstr(owned_mode, "typed");
+  std::atomic<unsigned> consumer_heap_deaths{0};
   const bool gated = owned && std::strstr(owned_mode, "ungated") == nullptr;
   const UINT terminal_flags = !owned || std::strstr(owned_mode, "event") ? 0
                               : std::strstr(owned_mode, "delay")         ? 3
@@ -2897,6 +3226,10 @@ int Run(const char *read_path, const char *write_path, UINT seed,
   srv.Format = DXGI_FORMAT_R32_TYPELESS; srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
   srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
   srv.Buffer.NumElements = TileBytes / 4; srv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+  if (typed) {
+    srv.Format = DXGI_FORMAT_R32_UINT;
+    srv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
+  }
   device->CreateShaderResourceView(sparse.ptr, &srv, cpu);
   D3D12_UNORDERED_ACCESS_VIEW_DESC uav = {};
   uav.Format = DXGI_FORMAT_R32_TYPELESS; uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
@@ -3036,6 +3369,11 @@ int Run(const char *read_path, const char *write_path, UINT seed,
       if (!write)
         Transition(phase_list.ptr, output.ptr, D3D12_RESOURCE_STATE_COMMON,
                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+      // Root signature 1.0 tables are volatile: Execute must see the
+      // replacement.
+      if (live && serial == 1)
+        device->CreateShaderResourceView(
+            nullptr, &srv, descriptors->GetCPUDescriptorHandleForHeapStart());
       phase_list->Dispatch(write ? 1 : TileBytes / (4 * 64), 1, 1);
       if (!write) {
         Transition(phase_list.ptr, output.ptr,
@@ -3086,6 +3424,16 @@ int Run(const char *read_path, const char *write_path, UINT seed,
       }
       map_and_order(native_gate);
     }
+    if (live && serial == 1)
+      device->CreateShaderResourceView(
+          sparse.ptr, &srv, descriptors->GetCPUDescriptorHandleForHeapStart());
+    Owned<ID3D12Fence> consumer_gate;
+    if (live && serial == 11) {
+      Check("consumer lifetime gate",
+            device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                IID_PPV_ARGS(&consumer_gate.ptr)));
+      Check("pause actual consumer", consumer->Wait(consumer_gate.ptr, 1));
+    }
     ID3D12CommandList *lists[] = {phase_list.ptr};
     consumer->ExecuteCommandLists(1, lists);
     Check("compute signal", consumer->Signal(compute_done.ptr, serial));
@@ -3115,6 +3463,33 @@ int Run(const char *read_path, const char *write_path, UINT seed,
       std::printf("OWNED_CONSUMER_SUBMITTED phase=%llu same=%u gate=0 "
                   "replay=%u cpu_map_wait=0\n",
                   (unsigned long long)serial, same_queue, remap_replay);
+    if (live && serial == 11) {
+      // Retire the mapping while the shader is still paused. Logical mappings
+      // must keep the backing registered after its public reference is dropped.
+      Wait(mapping_done.ptr, serial + 1);
+      const GUID marker_id = {0x181cab6f,
+                              0x5823,
+                              0x498e,
+                              {0x83, 0x10, 0x29, 0x31, 0x77, 0x24, 0x55, 0x12}};
+      auto marker = new SparsePayloadSentinel(consumer_heap_deaths, 9);
+      Check("consumer heap marker",
+            heap->SetPrivateDataInterface(marker_id, marker));
+      marker->Release();
+      heap.ptr->Release();
+      heap.ptr = nullptr;
+      if (consumer_heap_deaths || compute_done->GetCompletedValue() >= serial)
+        throw std::runtime_error("backing retired before paused consumer");
+      Check("ordered consumer remap", direct->Wait(compute_done.ptr, serial));
+      D3D12_TILE_REGION_SIZE all = {};
+      all.NumTiles = 2;
+      D3D12_TILE_RANGE_FLAGS null_range = D3D12_TILE_RANGE_FLAG_NULL;
+      direct->UpdateTileMappings(sparse.ptr, 1, &coord, &all, nullptr, 1,
+                                 &null_range, nullptr, nullptr,
+                                 D3D12_TILE_MAPPING_FLAG_NONE);
+      Check("consumer release", consumer_gate->Signal(1));
+      std::printf("CONSUMER_LIFETIME map_retired=1 shader_paused=1 "
+                  "public_heap_released=1 private_alive=1 ordered_remap=1\n");
+    }
     Wait(compute_done.ptr, serial++);
     if (!write || tile >= 0) {
       Check("readback map",
@@ -3203,6 +3578,17 @@ int Run(const char *read_path, const char *write_path, UINT seed,
   phase("mapped UAV write and CopyTiles readback", 1, true, Written);
   phase("SRV sees mapped UAV write", 1, false, Written + 1);
   phase("mapped write leaves other backing intact", 0, false, (A ^ seed) + 1);
+  if (live) {
+    Check("lifetime remap drain", direct->Signal(mapping_done.ptr, 100));
+    Wait(mapping_done.ptr, 100);
+    direct.ptr->Release();
+    direct.ptr = nullptr;
+    if (consumer_heap_deaths != 1)
+      throw std::runtime_error(
+          "consumer backing did not retire after ordered unmap");
+    std::printf("CONSUMER_LIFETIME destroyed=1 drained=1 volatile_rewrite=1 "
+                "replay=1\n");
+  }
   if (owned)
     std::printf("OWNED_CONSUMER_RESULT seed=%u mode=%s phases=11 words=%llu "
                 "cpu_map_wait=0\n",
@@ -3214,7 +3600,8 @@ int Run(const char *read_path, const char *write_path, UINT seed,
 }
 } // namespace
 int main(int argc, char **argv) {
-  if (argc == 3 && (!std::strncmp(argv[1], "plan-cross-", 11) ||
+  if (argc == 3 && (!std::strncmp(argv[1], "plan-common-", 12) ||
+                    !std::strncmp(argv[1], "plan-cross-", 11) ||
                     !std::strncmp(argv[1], "plan-queue", 10) ||
                     !std::strcmp(argv[1], "plan-cost") ||
                     !std::strcmp(argv[1], "plan-normal") ||
@@ -3246,7 +3633,9 @@ int main(int argc, char **argv) {
     std::cerr
         << "usage: dx12_reserved_buffer <probe_read.cso> "
            "<probe_write.cso> [seed rounds "
-           "[owned-same|owned-cross|owned-copy-cross|owned-delay-cross|"
+           "[owned-same|owned-cross|owned-live-cross|owned-live-typed-cross|"
+           "owned-copy-cross|owned-"
+           "delay-cross|"
            "owned-event-same|owned-ungated-same|owned-ungated-cross|"
            "owned-wrong-oracle|wrong-oracle|queue-init-failure|barrier-update|"
            "barrier-copy|"
@@ -3264,6 +3653,8 @@ int main(int argc, char **argv) {
   try {
     if (argc == 6 && (!std::strcmp(argv[5], "owned-same") ||
                       !std::strcmp(argv[5], "owned-cross") ||
+                      !std::strcmp(argv[5], "owned-live-cross") ||
+                      !std::strcmp(argv[5], "owned-live-typed-cross") ||
                       !std::strcmp(argv[5], "owned-ungated-same") ||
                       !std::strcmp(argv[5], "owned-ungated-cross") ||
                       !std::strcmp(argv[5], "owned-copy-cross") ||
