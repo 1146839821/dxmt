@@ -1213,9 +1213,10 @@ public:
         record_count > kMaxLibraryRecords)
       return E_INVALIDARG;
 
-    if (adapter_id != device->GetMTLDevice().registryID() || feature_level != device->GetFeatureLevel() ||
-        metal_version != WMTMetalVersionMax || metal_target_version != kPipelineMetalTargetVersion ||
-        binding_layout_version != kPipelineBindingLayoutVersion)
+    if (adapter_id != device->GetMTLDevice().registryID())
+      return D3D12_ERROR_ADAPTER_NOT_FOUND;
+    if (feature_level != device->GetFeatureLevel() || metal_version != WMTMetalVersionMax ||
+        metal_target_version != kPipelineMetalTargetVersion || binding_layout_version != kPipelineBindingLayoutVersion)
       return E_INVALIDARG;
     if (converter_version != kPipelineConverterAPIVersion)
       return D3D12_ERROR_DRIVER_VERSION_MISMATCH;

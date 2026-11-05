@@ -4620,3 +4620,134 @@ mismatch as D3D12_ERROR_ADAPTER_NOT_FOUND in the same parser. Verify identical
 results for validation-only and creation, null failure output, malformed-data
 separation and valid-library GPU recovery; keep runtime fingerprint/capability
 and sidecar persistence gates unchanged.
+
+## E39 — Pipeline Library adapter mismatch classification (2026-11-05)
+
+**Task summary / Gate 0.** G2/N07, INV-10 and INV-15. One error-classification
+slice after E38, baseline feat/d3d12 d92a9b421952abd1858af4952a2769802eb2dec6.
+Only original .gitignore dirty; ahead33/behind0 against cached origin. Read-only
+ls-remote confirms origin 85a44a0c6555398c278fc1dc48a78f4cfea7a295 and Mullion
+93de32b9145885ceb2e45be7d445e56d62499b3c; no fetch/push. AGENTS, architecture,
+master/N07 and existing source reviewed; CodeGraph used before code reads.
+
+**Baseline environment.** Actual probes: Apple M1 Max, system_profiler reports
+Metal4, macOS27.2 26B123, Xcode27.2 27B52, Metal32023.922, private Wine11.0.
+Existing x64 release build matches build_dxmt.sh feature options, plus tests;
+uses separately patched LLVM15.0.7 (version verified from its installed Config
+header; this library-only installation has no llvm-config executable).
+Compiled MSC SDK API4.0.3; loaded runtime product version unknown. Build options,
+reference probes and hardware record are in baseline.json and gpu.json.
+
+**Findings / evidence.**
+
+| Type | Evidence | Finding |
+| --- | --- | --- |
+| SPEC_REQUIRED | ms-create-library.source:830-831, URL/hash in sources.json | Recognized data from different hardware returns D3D12_ERROR_ADAPTER_NOT_FOUND; corrupt/unrecognized data E_INVALIDARG; null output still validates. |
+| SOURCE_AUDIT | baseline d3d12_pipeline_persistence.cpp:1216-1219 | Adapter registry ID mismatch was grouped with feature/Metal/ABI mismatches as E_INVALIDARG. |
+| MULLION_SOURCE_OBSERVED | pinned mullion-d3d12_pipeline_compute.cpp.source:247-260 | Its existing initializer separately checks version and Metal adapter registry ID, returning ADAPTER_NOT_FOUND on ID mismatch. No source/format/backend code ported. |
+| LOCAL_FAIL reproduced | baseline-result.json; baseline/stdout.log | New paired probe against unchanged DLL fails on adapter-low: actual0x80070057, expected0x887e0001. Three earlier GPU readbacks and actual runtime/validation identity checks pass. |
+
+**Gate 1 Design Card.**
+
+    GOAL: Classify recognized pipeline-library adapter mismatches correctly.
+    BASELINE: d92a9b42; N07/INV-10/15; existing .gitignore preserved.
+    EVIDENCE: Microsoft return contract, Mullion source and reproduced API failure.
+    SCOPE: Existing Deserialize and paired validation/creation probe.
+    NON-SCOPE: Cache format/fingerprint redesign, capabilities or compiler/runtime.
+    BOUNDARY: Existing parser is the sole compatibility/error owner.
+    PLAN A/B: Local separate identity check vs helper classifier; choose local check.
+    PROOF: Two identity-bit mismatches plus corrupt/truncated header separation.
+    GPU: Repeated compute/graphics recovery, GS persistence and adjacent SM5.
+    PERF: Same comparisons; no allocation/lock/scan or recording/submission work.
+    RISKS/ROLLBACK: Multiple-error precedence unverified; focused revert/no migration.
+    DONE: Build, exact HRESULT/output, real GPU recovery, audit and commit/no push.
+
+**Gate 2 / decisions and changed files.**
+
+- src/d3d12/d3d12_pipeline_persistence.cpp:1216-1222 splits the adapter identity
+  check inside the shared Deserialize. It returns ADAPTER_NOT_FOUND before any
+  entry publication; other environment/SDK checks retain their results. Factory
+  handling of null output, S_FALSE, failure-output clearing and ownership is
+  unchanged. Header structural validation still runs before identity comparison.
+- tests/dx12/dx12_pipeline_persistence.cpp:128-145 extends the existing paired
+  check helper with adapter-low (library1), adapter-high (base interface),
+  adapter-truncated and adapter-magic cases. Modifications to low/high identity
+  bytes guarantee a different 64-bit ID. Both output modes are checked, and real
+  creation failures must clear the sentinel. Existing populated-library recovery
+  then loads and submits compute/graphics PSOs with actual GPU readback.
+- This appended report is the third file. No new production/test file, parser,
+  runner, ABI, state owner or serialized field; existing entries and format remain.
+
+Rejected introducing an error-classification subsystem: the owner already has
+both the serialized identity and actual Metal device. The test mutates serialized
+identity bytes as an API negative case, not any device capability. It does not
+claim an observed second GPU or Windows result.
+
+**Gate 3 validation — LOCAL_PASS.** Evidence root:
+/Users/zhangbo/Documents/Vibe-Codeding/dxmt-test/n95-capability-gate/result-persistence-adapter-20261105.
+Exact command arrays and launch environment are retained in build-final.json,
+run-final.py and runs-all.json. Existing executable CLI is compute+VS+PS, with
+optional GS; adjacent Airconv executable uses list mode. All use a cloned private
+stage/prefix and per-process shader cache, leaving shared Wine untouched.
+
+| Check | Result | Evidence |
+| --- | --- | --- |
+| x64 release default-target meson compile | PASS exit0 | build-final.json/log; tests enabled |
+| Baseline new test with unchanged production DLL | EXPECTED_FAIL reproduced | baseline-result.json; adapter-low returns E_INVALIDARG instead of ADAPTER_NOT_FOUND |
+| Two ordinary persistence runs and one GS persistence run | PASS exit0 each | normal-1, normal-2, geometry stdout.log |
+| Fourteen paired validation-only / creation cases per primary run | PASS: 42 pairs / 84 API calls | Exact HRESULT dictionary; all failed creation outputs null |
+| Low/high adapter mismatches | PASS: six pairs / 12 API calls (subset above) | Both base/library1 interfaces return0x887e0001 |
+| Truncated/unrecognized headers, including changed adapter bytes | PASS: E_INVALIDARG | adapter-truncated/adapter-magic plus existing malformed cases |
+| Old/alternate SDK fingerprints | PASS: six pairs / 12 API calls | Both modes retain DRIVER_VERSION_MISMATCH; recovery follows |
+| Primary GPU readback | PASS: nine compute + six ordinary/GS graphics readbacks | Exact PERSISTENCE_READBACK markers and recovery markers |
+| Adjacent Airconv SM5 | PASS: one exact0xffffffff GPU readback | airconv-sm5/stdout.log |
+| Actual runtime identities / pairing | PASS | PE paths/export bytes, Unix path, source/stage hashes and build-byte comparisons |
+| Metal API and GPU Validation | PASS enabled and clean in four final processes | Raw logs and independent audit |
+| Scoped clang-format / diff whitespace | PASS | Only changed scopes; git diff --check |
+
+Final total: four GPU processes, 16 successful readbacks. Baseline failure and
+its three preceding GPU readbacks are separate, excluded from final totals.
+The older SM5 executable lacks export markers; loaded PE paths and paired Unix
+bridge are verified. audit-final.py independently checks exact raw-log results,
+72 predicates, source identity and final build/stage pairing. It also confirms
+the retained baseline DLL hash matches the E38 delivery manifest. The current
+MSC dylib SHA256 is
+cc487a757f431c83483346c06a3ae8558910ecc510ce59b1e4f905d5d6d72bd4.
+Library-only LLVM missing llvm-config was an evidence-collection issue, resolved
+using the installed version header; no build or GPU failure followed. The first
+private-prefix launch completed within its existing timeout and reproduced the
+API failure; it was not restarted merely because polling had not completed.
+
+**Capability / performance.** Public FL, SM, Options, Tier and sidecar gates are
+unchanged. No D3D11/DXGI/Metal3 resource, MSC runtime, bridge ABI, binding,
+residency or fence change. Same identity comparison and O(blob+entries) parser,
+no added allocations, locks, hashing or GPU/CPU synchronization. No per-draw,
+per-dispatch or per-submit work added. Process wall times include Wine startup,
+shader compilation and validation; no A/B performance or speedup claim.
+
+**Risks / remaining gaps.** Actual cross-device libraries, Windows native, live
+Mullion, x86, other GPUs and D3D11 rendering are NOT_RUN. Arbitrary combinations
+of multiple independent blob defects do not establish native error precedence;
+only malformed header recognition before identity and isolated supported cases
+are asserted. Runtime-content/OS cache compatibility identity and sidecar
+persistent payload remain incomplete. M1 Max/Metal4 is not a hardware blocker
+for this API correction. Rollback is the focused commit; no cache migration.
+
+**Gate 4 / delivery audit.** Reviewed the exact production and test diff, parser
+failure ordering, null output/publication and unchanged owner boundaries. Three
+intended files only: persistence source, existing probe, appended report section.
+Historical report bytes are unchanged. Validated source hashes are rechecked
+before staging; no rebuild solely to alter the embedded Git stamp.
+
+Original .gitignore SHA256 remains
+764aac09922db4654ca6de63fd20cf014739d9292623eb979f448f38e609b759,
+excluded from staging. Use fix(d3d12) commit style; no push. External
+delivery-manifest.json records final SHA, post-commit state, evidence and
+artifact hashes. Delivery requires empty staged/untracked sets and only the
+original .gitignore edit unstaged. Overall development goal remains incomplete.
+
+**Next recommended slice.** N07: audit and design the minimum closure for loaded
+MSC image/OS identity in existing persistence keys and library compatibility.
+Reuse existing runtime identity and cache owners; first prove missing invalidation
+with a retained-cache test, then implement one authorized compatibility slice.
+Do not infer the runtime product version from SDK headers or add a second cache.

@@ -125,6 +125,25 @@ bool CheckLibraryValidation(ID3D12Device1 *device,
              E_INVALIDARG))
     return false;
   auto malformed = serialized;
+  // DXMTLIB1 v3: the 64-bit adapter identity follows magic and format version.
+  constexpr size_t adapter_offset = 8 + 4;
+  malformed[adapter_offset] ^= 1;
+  if (!check("adapter-low", malformed.data(), malformed.size(), iid,
+             D3D12_ERROR_ADAPTER_NOT_FOUND))
+    return false;
+  malformed = serialized;
+  malformed[adapter_offset + 7] ^= 0x80;
+  if (!check("adapter-high", malformed.data(), malformed.size(),
+             __uuidof(ID3D12PipelineLibrary), D3D12_ERROR_ADAPTER_NOT_FOUND))
+    return false;
+  if (!check("adapter-truncated", malformed.data(), adapter_offset + 7, iid,
+             E_INVALIDARG))
+    return false;
+  malformed[0] ^= 0xff;
+  if (!check("adapter-magic", malformed.data(), malformed.size(), iid,
+             E_INVALIDARG))
+    return false;
+  malformed = serialized;
   malformed[0] ^= 0xff;
   if (!check("magic", malformed.data(), malformed.size(), iid, E_INVALIDARG))
     return false;
