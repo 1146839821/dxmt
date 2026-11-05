@@ -112,6 +112,13 @@ and does not justify another unchanged local MS_LOAD or Submit timing matrix.
   and MSC sparse counter texture creation. No partial buffer-only activation or
   capability promotion. See [controlled delivery / activation hold](sparse-handoff-retirement-audit.md#common-native-sparse-issue--controlled-delivery-and-activation-hold-2026-11-05)
   for exact evidence, costs, limits and next native-view Design Card.
+  Native Metal follow-up confirms real M1 Max 64KiB sparse raw map/NULL/remap
+  readback, but R32Uint read/atomic buffer texture views return nil before/after
+  mapping while ordinary controls pass. This is not an Apple7 placement-sparse
+  hardware blocker; universal native compatibility remains SPEC_UNVERIFIED.
+  Typed descriptor publication guards are the next contained slice; MSC counter
+  ABI and coherent typed-sparse representation remain separate OPEN blockers.
+  See [native buffer-view contract audit](sparse-handoff-retirement-audit.md#sparse-buffer-texture-view-contract--n15n09-audit-2026-11-05).
 
 - [x] N09 typed-buffer format admission rejects unsupported native SRV/UAV
   formats before publication. See the 2026-10-27 slice below; BGRA SRV usage,
