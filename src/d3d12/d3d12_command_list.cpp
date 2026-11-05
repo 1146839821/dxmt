@@ -1019,6 +1019,9 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
     PendingDescriptorUseKey key;
     uint64_t covered_generation = 0;
     bool covered = false;
+    // Validation and residency share ownership, but neither intent implies the other.
+    bool reject_msc_typed_null = false;
+    bool resource_use = false;
   };
   std::vector<PendingDescriptorUse> pending_descriptor_uses_;
   std::vector<size_t> pending_submission_order_;
@@ -3502,8 +3505,12 @@ public:
       dirty_state_.clr(DirtyState::GraphicsRootArguments);
     }
 
-    if (encode_msc_resource_uses)
+    if (encode_msc_resource_uses) {
+      CaptureMSCTypedNullValidation(
+          rootsig_graphics_.ptr(), rootarg_graphics_staging_, descriptor_heap_.ptr(), false, msc_render_stages
+      );
       EncodeIndirectResourceUses(rootsig_graphics_.ptr(), rootarg_graphics_staging_, descriptor_heap_.ptr());
+    }
 
     if (airconv_render_residency_ && !use_msc && !SkipResourceBinding) {
       const auto resource_stages = use_airconv_geometry
@@ -4188,10 +4195,6 @@ public:
       }
       EncodeMSCBufferResourceUse(buffer.handle, compute, render_stages);
       EncodeMSCBufferResourceUse(allocator_->gpu_heap_buffer_.handle, compute, render_stages);
-    } else if (descriptor_heap && HasTypedNullDescriptorsInUse(pRootSig, pStaging, descriptor_heap)) {
-      recording_error_ = E_NOTIMPL;
-      FailRecording(__func__, "MSC reachable typed NULL descriptor requires the typed-buffer sidecar gate");
-      return 0;
     }
     if (use_lod_sidecar) {
       EncodeMSCBufferResourceUse(allocator_->gpu_heap_buffer_.handle, compute, render_stages);
@@ -4272,56 +4275,34 @@ public:
     return Offset;
   }
 
-  bool
-  HasTypedNullDescriptorsInUse(MTLD3D12RootSignature *root, const uint64_t staging[64], MTLD3D12DescriptorHeap *heap) {
-    if (!root || !staging || !heap)
-      return false;
-    const auto heap_desc = heap->GetDesc();
-    if (root->IsResourceHeapDirectlyIndexed())
-      return heap->HasTypedNullDescriptors();
-
-    D3D12_GPU_DESCRIPTOR_HANDLE heap_start{};
-    heap->GetGPUDescriptorHandleForHeapStart(&heap_start);
-    const uint64_t stride = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-    if (!stride)
-      return false;
-    auto batch = heap->ReadDescriptorBatch();
-    for (UINT table_index = 0; table_index < root->RootDescriptorTableCount; ++table_index) {
-      const auto &table = root->RootDescriptorTables[table_index];
-      if (table.source_qword >= root->UploadQwords || table.source_qword >= 64 ||
-          table.first_range > root->RootDescriptorRangeCount ||
-          table.range_count > root->RootDescriptorRangeCount - table.first_range)
-        continue;
-      const uint64_t handle = staging[table.source_qword];
-      if (!handle || handle < heap_start.ptr)
-        continue;
-      const uint64_t byte_offset = handle - heap_start.ptr;
-      if (byte_offset % stride)
-        continue;
-      const uint64_t base_index = byte_offset / stride;
-      if (base_index >= heap_desc.NumDescriptors)
-        continue;
-      for (UINT range_index = 0; range_index < table.range_count; ++range_index) {
-        const auto &range = root->RootDescriptorRanges[table.first_range + range_index];
-        if (range.type != D3D12_DESCRIPTOR_RANGE_TYPE_SRV && range.type != D3D12_DESCRIPTOR_RANGE_TYPE_UAV)
-          continue;
-        const uint64_t range_offset = range.offset == UINT64_MAX ? heap_desc.NumDescriptors - base_index : range.offset;
-        if (base_index > UINT64_MAX - range_offset)
-          continue;
-        const uint64_t first = base_index + range_offset;
-        if (first >= heap_desc.NumDescriptors)
-          continue;
-        const uint64_t count = range.num_descriptors == UINT_MAX
-                                   ? heap_desc.NumDescriptors - first
-                                   : std::min<uint64_t>(range.num_descriptors, heap_desc.NumDescriptors - first);
-        for (uint64_t i = 0; i < count; ++i) {
-          const auto &descriptor = batch.get(static_cast<UINT>(first + i));
-          if (descriptor.type == ShaderVisibleDescriptorType::Null && descriptor.NullView.kind != NullViewKind::None)
-            return true;
-        }
-      }
+  void
+  CaptureMSCTypedNullValidation(
+      MTLD3D12RootSignature *root, const uint64_t staging[64], MTLD3D12DescriptorHeap *heap, bool compute,
+      WMTRenderStages stages = static_cast<WMTRenderStages>(0)
+  ) {
+    if (!root || !heap || !allocator_->encoder_current)
+      return;
+    const auto generation = heap->GetMutationGeneration();
+    const auto capture = [&](UINT index, D3D12_DESCRIPTOR_RANGE_TYPE type, bool direct_indexed) {
+      size_t pending_index = 0;
+      CaptureVolatileDescriptorUse(
+          allocator_->encoder_current, heap, index, type, direct_indexed, compute, stages, generation, pending_index,
+          true
+      );
+    };
+    if (root->IsResourceHeapDirectlyIndexed()) {
+      capture(UINT_MAX, D3D12_DESCRIPTOR_RANGE_TYPE_CBV, true);
+      return;
     }
-    return false;
+    VisitIndirectResourceDescriptors(
+        root, staging, heap,
+        [&](const ShaderVisibleDescriptorReadBatch &, UINT index, D3D12_DESCRIPTOR_RANGE_TYPE type,
+            bool direct_indexed) {
+          if (type == D3D12_DESCRIPTOR_RANGE_TYPE_SRV || type == D3D12_DESCRIPTOR_RANGE_TYPE_UAV)
+            capture(index, type, direct_indexed);
+          return recording_failed_;
+        }
+    );
   }
 
   template <typename F>
@@ -4440,9 +4421,9 @@ public:
 
   bool
   CaptureVolatileDescriptorUse(
-      EncoderData *encoder, MTLD3D12DescriptorHeap *descriptor_heap, UINT index,
-      D3D12_DESCRIPTOR_RANGE_TYPE range_type, bool direct_indexed, bool compute, WMTRenderStages stages,
-      uint64_t generation, size_t &pending_index
+      EncoderData *encoder, MTLD3D12DescriptorHeap *descriptor_heap, UINT index, D3D12_DESCRIPTOR_RANGE_TYPE range_type,
+      bool direct_indexed, bool compute, WMTRenderStages stages, uint64_t generation, size_t &pending_index,
+      bool reject_msc_typed_null = false
   ) {
     if (!encoder || !descriptor_heap)
       return false;
@@ -4455,11 +4436,13 @@ public:
       if (existing != pending_descriptor_use_indices_.end()) {
         pending_index = existing->second;
         airconv_residency_counters_.pending_descriptor_duplicates++;
-        const auto &pending = pending_descriptor_uses_[pending_index];
+        auto &pending = pending_descriptor_uses_[pending_index];
+        pending.reject_msc_typed_null |= reject_msc_typed_null;
+        pending.resource_use |= !reject_msc_typed_null;
         return !pending.covered || pending.covered_generation != generation;
       }
       pending_index = pending_descriptor_uses_.size();
-      pending_descriptor_uses_.push_back({key});
+      pending_descriptor_uses_.push_back({key, 0, false, reject_msc_typed_null, !reject_msc_typed_null});
       try {
         pending_descriptor_use_indices_.emplace(key, pending_index);
       } catch (...) {
@@ -4644,6 +4627,27 @@ public:
       size_t direct_begin = heap_end;
       while (direct_begin > heap_begin && key_at(direct_begin - 1).direct_indexed)
         direct_begin--;
+      const auto rejects_typed_null = [&](size_t begin, size_t end) {
+        for (size_t i = begin; i < end; ++i)
+          if (pending_descriptor_uses_[pending_submission_order_[i]].reject_msc_typed_null)
+            return true;
+        return false;
+      };
+      const auto reject_typed_null = [&](UINT index) {
+        ERR("D3D12 MSC submission rejected: reachable typed NULL descriptor requires the typed-buffer sidecar gate; slot=",
+            index);
+        pending_submission_order_.clear();
+        return E_NOTIMPL;
+      };
+      // Explicit NULL descriptors have no residency bit, but remain reachable by direct indexing.
+      if (rejects_typed_null(direct_begin, heap_end)) {
+        const auto count = live_heap->GetDesc().NumDescriptors;
+        for (UINT index = 0; index < count; ++index) {
+          const auto &descriptor = descriptor_batch.get(index);
+          if (descriptor.type == ShaderVisibleDescriptorType::Null && descriptor.NullView.kind != NullViewKind::None)
+            return reject_typed_null(index);
+        }
+      }
       size_t slot_begin = heap_begin;
       UINT next_direct_index = direct_begin != heap_end ? descriptor_batch.first_residency_slot() : UINT_MAX;
       while (slot_begin < direct_begin || next_direct_index != UINT_MAX) {
@@ -4657,6 +4661,9 @@ public:
         while (slot_end < direct_begin && key_at(slot_end).index == slot_index)
           slot_end++;
         const auto &descriptor = descriptor_batch.get(slot_index);
+        if (descriptor.type == ShaderVisibleDescriptorType::Null && descriptor.NullView.kind != NullViewKind::None &&
+            rejects_typed_null(slot_begin, slot_end))
+          return reject_typed_null(slot_index);
         unique_slots++;
         airconv_residency_counters_.submission_unique_slots++;
         airconv_residency_counters_.submission_live_slot_resolutions++;
@@ -4664,7 +4671,8 @@ public:
           for (size_t use_index = begin; use_index < end; use_index++) {
             fanout_uses++;
             airconv_residency_counters_.submission_fanout_uses++;
-            if (!resolve_descriptor_for_use(descriptor, key_at(use_index)))
+            if (pending_descriptor_uses_[pending_submission_order_[use_index]].resource_use &&
+                !resolve_descriptor_for_use(descriptor, key_at(use_index)))
               return false;
           }
           return true;
@@ -4980,8 +4988,12 @@ public:
     set_pso.threadgroup_size = {1, 1, 1};
     EncodeComputeResourceUse(state.visible_function_table.handle, WMTResourceUsageRead);
     EncodeComputeResourceUse(state.intersection_function_table.handle, WMTResourceUsageRead);
-    if (state.global_root_signature)
+    if (state.global_root_signature) {
+      CaptureMSCTypedNullValidation(
+          state.global_root_signature, rootarg_compute_staging_, descriptor_heap_.ptr(), true
+      );
       EncodeIndirectResourceUses(state.global_root_signature, rootarg_compute_staging_, descriptor_heap_.ptr(), true);
+    }
     return !recording_failed_;
   }
 
@@ -5034,8 +5046,8 @@ public:
           " airconv_residency=", airconv_compute_residency_
       );
     }
-    const bool encode_msc_resource_uses =
-        msc_compute_residency_ && use_msc && !SkipResourceBinding &&
+    const bool capture_msc_descriptors =
+        use_msc && !SkipResourceBinding &&
         (dirty_state_.test(DirtyState::DescriptorHeaps) || dirty_state_.test(DirtyState::ComputeRootArguments) ||
          dirty_state_.test(DirtyState::ComputeRootSignature));
     if (use_msc && rootsig_compute_) {
@@ -5125,6 +5137,9 @@ public:
       dirty_state_.clr(DirtyState::ComputeRootSignature);
     }
 
+    if (capture_msc_descriptors && !pso_compute_->msc_typed_buffer_sidecar)
+      CaptureMSCTypedNullValidation(rootsig_compute_.ptr(), rootarg_compute_staging_, descriptor_heap_.ptr(), true);
+    const bool encode_msc_resource_uses = msc_compute_residency_ && capture_msc_descriptors;
     if (encode_msc_resource_uses)
       EncodeIndirectResourceUses(rootsig_compute_.ptr(), rootarg_compute_staging_, descriptor_heap_.ptr(), true);
 

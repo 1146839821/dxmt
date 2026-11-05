@@ -3618,6 +3618,175 @@ volatile descriptor updates using existing pending-descriptor ownership, with
 live-to-NULL and NULL-to-live negative/positive tests. Do not enable the sidecar by
 default or expand sparse capability until that contract is validated.
 
+### E34 — Submission-time MSC typed NULL enforcement (2026-11-05)
+
+**Task summary / baseline (Gate 0).** Selected node: N13, submission-time
+descriptor resolution. Continue from E33 commit
+`7551825caf7b829ea7aba61054314a01f5f7ad84` on `feat/d3d12`. Entry workspace only
+had the user's preserved `.gitignore` edit. Local branch was 28 commits ahead of
+the cached origin, zero behind; target remote was not fetched. Reference Mullion
+HEAD was read with `git ls-remote` and remains
+`93de32b9145885ceb2e45be7d445e56d62499b3c`. Development target remains the real
+M1 Max / Apple7 on macOS 27.2 (26B123), Xcode 27.2 (27B52), Wine 11.0 and compiled
+MSC SDK API 4.0.3; no runtime product version query is claimed.
+
+**Specification and source findings.** `SPEC_REQUIRED`: retained Microsoft
+Resource Binding source, `ms-resource-binding.source:3417-3426`, expressly allows
+root-table descriptors to change after recording and before submission under
+DESCRIPTORS_VOLATILE; this is also the Root Signature 1.0 behavior. The same source
+at 3435-3448 distinguishes static descriptors. The retained original URL and hash
+are in E30 `sources.json`; this slice does not infer a static-descriptor mutation
+right or allow descriptor changes while work is in flight. `SOURCE_CONFIRMED`:
+E33's `EncodeMSCArgumentBuffer` saw only recording-time contents, so it both
+missed later live-to-NULL changes and rejected a legitimate NULL-to-live update.
+`CollectResourceUsesForSubmission` already resolves retained heaps before
+`NewCommandBuffer` (`d3d12_command_queue.cpp:1233-1259`). That is the existing
+owner and enforcement boundary; no queue or resource backend redesign is needed.
+
+**Mullion comparison.** The pinned null-buffer distinction in
+`mullion-descriptor.source:383-418` and its backend null-operation handling remain
+independent reference evidence (E30). They do not provide an MSC sidecar ABI or
+prove that zero MSC descriptor entries are safe to execute. Keep DXMT's dual
+backend, existing pending descriptor owner, and explicit unsupported path. No
+Mullion implementation is transplanted and no Mullion GPU PASS is claimed.
+
+**Gate 1 Design Card.**
+
+- **Goal:** enforce the default-disabled MSC typed-buffer contract using the
+  descriptor actually visible at submission; admit valid NULL-to-live updates.
+- **Scope:** existing pending descriptor capture/merge, submission resolution,
+  and regression probes for direct compute and root-table updates/replay. Graphics
+  and global ray-root capture use the same helper; execution coverage is reported
+  separately. Root descriptors, local ray shader tables and indirect root-table
+  mutation are not promoted by this slice.
+- **Architecture/module boundary:** one validation policy bit in the existing
+  `PendingDescriptorUse`, sharing retained heap/index/encoder identity. A second
+  intent bit distinguishes resource residency from validation so the MSC compute
+  residency debug switch retains its behavior. No parallel registry or scheduler.
+- **Proposed changes:** record bound SRV/UAV slots even when NULL; direct indexing
+  records the existing whole-heap sentinel. OR the rejection policy across uses.
+  Remove record-time rejection. Resolve/check under the existing submission batch
+  lock, returning E_NOTIMPL through the existing queue error path before creating
+  the Metal command buffer. The existing queue marks the device removed with that
+  reason; this is an explicit unsupported-backend result, not D3D12 conformance.
+- **Test plan:** late live-to-NULL guarded rejection; NULL-to-live exact readback;
+  unrelated late NULL outside table ranges; same closed list resubmission after
+  an earlier successful execution; zero-parameter directly indexed root; rejection
+  with compute residency disabled; E33 unused NULL and opt-in SRV/UAV plus pending
+  re-record regressions. Verify final build/stage pairs and actual loaded identities
+  with Metal API/GPU Validation.
+- **Risks:** conservative table/direct-heap reachability may reject unused slots;
+  recording traversal/deduplication work is not a performance improvement claim. A validation-only intent must not become a residency declaration.
+- **Rollback:** revert this focused commit, restoring E33 recording-time rejection
+  and its documented volatile-update gap. No persistent descriptor ABI migration.
+- **Definition of done:** final x64 default-target build and applicable checks pass;
+  guarded negative and exact positive tests pass; opt-in behavior and runtime
+  identity remain verified; broader feature/capability gates stay unchanged.
+
+**Gate 2 changed files.** `src/d3d12/d3d12_command_list.cpp` records and merges the
+policy through `CaptureMSCTypedNullValidation` / `CaptureVolatileDescriptorUse`,
+then checks live table entries and the full direct-indexed heap under the existing
+`ResolveVolatileDescriptorUses` lock. The direct-indexed residency bitmap omits
+NULL entries, so the rejection scan must explicitly include them. Resource
+resolution is skipped for validation-only intents. Reset already clears the
+existing pending vectors/maps, and each submission re-reads the descriptors.
+`src/d3d12/d3d12_descriptor_heap.hpp/.cpp` remove the now-unused heap-wide
+record-time scan API. `tests/dx12/dx12_texture_sampler.cpp` adds update/replay and
+guarded-rejection modes. `tests/dx12/run_r32_typed_uav.py` adds reproducible runner
+switches and a direct-indexed fixture selection. This report captures the gates,
+source anchors, validation scope and remaining blockers.
+
+**Cost model.** Table recording still walks only bound ranges; capture replaces
+E33's recording-time NULL scan and adds pending-key insert/merge work for those
+slots. It uses one batch lock for the validation walk, alongside the existing
+residency walk. Unchanged draw bindings do not recapture; a changed encoder/root/
+heap must retain its own intent. Submission validation uses the existing heap batch
+lock and existing per-slot fanout: no new submission lock, scheduler, Metal wait or
+encoder boundary. Direct indexing records one whole-heap intent and checks all
+slots at submission, because any slot is potentially reachable and NULL slots are
+absent from the residency bitmap. This is deliberately conservative O(heap size),
+not an exact shader footprint. The compiler layout probe measures a 32-byte key
+and 48-byte pending record on the x64 release ABI; the baseline and candidate
+pending records are both 48 bytes, with the two intent flags using padding.
+`record-layout.txt` and `record-size-probe.cpp/.log` retain that evidence. Runtime
+latency/throughput A/B is NOT_RUN; no speedup or no-regression claim is made.
+
+**Gate 3 validation — LOCAL_PASS within this slice.** Final candidate artifacts
+were rebuilt after separating validation and residency intent. The runner verifies
+PE/Unix/build-stage pairing, loaded paths/export bytes and MSC identity, with Metal
+API/GPU Validation enabled and no reported validation errors in every final process.
+
+| Final check | Result / evidence type |
+| --- | --- |
+| x64 release default-target build | PASS; build-intent-final.log and build-warning-final.log |
+| Existing x86 release build | PASS; enable_d3d12=false, enable_tests=false; not D3D12 x86 coverage |
+| Late live-to-NULL, default gate | 3/3 expected E_NOTIMPL submission rejection; 1024-byte readback guard unchanged |
+| Recorded NULL-to-live before Execute | 3/3 exact GPU readback PASS |
+| NULL added outside root tables after Close | 3/3 exact GPU readback PASS |
+| Same closed list: successful execution, then NULL and resubmit | 3/3 GPU readback plus guarded rejection PASS |
+| Zero-parameter directly indexed root, late NULL | 1/1 guarded rejection PASS; verifies NULL absent from residency bitmap is still checked |
+| Late NULL with DXMT_MSC_COMPUTE_RESIDENCY=0 | 3/3 guarded rejection PASS |
+| E33 unused typed NULL before recording | 3/3 exact GPU readback PASS |
+| Opt-in typed NULL SRV / UAV | 3/3 + 3/3 readback PASS |
+| Opt-in pending re-record / completion lifetime | 3/3 existing SRV/fence/readback oracles PASS |
+| E33 baseline with candidate NULL-to-live probe | Expected FAIL at Close (E_NOTIMPL); same probe succeeds on candidate; baseline identity verified |
+| Runner syntax / scoped format / git diff --check | PASS |
+| Compiler layout probe | PASS; baseline/candidate pending record 48/48 bytes |
+| Windows/Mullion/other GPU, D3D12 x86, graphics/ray NULL GPU, indirect table mutation, performance A/B | NOT_RUN; no corresponding PASS claim |
+
+The final matrix contains 28 processes: 21 processes with positive GPU readback
+oracles and 10 guarded rejection events (replay processes contain both). There is
+one separate, expected-failing E33 baseline control. Preliminary 28-process batches
+are retained separately with pre-policy artifacts; they are not counted as final
+coverage. The initial standalone size probe needed the same complete allocator
+header used by the production translation unit; its failed incomplete-header log
+is retained and is not a production build or GPU failure.
+
+A final explicit-parentheses fix removes a new test-parser compiler warning.
+The rebuilt executable differs only in `.buildid`; all code and data sections are
+byte-identical to the 28-process matrix (`warning-fix-section-equivalence.json`).
+Four additional processes on the delivered build/stage pair pass NULL-to-live
+(three formats) and direct-indexed rejection. These are separate delivery identity
+checks, not a rerun claim for the whole matrix. Totals including them are 32
+processes, 24 positive GPU-readback processes and 11 guarded rejection events.
+`runs-delivery.json`, `delivery/*/summary.json` and `delivered-artifacts.json`
+record this last identity. Remaining compiler warnings are pre-existing.
+
+Final evidence root:
+`/Users/zhangbo/Documents/Vibe-Codeding/dxmt-test/n95-capability-gate/result-null-submit-gate-20261105`.
+`runs-final.json`, `final/*/summary.json`, `delivery-audit.json`,
+`final-artifacts.json`, `record-sizes.json`, and `baseline-to-live/audit.json`
+retain exact commands, identities, guards, source hashes and outcomes.
+
+**Gate 4 delivery audit.** `d3d12_command_list.cpp:1018-1025,4278-4308,4422-4455`
+contains the shared intent and capture/merge owner; `4502-4695` validates under
+existing submission locks; graphics/compute/global-ray capture hooks are at
+`3508,4991,5139`. The existing queue error path is at
+`d3d12_command_queue.cpp:1244-1259`, before Metal command-buffer creation. Probe
+oracles are at `dx12_texture_sampler.cpp:264-306,1016-1042,1417-1424`.
+E33's missing submission-time enforcement is closed for the tested compute
+root-table/direct-indexed cases. Graphics/global-ray capture is source-confirmed
+only, with execution coverage explicitly NOT_RUN above.
+Source scope, exception/retention failure propagation, opt-in behavior and the
+preserved `.gitignore` hash were checked. No new D3D12 source module or independent
+state map, no queue scheduler change and no persistent MSC ABI change.
+
+**Capability impact / remaining risks.** No Feature Level, Shader Model, Tiled
+Resources Tier, sparse backend selection, D3D11 behavior or MSC sidecar ABI is
+promoted. The sidecar remains default-off. `MSC_SEMANTIC_GAP` remains for unsupported
+operations/stages, atomics and shader-exact reachability. The local ray shader-table
+path and indirect root-table mutation remain `UNVERIFIED`; global root capture is
+not proof of those paths. `TARGET_DEVICE_NOT_AVAILABLE` applies to Windows native,
+live Mullion or other-GPU execution only; M1 Max Placement Sparse remains available.
+The contract assumes valid D3D12 descriptor update timing; it does not snapshot or
+permit app mutation after submission begins.
+
+**Git state / next recommended slice.** Commit only this slice with repository
+`fix(d3d12)` style, without pushing; retain the original `.gitignore` edit unstaged.
+Next: audit and validate the explicit rejection contract for unsupported MSC
+typed-buffer atomic operations, preserving the opt-in gate and current public
+capabilities. Pipeline-cache acceptance remains a later, separate validation item.
+
 ### 7. Git State / Next Recommended Slice
 
 Delivery commit uses fix(d3d12) repository style and includes only the metadata,

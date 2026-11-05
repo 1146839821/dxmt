@@ -261,6 +261,47 @@ CheckTypedReadback(const TypedFormat &format, const UINT *mapped,
   return true;
 }
 
+bool CheckTypedNullSubmissionRejected(ID3D12Device *device,
+                                      ID3D12CommandQueue *queue,
+                                      ID3D12GraphicsCommandList *list,
+                                      ID3D12Resource *readback) {
+  void *mapped = nullptr;
+  if (!CheckHR("MapRejectionGuard", readback->Map(0, nullptr, &mapped)))
+    return false;
+  memset(mapped, 0xcd, 1024);
+  readback->Unmap(0, nullptr);
+  ID3D12CommandList *lists[] = {list};
+  queue->ExecuteCommandLists(1, lists);
+  const auto reason = device->GetDeviceRemovedReason();
+  if (reason != E_NOTIMPL) {
+    std::cerr << "typed NULL submission rejection mismatch: 0x" << std::hex
+              << reason << std::dec << "\n";
+    return false;
+  }
+  if (!CheckHR("MapRejectedReadback", readback->Map(0, nullptr, &mapped)))
+    return false;
+  bool unchanged = true;
+  for (unsigned i = 0; i < 1024; ++i)
+    unchanged &= static_cast<const unsigned char *>(mapped)[i] == 0xcd;
+  readback->Unmap(0, nullptr);
+  if (!unchanged) {
+    std::cerr << "rejected typed NULL submission modified readback\n";
+    return false;
+  }
+  std::cout << "typed NULL submission rejected; readback guard unchanged\n";
+  return true;
+}
+
+D3D12_SHADER_RESOURCE_VIEW_DESC
+TypedNullSRV(DXGI_FORMAT format) {
+  D3D12_SHADER_RESOURCE_VIEW_DESC desc = {};
+  desc.Format = format;
+  desc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+  desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+  desc.Buffer.NumElements = 4;
+  return desc;
+}
+
 int
 main(int argc, char **argv) {
   char identity_requested[2] = {};
@@ -285,6 +326,12 @@ main(int argc, char **argv) {
   if (argc < 2 || argc > 5)
     return 2;
   const bool placed = argc == 5 && strcmp(argv[4], "--placed") == 0;
+  const bool direct_null = argc == 3 && strcmp(argv[2], "--direct-indexed-late-null") == 0;
+  const bool late_null = argc == 4 && strcmp(argv[2], "--typed-uav-late-null") == 0;
+  const bool late_live = argc == 4 && strcmp(argv[2], "--typed-uav-late-live") == 0;
+  const bool late_null_outside = argc == 4 && strcmp(argv[2], "--typed-uav-late-null-outside") == 0;
+  const bool replay_null = argc == 4 && strcmp(argv[2], "--typed-uav-replay-null") == 0;
+  const bool null_update = late_null || late_live || late_null_outside || replay_null;
   const bool unused_typed_null = argc == 4 && strcmp(argv[2], "--typed-uav-null-outside") == 0;
   const bool srv_merge_skip = argc == 4 && strcmp(argv[2], "--typed-buffer-srv-multi-merge-skip") == 0;
   const bool srv_split_skip = argc == 4 && strcmp(argv[2], "--typed-buffer-srv-multi-split-skip") == 0;
@@ -341,7 +388,7 @@ main(int argc, char **argv) {
     return 2;
   const TypedFormat *typed_format = nullptr;
   if (argc >= 4) {
-    if (strcmp(argv[2], "--typed-uav") != 0 && !unused_typed_null && !typed_buffer)
+    if (strcmp(argv[2], "--typed-uav") != 0 && !unused_typed_null && !null_update && !typed_buffer)
       return 2;
     char *end = nullptr;
     const auto format = strtoul(argv[3], &end, 10);
@@ -360,8 +407,8 @@ main(int argc, char **argv) {
   const bool static_sampler = static_lifetime || (argc == 3 && strcmp(argv[2], "--static-sampler") == 0);
   const bool direct_indexed_uav_texture =
       argc == 3 && strcmp(argv[2], "--direct-indexed-uav-texture") == 0;
-  const bool direct_indexed =
-      argc == 3 && (strcmp(argv[2], "--direct-indexed") == 0 || direct_indexed_uav_texture);
+  const bool direct_indexed = direct_null ||
+      (argc == 3 && (strcmp(argv[2], "--direct-indexed") == 0 || direct_indexed_uav_texture));
   const bool texture_uav = direct_indexed_uav_texture || typed_format;
   if (argc == 3 && !static_sampler && !direct_indexed)
     return 2;
@@ -545,7 +592,7 @@ main(int argc, char **argv) {
     goto cleanup;
 
   resource_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-  resource_heap_desc.NumDescriptors = unused_typed_null ? 4 : texture_uav ? (srv_multi ? 4 : 3) : 2;
+  resource_heap_desc.NumDescriptors = (unused_typed_null || late_null_outside) ? 4 : texture_uav ? (srv_multi ? 4 : 3) : 2;
   resource_heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
   sampler_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
   sampler_heap_desc.NumDescriptors = 1;
@@ -714,6 +761,11 @@ main(int argc, char **argv) {
       handle.ptr += descriptor_increment * 3;
       device->CreateShaderResourceView(nullptr, &unused, handle);
       std::cout << "typed NULL outside root tables slot=3\n";
+    }
+    if (late_live) {
+      const auto null_desc = TypedNullSRV(typed_format->format);
+      device->CreateShaderResourceView(nullptr, &null_desc, resource_cpu);
+      std::cout << "typed NULL recorded before live update\n";
     }
     if (typed_srv) {
       D3D12_SHADER_RESOURCE_VIEW_DESC typed_srv_desc = {};
@@ -961,6 +1013,31 @@ main(int argc, char **argv) {
   }
   if (!CheckHR("Close", list->Close()))
     goto cleanup;
+  if (direct_null) {
+    const auto null_desc = TypedNullSRV(DXGI_FORMAT_R32_UINT);
+    device->CreateShaderResourceView(nullptr, &null_desc, resource_cpu);
+    std::cout << "typed NULL post-Close direct-indexed update\n";
+    result = CheckTypedNullSubmissionRejected(device, queue, list, readback) ? 0 : 1;
+    goto cleanup;
+  }
+  if (null_update) {
+    if (late_live) {
+      device->CreateShaderResourceView(texture, &srv_desc, resource_cpu);
+    } else if (late_null || late_null_outside) {
+      const auto null_desc = TypedNullSRV(typed_format->format);
+      auto handle = resource_cpu;
+      if (late_null_outside)
+        handle.ptr += descriptor_increment * 3;
+      device->CreateShaderResourceView(nullptr, &null_desc, handle);
+    }
+    std::cout << "typed NULL post-Close update mode=" << argv[2] << "\n";
+    if (late_null) {
+      result = CheckTypedNullSubmissionRejected(device, queue, list, readback)
+                   ? 0
+                   : 1;
+      goto cleanup;
+    }
+  }
   if (!srv_multi && ((srv_to_live && !srv_to_live_skip) || (srv_to_null && !srv_to_null_skip))) {
     D3D12_SHADER_RESOURCE_VIEW_DESC updated = {};
     updated.Format = typed_format->format;
@@ -1337,6 +1414,13 @@ main(int argc, char **argv) {
   std::cout << "DXIL " << (direct_indexed_uav_texture ? "direct indexed UAV texture"
                          : direct_indexed ? "direct indexed" : static_sampler ? "static" : "dynamic")
             << " texture sampler readback passed: " << value << "\n";
+  if (replay_null) {
+    const auto null_desc = TypedNullSRV(typed_format->format);
+    device->CreateShaderResourceView(nullptr, &null_desc, resource_cpu);
+    if (!CheckTypedNullSubmissionRejected(device, queue, list, readback))
+      goto cleanup;
+    std::cout << "typed NULL replay rejection passed\n";
+  }
   result = 0;
 
 cleanup:

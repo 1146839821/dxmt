@@ -733,14 +733,6 @@ public:
     };
   }
 
-  bool
-  HasTypedNullDescriptors() const override {
-    std::lock_guard lock(descriptor_mutex_);
-    return std::any_of(descriptors_.begin(), descriptors_.end(), [](const auto &descriptor) {
-      return descriptor.type == ShaderVisibleDescriptorType::Null && descriptor.NullView.kind != NullViewKind::None;
-    });
-  }
-
   uint64_t
   GetMutationGeneration() const override {
     return mutation_generation_.load(std::memory_order_acquire);

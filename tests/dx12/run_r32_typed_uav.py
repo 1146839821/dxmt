@@ -27,6 +27,8 @@ def main():
     parser.add_argument("--zero-offset", action="store_true", help="use a zero-offset texture view")
     parser.add_argument("--experimental-patch", action="store_true", help="enable the experimental MSC sidecar path")
     parser.add_argument("--production-gate", action="store_true", help="enable the opt-in MSC typed-buffer execution gate")
+    parser.add_argument("--no-compute-residency", action="store_true", help="verify rejection is independent of the MSC residency debug switch")
+    parser.add_argument("--null-update", choices=("late-null", "late-live", "late-null-outside", "replay-null", "direct-null"), help="test submission-time typed NULL validation")
     parser.add_argument("--unused-null", action="store_true", help="put a typed NULL outside the bound root-table ranges")
     parser.add_argument("--late-copy", action="store_true", help="copy the buffer view after Close and before submission")
     parser.add_argument("--heap-switch", action="store_true", help="switch between heaps with distinct view lengths")
@@ -51,6 +53,10 @@ def main():
     parser.add_argument("--null-uav-live", action="store_true", help="negative control using a live UAV")
     parser.add_argument("--srv", choices=("null", "live", "null-to-live", "live-to-null", "null-to-live-skip", "live-to-null-skip", "null-to-live-only", "null-to-live-only-skip", "null-to-live-only-pending", "null-to-live-only-pending-skip", "null-to-live-only-rerecord", "null-to-live-only-rerecord-wrong", "copy-to-live", "copy-to-null", "copy-to-live-skip", "copy-to-null-skip", "multi", "multi-skip", "multi-wrong", "multi-merge", "multi-merge-skip", "multi-split", "multi-split-skip"), help="test a typed SRV and optional post-Close update")
     args = parser.parse_args()
+    if args.no_compute_residency and args.null_update != "late-null":
+        parser.error("--no-compute-residency is limited to the pre-submission rejection probe")
+    if args.null_update and (args.unused_null or args.buffer or args.experimental_patch or args.production_gate):
+        parser.error("--null-update requires the default texture path with the sidecar gate disabled")
     if args.unused_null and (args.buffer or args.experimental_patch or args.production_gate):
         parser.error("--unused-null requires the default texture path with the sidecar gate disabled")
     if args.experimental_patch and args.production_gate:
@@ -74,14 +80,15 @@ def main():
              ("src/winemetal/winemetal.dll", "winemetal.dll"),
              ("src/winemetal/unix/winemetal.so", "wine/lib/wine/x86_64-unix/winemetal.so"),
              ("tests/dx12/dx12_texture_sampler.exe", "dx12_texture_sampler.exe")]
-    cases = [("float", 41), ("uint", 42), ("sint", 43)]
+    cases = [("uint", 42)] if args.null_update == "direct-null" else [("float", 41), ("uint", 42), ("sint", 43)]
     if (args.indirect_math or args.indirect_math_wrong) and not args.scalar:
         parser.error("--indirect-math requires --scalar")
     if (args.null_uav or args.null_uav_live) and not args.scalar:
         parser.error("--null-uav requires --scalar")
     prefix_name = "typed_buffer_srv_multi" if args.srv and args.srv.startswith("multi") else "typed_buffer_srv" if args.srv else "typed_buffer_math" if args.indirect_math or args.indirect_math_wrong else "typed_buffer_scalar" if args.scalar else "typed_buffer_uav" if args.buffer else "texture_sampler_typed_uav"
-    pairs += [(f"tests/dx12/{prefix_name}_{kind}.cs.cso",
-               f"{prefix_name}_{kind}.cs.cso") for kind, _ in cases]
+    fixtures = {kind: "texture_sampler_direct_indexed.cs.cso" if args.null_update == "direct-null" else
+                f"{prefix_name}_{kind}.cs.cso" for kind, _ in cases}
+    pairs += [(f"tests/dx12/{name}", name) for name in fixtures.values()]
     for source, target in pairs:
         expected = (build / source).read_bytes()
         if source in ("src/d3d12/d3d12.dll", "src/dxgi/dxgi.dll") and expected[64:80] == b"Wine builtin DLL":
@@ -96,6 +103,8 @@ def main():
                DXMT_METALIRCONVERTER_PATH=str(converter), DXMT_TEST_PRINT_LOADED_CODE="1",
                MTL_DEBUG_LAYER="1", MTL_SHADER_VALIDATION="1", MTL_SHADER_VALIDATION_REPORT_TO_STDERR="1",
                DYLD_PRINT_LIBRARIES="1")
+    if args.no_compute_residency:
+        env["DXMT_MSC_COMPUTE_RESIDENCY"] = "0"
     if args.experimental_patch:
         env["DXMT_TEST_MSC_TYPED_BUFFER_PATCH"] = "1"
     if args.production_gate:
@@ -109,11 +118,15 @@ def main():
         env["DXMT_SHADER_CACHE_PATH"] = str(output / f"cache-{kind}")
         env["DXMT_LOG_PATH"] = str(output)
         command = [str(stage / "wine/bin/wine"), "dx12_texture_sampler.exe",
-                   f"{prefix_name}_{kind}.cs.cso", "--typed-buffer-null-live" if args.null_uav_live else "--typed-buffer-null" if args.null_uav else "--typed-buffer-indirect-math-wrong" if args.indirect_math_wrong else "--typed-buffer-indirect-math" if args.indirect_math else "--typed-buffer-indirect-heap-wrong" if args.indirect_heap_wrong else "--typed-buffer-indirect-heap" if args.indirect_heap else "--typed-buffer-indirect-late-skip" if args.indirect_late_skip else "--typed-buffer-indirect-late" if args.indirect_late else "--typed-buffer-rerecord-zero" if args.rerecord_zero else "--typed-buffer-rerecord-wrong" if args.rerecord_wrong else "--typed-buffer-rerecord" if args.rerecord else "--typed-buffer-indirect-pending-wrong" if args.indirect_pending_wrong else "--typed-buffer-indirect-pending" if args.indirect_pending else "--typed-buffer-indirect-count-wrong" if args.indirect_count_wrong else "--typed-buffer-indirect-count" if args.indirect_count else "--typed-buffer-indirect-reject" if args.indirect_reject else "--typed-buffer-indirect" if args.indirect else "--typed-buffer-pending-reset" if args.pending_reset else "--typed-buffer-heap-switch-encoder" if args.encoder_break else "--typed-buffer-heap-switch" if args.heap_switch else "--typed-buffer-late-copy" if args.late_copy else "--typed-buffer-zero" if args.zero_offset else "--typed-buffer-unaligned" if args.unaligned else "--typed-buffer" if args.buffer else "--typed-uav", str(fmt)]
+                   fixtures[kind], "--typed-buffer-null-live" if args.null_uav_live else "--typed-buffer-null" if args.null_uav else "--typed-buffer-indirect-math-wrong" if args.indirect_math_wrong else "--typed-buffer-indirect-math" if args.indirect_math else "--typed-buffer-indirect-heap-wrong" if args.indirect_heap_wrong else "--typed-buffer-indirect-heap" if args.indirect_heap else "--typed-buffer-indirect-late-skip" if args.indirect_late_skip else "--typed-buffer-indirect-late" if args.indirect_late else "--typed-buffer-rerecord-zero" if args.rerecord_zero else "--typed-buffer-rerecord-wrong" if args.rerecord_wrong else "--typed-buffer-rerecord" if args.rerecord else "--typed-buffer-indirect-pending-wrong" if args.indirect_pending_wrong else "--typed-buffer-indirect-pending" if args.indirect_pending else "--typed-buffer-indirect-count-wrong" if args.indirect_count_wrong else "--typed-buffer-indirect-count" if args.indirect_count else "--typed-buffer-indirect-reject" if args.indirect_reject else "--typed-buffer-indirect" if args.indirect else "--typed-buffer-pending-reset" if args.pending_reset else "--typed-buffer-heap-switch-encoder" if args.encoder_break else "--typed-buffer-heap-switch" if args.heap_switch else "--typed-buffer-late-copy" if args.late_copy else "--typed-buffer-zero" if args.zero_offset else "--typed-buffer-unaligned" if args.unaligned else "--typed-buffer" if args.buffer else "--typed-uav", str(fmt)]
         if args.srv:
             command[3] = "--typed-buffer-srv-" + args.srv
         if args.unused_null:
             command[3] = "--typed-uav-null-outside"
+        if args.null_update:
+            command[3] = "--typed-uav-" + args.null_update
+            if args.null_update == "direct-null":
+                command = command[:3] + ["--direct-indexed-late-null"]
         result = subprocess.run(command, cwd=stage, env=env, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, timeout=120)
         log = result.stdout.decode(errors="replace")
@@ -135,6 +148,19 @@ def main():
                   (not (args.pending_reset or args.indirect_pending or args.indirect_pending_wrong or args.rerecord or args.rerecord_wrong or args.rerecord_zero) or "pending reset fence passed" in log))
         if args.unused_null:
             passed = passed and "typed NULL outside root tables slot=3" in log
+        if args.null_update:
+            updated = "typed NULL post-Close update mode=--typed-uav-" + args.null_update in log
+            rejected = "typed NULL submission rejected; readback guard unchanged" in log
+            if args.null_update in ("late-null", "direct-null"):
+                if args.null_update == "direct-null":
+                    updated = "typed NULL post-Close direct-indexed update" in log
+                passed = result.returncode == 0 and updated and rejected
+            else:
+                passed = passed and updated
+                if args.null_update == "late-live":
+                    passed = passed and "typed NULL recorded before live update" in log
+                if args.null_update == "replay-null":
+                    passed = passed and rejected and "typed NULL replay rejection passed" in log
         if args.rerecord or args.rerecord_wrong or args.rerecord_zero:
             passed = passed and "rerecord dimensions=2 passed" in log
         if args.indirect_math or args.indirect_math_wrong:
