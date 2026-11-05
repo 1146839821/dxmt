@@ -254,6 +254,26 @@ with tempfile.TemporaryDirectory(prefix="dxmt-typed-buffer-ir-") as temp:
         ("multi_duplicate_sidecar", multi_source, 2, ["--sidecar", "0", "16", "--sidecar", "8", "16"]),
         ("multi_cross_overlap", multi_source, 2, ["--sidecar", "0", "8", "--sidecar", "8", "24"]),
     ]
+    # MSC 4.0.3 lowers RWBuffer integer atomics to texture-buffer AIR calls,
+    # unlike the allowed global pointer atomic above. Reject the entire module
+    # before modifying earlier supported reads/writes or publishing a metallib.
+    typed_atomics = ["fetch_" + op for op in ("add", "and", "or", "xor", "min", "max")]
+    typed_atomics += ["exchange", "compare_exchange_weak"]
+    for operation in typed_atomics:
+        signs = ("u", "s") if operation in ("fetch_min", "fetch_max", "compare_exchange_weak") else ("u",)
+        for sign in signs:
+            symbol = f"air.atomic_{operation}_explicit_texture_buffer_1d.{sign}.v4i32"
+            compare = operation == "compare_exchange_weak"
+            result_type = "i1" if compare else "<4 x i32>"
+            values = ("<4 x i32>* null, <4 x i32> zeroinitializer, i32 0, i32 0, i32 3" if compare else
+                      "<4 x i32> zeroinitializer, i32 0, i32 3")
+            types = "<4 x i32>*, <4 x i32>, i32, i32, i32" if compare else "<4 x i32>, i32, i32"
+            call = f"  %atomic = call {result_type} @{symbol}(%tex addrspace(1)* %texture, i32 %index, {values})\n"
+            declaration = f"\ndeclare {result_type} @{symbol}(%tex addrspace(1)*, i32, {types})\n"
+            text = sidecar_source.replace("  ret i32 %width", call + "  ret i32 %width") + declaration
+            for mode, options in (("unchanged", ["--sidecar", "0", "8"]),
+                                  ("no_output", ["--metallib-api", "8", "16", "--sidecar", "0", "8"])):
+                cases.append((f"typed_atomic_{operation}_{sign}_{mode}", text, 4, options))
     for name, text, expected, options in cases:
         ir = root / (name + ".ll")
         output = root / (name + ".metallib")

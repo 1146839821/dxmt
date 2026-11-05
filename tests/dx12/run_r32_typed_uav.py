@@ -27,6 +27,7 @@ def main():
     parser.add_argument("--zero-offset", action="store_true", help="use a zero-offset texture view")
     parser.add_argument("--experimental-patch", action="store_true", help="enable the experimental MSC sidecar path")
     parser.add_argument("--production-gate", action="store_true", help="enable the opt-in MSC typed-buffer execution gate")
+    parser.add_argument("--atomic", choices=("add", "and", "or", "xor", "min", "max", "exchange", "compare-exchange", "compare-store"), help="expect explicit sidecar PSO rejection for a real typed atomic shader; no GPU submission")
     parser.add_argument("--no-compute-residency", action="store_true", help="verify rejection is independent of the MSC residency debug switch")
     parser.add_argument("--null-update", choices=("late-null", "late-live", "late-null-outside", "replay-null", "direct-null"), help="test submission-time typed NULL validation")
     parser.add_argument("--unused-null", action="store_true", help="put a typed NULL outside the bound root-table ranges")
@@ -53,6 +54,11 @@ def main():
     parser.add_argument("--null-uav-live", action="store_true", help="negative control using a live UAV")
     parser.add_argument("--srv", choices=("null", "live", "null-to-live", "live-to-null", "null-to-live-skip", "live-to-null-skip", "null-to-live-only", "null-to-live-only-skip", "null-to-live-only-pending", "null-to-live-only-pending-skip", "null-to-live-only-rerecord", "null-to-live-only-rerecord-wrong", "copy-to-live", "copy-to-null", "copy-to-live-skip", "copy-to-null-skip", "multi", "multi-skip", "multi-wrong", "multi-merge", "multi-merge-skip", "multi-split", "multi-split-skip"), help="test a typed SRV and optional post-Close update")
     args = parser.parse_args()
+    if args.atomic and (not args.buffer or not args.scalar or not args.production_gate or
+                        any(value for name, value in vars(args).items() if name not in (
+                            "stage", "prefix", "build", "converter", "output", "atomic",
+                            "buffer", "scalar", "production_gate"))):
+        parser.error("--atomic requires --buffer --scalar --production-gate and no other test mode")
     if args.no_compute_residency and args.null_update != "late-null":
         parser.error("--no-compute-residency is limited to the pre-submission rejection probe")
     if args.null_update and (args.unused_null or args.buffer or args.experimental_patch or args.production_gate):
@@ -81,11 +87,15 @@ def main():
              ("src/winemetal/unix/winemetal.so", "wine/lib/wine/x86_64-unix/winemetal.so"),
              ("tests/dx12/dx12_texture_sampler.exe", "dx12_texture_sampler.exe")]
     cases = [("uint", 42)] if args.null_update == "direct-null" else [("float", 41), ("uint", 42), ("sint", 43)]
+    if args.atomic:
+        cases = [("uint", 42), ("sint", 43)]
     if (args.indirect_math or args.indirect_math_wrong) and not args.scalar:
         parser.error("--indirect-math requires --scalar")
     if (args.null_uav or args.null_uav_live) and not args.scalar:
         parser.error("--null-uav requires --scalar")
     prefix_name = "typed_buffer_srv_multi" if args.srv and args.srv.startswith("multi") else "typed_buffer_srv" if args.srv else "typed_buffer_math" if args.indirect_math or args.indirect_math_wrong else "typed_buffer_scalar" if args.scalar else "typed_buffer_uav" if args.buffer else "texture_sampler_typed_uav"
+    if args.atomic:
+        prefix_name = "typed_buffer_atomic_" + args.atomic
     fixtures = {kind: "texture_sampler_direct_indexed.cs.cso" if args.null_update == "direct-null" else
                 f"{prefix_name}_{kind}.cs.cso" for kind, _ in cases}
     pairs += [(f"tests/dx12/{name}", name) for name in fixtures.values()]
@@ -121,6 +131,8 @@ def main():
                    fixtures[kind], "--typed-buffer-null-live" if args.null_uav_live else "--typed-buffer-null" if args.null_uav else "--typed-buffer-indirect-math-wrong" if args.indirect_math_wrong else "--typed-buffer-indirect-math" if args.indirect_math else "--typed-buffer-indirect-heap-wrong" if args.indirect_heap_wrong else "--typed-buffer-indirect-heap" if args.indirect_heap else "--typed-buffer-indirect-late-skip" if args.indirect_late_skip else "--typed-buffer-indirect-late" if args.indirect_late else "--typed-buffer-rerecord-zero" if args.rerecord_zero else "--typed-buffer-rerecord-wrong" if args.rerecord_wrong else "--typed-buffer-rerecord" if args.rerecord else "--typed-buffer-indirect-pending-wrong" if args.indirect_pending_wrong else "--typed-buffer-indirect-pending" if args.indirect_pending else "--typed-buffer-indirect-count-wrong" if args.indirect_count_wrong else "--typed-buffer-indirect-count" if args.indirect_count else "--typed-buffer-indirect-reject" if args.indirect_reject else "--typed-buffer-indirect" if args.indirect else "--typed-buffer-pending-reset" if args.pending_reset else "--typed-buffer-heap-switch-encoder" if args.encoder_break else "--typed-buffer-heap-switch" if args.heap_switch else "--typed-buffer-late-copy" if args.late_copy else "--typed-buffer-zero" if args.zero_offset else "--typed-buffer-unaligned" if args.unaligned else "--typed-buffer" if args.buffer else "--typed-uav", str(fmt)]
         if args.srv:
             command[3] = "--typed-buffer-srv-" + args.srv
+        if args.atomic:
+            command[3] = "--typed-buffer-atomic-reject"
         if args.unused_null:
             command[3] = "--typed-uav-null-outside"
         if args.null_update:
@@ -148,6 +160,10 @@ def main():
                   (not (args.pending_reset or args.indirect_pending or args.indirect_pending_wrong or args.rerecord or args.rerecord_wrong or args.rerecord_zero) or "pending reset fence passed" in log))
         if args.unused_null:
             passed = passed and "typed NULL outside root tables slot=3" in log
+        if args.atomic:
+            passed = (result.returncode == 0 and
+                      "typed atomic PSO rejected; no command list submitted; device healthy" in log and
+                      "MSC typed-buffer test patch rejected: result=0 status=2" in log)
         if args.null_update:
             updated = "typed NULL post-Close update mode=--typed-uav-" + args.null_update in log
             rejected = "typed NULL submission rejected; readback guard unchanged" in log
@@ -178,13 +194,15 @@ def main():
                 passed = passed and "SRV pending gate held passed" in log
             if "-rerecord" in args.srv:
                 passed = passed and "SRV rerecorded while pending passed" in log
-        rows.append(dict(kind=kind, format=fmt, exit=result.returncode, readback_pass=passed,
+        rows.append(dict(kind=kind, format=fmt, exit=result.returncode, case_pass=passed,
+                         readback_pass=passed and not args.atomic,
+                         oracle="PSO_UNSUPPORTED_NO_SUBMISSION" if args.atomic else "existing scenario",
                          identity_pass=identity, validation_pass=validation))
         print(rows[-1], flush=True)
     summary = {"cases": rows, "converter_sha256": sha(converter),
                "artifacts": {target: sha(stage / target) for _, target in pairs}}
     (output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
-    return 0 if all(r["readback_pass"] and r["identity_pass"] and r["validation_pass"] for r in rows) else 1
+    return 0 if all(r["case_pass"] and r["identity_pass"] and r["validation_pass"] for r in rows) else 1
 
 
 if __name__ == "__main__":

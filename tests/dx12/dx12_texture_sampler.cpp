@@ -326,6 +326,7 @@ main(int argc, char **argv) {
   if (argc < 2 || argc > 5)
     return 2;
   const bool placed = argc == 5 && strcmp(argv[4], "--placed") == 0;
+  const bool atomic_reject = argc == 4 && strcmp(argv[2], "--typed-buffer-atomic-reject") == 0;
   const bool direct_null = argc == 3 && strcmp(argv[2], "--direct-indexed-late-null") == 0;
   const bool late_null = argc == 4 && strcmp(argv[2], "--typed-uav-late-null") == 0;
   const bool late_live = argc == 4 && strcmp(argv[2], "--typed-uav-late-live") == 0;
@@ -383,7 +384,7 @@ main(int argc, char **argv) {
   const bool wrong_heap_expected = indirect_heap_wrong || (argc == 4 && strcmp(argv[2], "--typed-buffer-heap-switch-wrong") == 0);
   const bool encoder_break = indirect_heap || (argc == 4 && strcmp(argv[2], "--typed-buffer-heap-switch-encoder") == 0);
   const bool heap_switch = wrong_heap_expected || encoder_break || (argc == 4 && strcmp(argv[2], "--typed-buffer-heap-switch") == 0);
-  const bool typed_buffer = typed_srv || null_uav || unaligned_buffer || late_buffer || zero_offset_buffer || heap_switch || pending_reset || indirect_reject || indirect || indirect_count || (argc == 4 && strcmp(argv[2], "--typed-buffer") == 0);
+  const bool typed_buffer = atomic_reject || typed_srv || null_uav || unaligned_buffer || late_buffer || zero_offset_buffer || heap_switch || pending_reset || indirect_reject || indirect || indirect_count || (argc == 4 && strcmp(argv[2], "--typed-buffer") == 0);
   if (argc == 5 && !placed)
     return 2;
   const TypedFormat *typed_format = nullptr;
@@ -838,6 +839,21 @@ main(int argc, char **argv) {
   pso_desc.pRootSignature = root_signature;
   pso_desc.CS.pShaderBytecode = shader.data();
   pso_desc.CS.BytecodeLength = shader.size();
+  if (atomic_reject) {
+    const HRESULT atomic_hr =
+        device->CreateComputePipelineState(&pso_desc, IID_PPV_ARGS(&pso));
+    if (atomic_hr != E_NOTIMPL || pso ||
+        device->GetDeviceRemovedReason() != S_OK) {
+      std::cerr << "typed atomic expected E_NOTIMPL with no PSO and a healthy "
+                   "device; hr=0x"
+                << std::hex << atomic_hr << std::dec << "\n";
+      goto cleanup;
+    }
+    std::cout << "typed atomic PSO rejected; no command list submitted; device "
+                 "healthy\n";
+    result = 0;
+    goto cleanup;
+  }
   if (!CheckHR("CreateComputePipelineState", device->CreateComputePipelineState(&pso_desc, IID_PPV_ARGS(&pso))))
     goto cleanup;
   if (!CheckHR(

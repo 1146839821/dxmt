@@ -33,6 +33,37 @@ cbuffer Parameters : register(b0) { uint phase; };
 [numthreads(1, 1, 1)]
 void main(uint3 tid : SV_DispatchThreadID)
 {
+#if defined(TYPED_BUFFER_ATOMIC)
+#if defined(TYPED_UAV_SINT)
+    int old = 0;
+#else
+    uint old = 0;
+#endif
+#if TYPED_BUFFER_ATOMIC == 1
+    InterlockedAdd(typed_output[1], 7, old);
+#elif TYPED_BUFFER_ATOMIC == 2
+    InterlockedAnd(typed_output[1], 7, old);
+#elif TYPED_BUFFER_ATOMIC == 3
+    InterlockedOr(typed_output[1], 7, old);
+#elif TYPED_BUFFER_ATOMIC == 4
+    InterlockedXor(typed_output[1], 7, old);
+#elif TYPED_BUFFER_ATOMIC == 5
+    InterlockedMin(typed_output[1], 7, old);
+#elif TYPED_BUFFER_ATOMIC == 6
+    InterlockedMax(typed_output[1], 7, old);
+#elif TYPED_BUFFER_ATOMIC == 7
+    InterlockedExchange(typed_output[1], 7, old);
+#elif TYPED_BUFFER_ATOMIC == 8
+    InterlockedCompareExchange(typed_output[1], 7, 9, old);
+#elif TYPED_BUFFER_ATOMIC == 9
+    InterlockedCompareStore(typed_output[1], 7, 9);
+    old = typed_output[1];
+#else
+#error Unknown typed buffer atomic operation
+#endif
+    output[0] = asuint(old);
+    return;
+#endif
 #if defined(TYPED_BUFFER_UAV)
 #if defined(TYPED_BUFFER_SCALAR)
     if (phase == 10) {

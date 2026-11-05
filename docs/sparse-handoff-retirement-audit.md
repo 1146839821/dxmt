@@ -4018,3 +4018,152 @@ NOT_RUN this docs-only audit. No performance claim; no production hot-path chang
   Original .gitignore remains unstaged and byte-identical to entry. Delivery is a
   focused docs commit following repository history; no push. Exact resulting SHA,
   file hashes and final Git state are in E30 delivery-manifest.json.
+
+## E35 — MSC typed-buffer atomic rejection contract (2026-11-05)
+
+**Task summary / status.** N05, one validation slice. Preserve the opt-in
+sidecar boundary for unsupported integer typed-buffer atomics. No production
+behavior, capability, runtime ABI or resource backend changes. Gates 0–4 complete for this validation slice;
+typed-buffer atomic execution itself remains unsupported with the sidecar gate.
+
+**Baseline evidence.** Target `feat/d3d12` at
+`07babfd02384cbd6fa9e7a1a07e0e9d9201572fa`; cached origin ahead/behind 29/0
+(no target remote refresh). Only the pre-existing `.gitignore` edit was present.
+Mullion HEAD was rechecked using ls-remote and remains
+`93de32b9145885ceb2e45be7d445e56d62499b3c`. Reference source is pinned to that SHA.
+Apple M1 Max / Apple7, macOS 27.2 (26B123), Xcode 27.2 (27B52), Metal 32023.922;
+isolated runtime Wine 11.0, build-time DXC launcher Wine 8.17. Compiled MSC SDK
+API 4.0.3; runtime product version is not dynamically queried. The independent
+MSC CLI reports 4.0.3. The runtime dylib SHA256 is
+`cc487a757f431c83483346c06a3ae8558910ecc510ce59b1e4f905d5d6d72bd4`.
+
+**Gate 0 findings and source evidence.**
+
+| Evidence type | Anchor | Finding |
+| --- | --- | --- |
+| SPEC_REQUIRED | retained ms-interlocked-add.source:779-792; ms-interlocked-compare-exchange.source (Remarks) | Integer UAV Interlocked operations are valid HLSL contracts; original-value outputs matter. Interlocked does not itself imply a memory fence. Explicit backend refusal is a functional gap, not conformance. |
+| SOURCE_AUDIT | src/airconv/transforms/msc_typed_buffer_sidecar.cpp:61-74,76-142 | The allowed global atomic add takes an address-space-1 buffer pointer. Typed-buffer texture atomic calls fall outside the read/write/width whitelist and cause collection to fail. |
+| SOURCE_AUDIT | same file:225-257,285-332 | Mutation follows a complete successful collection pass. Refusal must leave earlier supported operations untouched. The load/store NULL guard is not an atomic-return-value or compare-exchange implementation. |
+| SOURCE_AUDIT | src/airconv/msc_typed_buffer_metallib.cpp:13-69; src/winemetal/unix/metalirconverter.c:776-810; src/d3d12/d3d12_pipeline_compute.cpp:114-153 | Unsupported transform status 2 crosses the existing thunk as a successful transport result with no patched output; compute PSO returns E_NOTIMPL. No fallback to the unpatched library is taken with the gate enabled. |
+| MULLION_SOURCE_OBSERVED | pinned mullion-builder.source:114-219,222-293 | Texture atomics use dedicated texture AIR intrinsics; signed min/max and compare-exchange handling differ from buffer-pointer atomics. Mullion is a semantic/reference boundary, not a drop-in MSC sidecar implementation. No code was ported. |
+| LOCAL_CONVERSION_OBSERVED | conversion-matrix.json and typed_buffer_atomic_*.cs.ll | All 18 real DXIL fixtures convert successfully using the installed MSC CLI, targeting Apple7/macOS14.0. This is independent offline conversion evidence; runtime PSOs target macOS27.2 and use their actual root signature. No claim of binary equivalence between those configurations. |
+
+Observed AIR families are `air.atomic_*_explicit_texture_buffer_1d.*.v4i32`:
+
+| HLSL operation | Observed family / signedness |
+| --- | --- |
+| Add / And / Or / Xor | fetch_add / fetch_and / fetch_or / fetch_xor, u for int and uint |
+| Min / Max | fetch_min / fetch_max, s for int and u for uint |
+| Exchange | exchange, u for int and uint |
+| CompareExchange / CompareStore | compare_exchange_weak, s/u; i1 result plus expected-value vector pointer; CompareStore also performs a typed read in this fixture |
+
+**Gate 1 Design Card.**
+
+```text
+GOAL: Preserve explicit, observable refusal of unsupported sidecar atomics.
+BASELINE: 07babfd0; existing collect -> metallib API -> thunk -> compute PSO owner.
+SCOPE: Nine int/uint HLSL fixtures, PSO refusal, unchanged-IR/no-output regression.
+NON-SCOPE: Atomic implementation, graphics/counters/NULL atomic semantics, capability promotion.
+ARCHITECTURE: Reuse existing HLSL, executable, runner and transform test; no new production module.
+PROPOSAL: Test actual converted AIR and exact UNSUPPORTED -> E_NOTIMPL propagation.
+SELECTION: Existing rejection already holds; avoid an unnecessary production policy rewrite.
+PERF: No production allocation, scan, lock, encoder boundary or cache-key change.
+PROOF: Real PSO rejection, wrong-expectation controls and adjacent exact GPU readback.
+RISKS: Refusal does not establish GPU atomic semantics; future ABI changes must be reviewed.
+ROLLBACK: Revert this focused test/documentation commit.
+DONE: Full x64 build, targeted tests, final loaded identities, clean scoped diff, commit/no push.
+```
+
+**Gate 2 changed files.**
+
+- `tests/dx12/texture_sampler.hlsl:36-66`: nine atomic compile variants; preserve the existing load/store body.
+- `tests/dx12/meson.build:913-924`: 18 optional real DXIL fixtures, uint/sint; not default-build shader workload expansion.
+- `tests/dx12/dx12_texture_sampler.cpp:329,387,842-856`: refusal mode requires E_NOTIMPL, no PSO and a healthy device, then exits before command-list creation/submission.
+- `tests/dx12/run_r32_typed_uav.py:30,57-61,90-98,134-135,163-166,197-208`: reuse identity/validation checks; require explicit status 2, report case_pass separately and readback_pass=false for atomic rejection.
+- `tests/airconv/test_msc_typed_buffer_experiment.py:257-276`: 22 cases cover the 11 observed AIR signatures, both unchanged-module and no-published-output checks. Existing global pointer atomic positive cases remain. These are synthetic IR tests, not GPU results.
+- This report: design, evidence, outcomes, limits and next slice.
+
+**Gate 3 validation — LOCAL_PASS for the bounded refusal contract.**
+
+| Check | Result / evidence |
+| --- | --- |
+| Final x64 release default-target full build | PASS, build-final.log; existing LifetimeMarker destructor warning remains |
+| Eighteen optional DXIL fixtures | PASS, fixtures-build.log; nine HLSL operations × uint/sint |
+| Real MSC CLI conversion / parsed AIR | 18/18 PASS, conversion-matrix.json; conversion success is not GPU correctness |
+| Final production-gate-enabled PSO refusal | 18/18 expected E_NOTIMPL, no PSO, healthy device, no command-list submission; final/*/summary.json |
+| Existing scalar typed-buffer load/store | 3/3 exact GPU output/guards/OOB checks PASS, float/uint/sint |
+| Existing NULL UAV read/discard | 3/3 exact GPU output/discard/guards PASS |
+| NULL-to-live post-Close update | 3/3 exact GPU readback PASS |
+| Live-to-NULL post-Close update | 3/3 expected pre-submission rejection; 1024-byte readback guard unchanged, not a positive GPU execution result |
+| Wrong expectation: atomic shader with gate off | Expected exit1: PSO S_OK, refusal oracle fails; no GPU submission |
+| Wrong expectation: non-atomic shader with gate on | Expected exit1: PSO S_OK, refusal oracle fails; no GPU submission |
+| Existing metallib API test + transform suite | Two Meson tests PASS; transform suite 106 cases including 22 new typed-atomic cases, transform-testlog.txt |
+| Scoped C++ formatting / Python AST syntax / git diff --check | PASS; no unrelated formatting; no generated repository cache |
+| Windows native / live Mullion / other GPU / atomic GPU execution / graphics / x86 | NOT_RUN; no corresponding conformance or execution claim |
+
+Final main matrix has 30 processes: 18 PSO-refusal processes, nine positive GPU
+readback processes and three guarded submission rejections. Two separate negative
+controls bring total final runtime processes to 32. Every final process has verified
+PE/Unix build-stage pairing and actual loaded identities, with Metal API and GPU
+Validation enabled and no detected validation errors. GPU validation being enabled
+in a refused PSO process does not imply a shader ran. The runner's legacy
+readback_pass field still represents scenario success for the inherited late-NULL
+guard case; delivery-audit.json explicitly classifies those three as submission
+rejections. The new atomic cases record readback_pass=false and a refusal oracle.
+
+Initial offline probing used an incorrectly cased Apple7 CLI option; the CLI
+refused it before conversion. Final 18-case conversion uses the correct Apple7
+spelling. One preliminary runtime batch stopped on a stage/build mismatch after
+a formatting rebuild, before executing the next case. Final full matrix was rerun
+after stage refresh. Pre/post-format PE differences are limited to .buildid; all
+other sections are identical (format-section-equivalence.json). Preliminary
+results are retained separately and not counted as final. A failed reference URL
+for Mullion operations was corrected to src/airconv/air_operations.cpp;
+sources.json records the successful pinned source and hashes.
+
+Reproduction uses the existing runner, for example:
+
+```sh
+python3 tests/dx12/run_r32_typed_uav.py \
+  --build /Users/zhangbo/Documents/Vibe-Codeding/dxmt-test/n95-capability-gate/dxmt-metal272-identity-audit-20261104 \
+  --stage /Users/zhangbo/Documents/Vibe-Codeding/dxmt-test/n95-capability-gate/stage-typed-atomic-contract-20261105 \
+  --prefix /Users/zhangbo/Documents/Vibe-Codeding/dxmt-test/n95-capability-gate/prefix-null-view-identity-20261105 \
+  --converter /usr/local/lib/libmetalirconverter.dylib \
+  --buffer --scalar --production-gate --atomic compare-exchange \
+  --output /absolute/path/to/new-result-directory
+```
+
+External evidence root:
+`/Users/zhangbo/Documents/Vibe-Codeding/dxmt-test/n95-capability-gate/result-typed-atomic-contract-20261105`.
+It contains design-card.txt, sources.json, pinned reference text, conversion-matrix.json,
+real AIR, build logs, transform-testlog.txt, runs-final.json, final/*/summary.json,
+negative-controls.json, delivery-audit.json, validated-source.json and the final
+delivery-manifest.json. All orchestration, generated shaders, outputs and helper
+programs remain outside the repository.
+
+**Capability impact / remaining blockers.** No Feature Level, Shader Model, Tier,
+format support, Metal3/Metal4 selection or D3D11 production behavior is changed.
+The sidecar stays default-off. MSC_SEMANTIC_GAP here means DXMT's sidecar lacks
+index/length, NULL-result/discard, return-value/CAS-loop and alias/coherence proof
+for typed texture atomics; it does not mean MSC cannot convert the HLSL.
+NULL/unmapped atomic results and cross-stage/cache coverage remain SPEC_UNVERIFIED.
+M1 Max is an available Placement Sparse target, not BLOCKED_BY_HARDWARE.
+Windows native, live Mullion execution and other-GPU comparison are NOT_RUN /
+TARGET_DEVICE_NOT_AVAILABLE in this slice. No throughput claim is made; there
+is no production hot-path change to benchmark in this test-only slice.
+
+**Gate 4 / Git state.** Reviewed final changes: five existing test/build files plus
+this report; no src production file changed. No persistent ABI/cache migration,
+licensing port or alternate ownership mechanism. Scope is independently revertible.
+The staged set excludes the original `.gitignore` edit, whose SHA256 remains
+764aac09922db4654ca6de63fd20cf014739d9292623eb979f448f38e609b759.
+Commit this focused slice using the existing test(d3d12) convention; no push.
+The external delivery manifest records the final commit, source hashes and Git
+state. After commit, only `.gitignore` is expected unstaged, with no staged or
+untracked files. Runtime binaries were built from the matching pre-commit source
+tree; their version stamp is not rebuilt after commit.
+
+**Next recommended slice.** N07: validate sidecar-enabled versus disabled PSO
+cache/pipeline-library isolation and failure-not-poisoning using existing pipeline
+persistence probes, keeping the opt-in gate and capability declarations unchanged.
+Do not start atomic execution or broad resource-backend replacement from this refusal result.
