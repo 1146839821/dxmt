@@ -108,20 +108,21 @@ and does not justify another unchanged local MS_LOAD or Submit timing matrix.
   [consumer audit and Design Card](sparse-handoff-retirement-audit.md#public-buffer-plan-activation-consumers--n15-audit-2026-11-05).
   Both resource types now have common issue under the existing controlled switch;
   mixed readback/capacity/error and paused raw consumers pass. **Default activation
-  remains HELD:** baseline and candidate fail actual sparse typed SRV native view
-  and MSC sparse counter texture creation. No partial buffer-only activation or
-  capability promotion. See [controlled delivery / activation hold](sparse-handoff-retirement-audit.md#common-native-sparse-issue--controlled-delivery-and-activation-hold-2026-11-05)
+  remains HELD:** the earlier baseline/candidate fail sparse typed SRV native view
+  and MSC sparse counter texture creation without page metadata. No partial
+  buffer-only activation or capability promotion. See [controlled delivery / activation hold](sparse-handoff-retirement-audit.md#common-native-sparse-issue--controlled-delivery-and-activation-hold-2026-11-05)
   for exact evidence, costs, limits and next native-view Design Card.
-  Native Metal follow-up confirms real M1 Max 64KiB sparse raw map/NULL/remap
-  readback, but R32Uint read/atomic buffer texture views return nil before/after
-  mapping while ordinary controls pass. This is not an Apple7 placement-sparse
-  hardware blocker; universal native compatibility remains SPEC_UNVERIFIED.
-  Typed descriptor publication now preflights native texture/ID and preserves the
-  previous descriptor on failure (2026-11-05 publication-guard slice). This is
-  containment, not typed-sparse support: MSC counter ABI and coherent typed-sparse
-  representation remain separate OPEN blockers. Null typed GPU execution and
-  post-COM-release residency are unproven; see the retained red diagnostics.
-  See [native buffer-view contract audit](sparse-handoff-retirement-audit.md#sparse-buffer-texture-view-contract--n15n09-audit-2026-11-05).
+  E28 corrects the broad E26 blocker: adding matching placementSparsePageSize to
+  the existing buffer-backed texture API passes real M1 Max R32Uint typed read/
+  write, atomic/raw alias observation and mapA→mapB→NULL→mapB. Forty positive
+  processes,121 readbacks, omission and one-bit controls; native MSL only.
+  Current DXMT drops this allocation-to-view field: BACKEND_NOT_IMPLEMENTED,
+  not an Apple7 hardware limitation. Actual sparse MSC/AIRCONV typed execution
+  and MSC counters remain UNVERIFIED, rather than a proven fundamental ABI gap.
+  Publication guards remain; default activation stays HELD. Null typed GPU
+  execution and post-COM-release residency remain separate gaps.
+  See [page-size correction and next Design Card](sparse-handoff-retirement-audit.md#sparse-typed-representation--native-page-size-contract-audit-2026-11-05)
+  and the historical [native buffer-view contract audit](sparse-handoff-retirement-audit.md#sparse-buffer-texture-view-contract--n15n09-audit-2026-11-05).
 
 - [x] N09 typed-buffer format admission rejects unsupported native SRV/UAV
   formats before publication. See the 2026-10-27 slice below; BGRA SRV usage,

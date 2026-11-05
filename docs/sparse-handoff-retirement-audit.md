@@ -3078,3 +3078,200 @@ resulting commit, exact worktree state and final evidence hashes after commit.
 - **Rollback/DoD:** read-only report and independently runnable external experiment
   if justified; source/spec/Mullion evidence, one chosen architecture and explicit
   remaining blockers. Implementation requires a concrete next Gate authorization.
+
+## Sparse Typed Representation — Native Page-Size Contract Audit, 2026-11-05
+
+### 1. Task Summary / Gate Result
+
+Gate0/Gate1 and external native validation complete for this read-only production
+slice. **LOCAL_PASS: the existing buffer-backed texture API represents an R32Uint
+placement-sparse buffer on the actual M1 Max when its texture descriptor carries
+the matching placementSparsePageSize.** No production implementation, shader ABI,
+capability, mapping scheduler or default activation changes.
+
+This corrects the broad interpretation of E26 and the preceding E27 blockers.
+Their nil-view observations remain valid for descriptors omitting the page field;
+they do not establish an Apple7 hardware limitation, an impossible native
+representation, or a need to replace the MSC counter ABI. Current source drops
+this metadata. Production integration and converter-generated execution remain OPEN.
+
+### 2. Baseline Evidence
+
+- Target: feat/d3d12 at12c08e6d772c6a215e95f7c4078773282b59f725; cached origin
+  0 behind/22 ahead at entry, not fetched. Original .gitignore alone dirty.
+- Live Mullion HEAD/main rechecked as93de32b9145885ceb2e45be7d445e56d62499b3c.
+  This slice uses reference source only, copies no code and changes no licensing.
+- Actual host: Apple M1 Max, Apple7=true, Apple8=false, Metal4=true,
+  supportsPlacementSparse=true, sparse-buffer tier1. Queried64-page size65536
+  bytes; R32Uint texture-buffer offset alignment16. macOS27.2/26B123,
+  Xcode27.2/27B52. No capability mocks.
+- E28: /Users/zhangbo/Documents/Vibe-Codeding/dxmt-test/n95-capability-gate/result-sparse-typed-representation-20261105.
+  final-runs.json, final-summary.json and independent-audit.json hold final proof.
+  Native probe loads system Metal/Foundation, no WineMetal or MSC. It establishes
+  neither converter runtime product version nor D3D12 execution.
+- Final native source SHA256:
+  9b916e47321af19cc8c9615c872372a1b17e256fcb07ab4039ddf5441dd84803;
+  executable8636f062b38377216e32bc9a3983f37ce55fbc5404bf3f34a7d48968666a27d4.
+  All44 logs match executable UUID32A05733-C6FE-3C37-B2FF-530184A1033A,
+  AGXMetalG13X UUID79D56015-6C6E-3021-B27B-3D0D4EF1472E and
+  IOGPU UUID6FFD96F3-6ACD-3246-8BC4-2B4CAD23D86D.
+
+### 3. Findings / Source Evidence
+
+| Evidence type | Source and lines | Conclusion / limit |
+| --- | --- | --- |
+| SPEC_REQUIRED, Apple SDK | E28/MTLTexture.h:253–263; apple-sparse-page.source | placementSparsePageSize defaults0; nonzero selects placement-sparse storage with compatible placement heap pages. MTLSparsePageSize64 is enum102, not64 bytes (MTLResource.h:197). |
+| SPEC_REQUIRED, Apple API | E28/MTLBuffer.h:62–66; apple-make-buffer-view.source | newTextureWithDescriptor:offset:bytesPerRow: creates a texture sharing buffer storage. Format/alignment/storage constraints apply. Documentation warns against assuming within-pass coherence without appropriate synchronization. |
+| SPEC_REQUIRED, distinct alias contract | E28/MTL4CommandQueue.h:419–420 | Independently created sparse buffer/texture resources sharing tiles do not provide meaningful views of each other's layout. This does not prohibit the documented buffer-backed texture API; shared tiles alone are not an equivalent representation. |
+| SOURCE_AUDIT, DXMT | src/dxmt/dxmt_buffer.cpp:32–55; src/dxmt/dxmt_buffer.hpp:159–178 | Allocation creates a sparse buffer using WMTSparsePageSize64 but retains no creation-page enum for views. |
+| SOURCE_AUDIT, DXMT | src/dxmt/dxmt_buffer.cpp:118–158 | prepareAllocationViews zero-initializes WMTTextureInfo and creates an ordinary buffer-texture descriptor without sparse page metadata. Existing view owner/cache can remain. |
+| SOURCE_AUDIT, DXMT | src/winemetal/winemetal.h:525–544; src/winemetal/unix/winemetal_unix.c:276–288,345–358 | Texture info contains a reserved slot; buffer newTexture does not set placementSparsePageSize. Dedicated sparse texture creation explicitly sets it at332. |
+| SOURCE_AUDIT, MSC ABI | include/metal_shader_converter/metal_irconverter_runtime.h:127–135,803–832; src/d3d12/d3d12_descriptor_heap.cpp:558–586 | Typed access needs a real texture ID; MSC counter uses a one-word R32Uint atomic view. Existing object representation fits the descriptor structure; actual sparse MSC execution remains UNVERIFIED. |
+| SOURCE_AUDIT, ordinary safety | src/dxmt/dxmt_texture.cpp:58–70; src/d3d11/d3d11_resource_helper.cpp:300–465; src/dxmt/dxmt_presenter.cpp:24–35 | TextureAllocation copies caller descriptors. D3D11 helper/presenter do not initialize every reserved field. Globally interpreting old reserved bytes risks reading garbage and regressing D3D11. |
+| LOCAL_PASS, native layout only | E28/layout.cpp and compiled layout probe | Current arm64 WMTTextureInfo: size48, reserved offset32, mach_port36, gpu_resource_id40. PE x64/x86 layout NOT_RUN; next implementation needs explicit layout checks. |
+| MULLION_SOURCE, not MULLION_OBSERVED | E28/mullion-winemetal-h.source:548; mullion-winemetal.source:337–349,385–397 | Mullion has placement_sparse_page_size and forwards it to the descriptor. Presence of bridge support alone does not prove a caller supplies it. |
+| MULLION_SOURCE, not MULLION_OBSERVED | E28/mullion-buffer.source:172–211 | Its typed view producer zero-initializes texture info but does not assign sparse page size. No successful Mullion sparse typed runtime result is established. |
+
+E28/online-sources.json records exact Apple/GitHub URLs and hashes; sdk-sources.json
+records installed header paths/hashes. Failed lookups remain failed evidence.
+Microsoft reserved-resource semantics and existing N15 mapping contracts remain
+those audited in preceding sections. Native API success is not D3D12 Tier proof.
+
+### 4. Design Decisions / Alternatives
+
+Choose the existing MTLBuffer buffer-backed texture object API with matching sparse
+page metadata. It preserves BufferAllocation/BufferView ownership, object residency,
+MSC/AIRCONV descriptors and Metal3 consumer encoders. No new pool, shadow copy or
+raw-pointer counter substitution is needed for this tested native representation.
+
+Also examined MTLTextureViewPool's documented buffer-view API
+(E28/MTLTextureViewPool.h:48–66, apple-buffer-pool.json). Without the page field,
+nonzero IDs still produced zero sparse typed reads while raw reads were correct;
+atomic updates did not reach raw data. Refresh alone failed. With the field,
+map/remap readback passed. Nonzero resource ID is insufficient evidence. Reject
+pool migration here: existing object API works without a second slot/lifetime
+owner. No general pool correctness or performance claim.
+
+### 5. Changed Files / Evidence Ownership
+
+Only this report and docs/D3D12_RESOURCE_AUDIT_CHECKLIST.md change. Production code,
+repository tests, bridge ABI, SDK headers and build configuration remain unchanged.
+Native probes and orchestration reside externally in E28. The checklist points
+to this correction and retains links to historical red evidence.
+
+### 6. Validation Results / Test Matrix
+
+Build: xcrun clang++ -std=c++20 -fobjc-arc typed_view_final.mm -framework Foundation
+-framework Metal -o typed-view-final; run python3 E28/run_final.py. Exact argv,
+seed, extras, exit, log and executable hashes are stored per process. All44 enable
+MTL_DEBUG_LAYER=1, MTL_SHADER_VALIDATION=1,
+MTL_SHADER_VALIDATION_REPORT_TO_STDERR=1 and DYLD_PRINT_LIBRARIES=1. Independent
+audit confirms identities, actual validation activation, real completed Metal3
+command-buffer status and no audited invalid-use/assertion/shader-error/address-
+fault/aborted-command diagnostics.
+
+| Final case | Processes | Result / exact scope |
+| --- | ---: | --- |
+| Ordinary/sparse × offsets0/4096/8192 × typed read/atomic × two seeds |24| LOCAL_PASS, full raw data, typed results and guards. |
+| Sparse width1 at0/4096/8192; page crossing65520 width1024; end edge131056 width1; read/atomic |10| LOCAL_PASS; one-word native counter-shaped views are not actual MSC counters. |
+| View created before mapping, width1 at0/4096/8192 |3| LOCAL_PASS through subsequent mappings with the same view. |
+| Ordinary/sparse plain typed read/write |2| LOCAL_PASS prior typed value and incremented raw observation. |
+| Tracked sparse counterpart |1| LOCAL_PASS; other positives are untracked with explicit ordering. |
+| Omit sparse descriptor page, read/atomic |2| Expected exit2/nil view, clean raw readback. Typed execution NOT_RUN, not PASS. |
+| Wrong expected last raw word, ordinary/sparse |2| Expected exit1, exactly one mismatch/process; typed results/guards clean. |
+
+Totals:40 positive processes,121 successful readback phases,4,043,820 data words,
+3,872 guards; omission controls and one-bit negatives counted separately.
+RESULT.raw_pass aggregates raw+typed+guard checks despite its name; use separate
+READBACK.raw_bad/view_bad/guard_bad for distinct proof.
+
+Sparse buffer length is two64KiB pages. Two heaps contain different changing-seed
+patterns. Each sparse process checks mapA → mapB → NULL → mapB with one stable
+view. Atomic/plain typed write precedes explicit buffer+texture memoryBarrier and
+raw observation in the same encoder; remapB verifies the earlier B increment
+survives unmap. Mapping uses MTL4 queue operations plus resource-alias visibility
+barrier and bounded shared-event CPU drain before the Metal3 consumer queue.
+Initialization and all consumer buffers check real completion/error absence.
+
+This conservative cross-queue order does not prove asynchronous D3D12 submission,
+GPU overlap or optimized barriers. Heaps/resources/views/residency sets stay alive
+through completion. This is not early COM release, pending descriptor mutation,
+raw sparse-VA shader write→typed read, racing alias or all-format proof. NULL
+mapping is not NULL descriptor. Prior null-descriptor/post-COM-release reds remain.
+
+Full DXMT build, WineMetal PE/Unix execution, AIRCONV/MSC sparse typed/counter
+execution, D3D11 GPU regression, x86, Windows native, live Mullion, other GPUs:
+NOT_RUN this slice. Performance NOT_MEASURED; process durations include compile,
+validation and CPU drains and are not benchmarks.
+
+Retained exploration: missing-page pool failures, original nil controls, initial
+external compile failure and failed URLs. Initial pool diagnostic printed a
+literal status4 for MTL4 work; do not cite as measured status. Corrected v2 reports
+actual shared-event completion; final object probe reads real Metal3 status.
+Delivery-audit command quoting failed before corrected independent verification;
+these are neither GPU failures nor extra positive runs.
+
+### 7. Capability Impact / Reclassified Blockers
+
+| Classification | Current conclusion |
+| --- | --- |
+| BACKEND_NOT_IMPLEMENTED | Actual production allocation-to-view page metadata propagation is missing. The broad coherent-representation blocker narrows to this bridge gap plus end-to-end validation. |
+| MSC integration UNVERIFIED | One-word native atomics pass; a fundamental MSC_SEMANTIC_GAP is no longer established as the cause of this failure. Actual sparse Append/Consume conversion, descriptor ABI, synchronization and lifetime remain untested. |
+| SPEC_UNVERIFIED | All legal formats, raw-write→typed-read direction, alias/lifetime variants, Tier requirements and asynchronous production order remain incomplete. |
+| BACKEND_NOT_IMPLEMENTED / investigation required | Earlier null typed GPU binding red; post-COM-release residency remains an ownership investigation, not hardware proof. |
+| TARGET_DEVICE_NOT_AVAILABLE | Windows/other GPU runtime comparisons unavailable; live Mullion NOT_RUN. The available M1 Max is never BLOCKED_BY_HARDWARE for placement sparse. |
+
+No FL/SM/Tier/Options changes. Default common native issue remains HELD. Metal3
+shadow backing, D3D11 and MSC runtime compatibility remain unchanged. Native R32Uint
+LOCAL_PASS is not public reserved-buffer support or promotion evidence.
+
+### 8. Regression Risks / Rollback
+
+No production delta. Preserve failure-before-publication guards. Future code must
+not interpret uninitialized descriptor bytes or infer allocation sparsity from
+device family. SDK/runtime availability and paired bridge images remain necessary.
+Revert this documentation-only commit independently; retain negative evidence.
+No shared Wine prefix/cache/build removal or backend replacement.
+
+### 9. Git State / Delivery Audit
+
+Commit only the two intended documents with repository-style subject, no push.
+E28/delivery-manifest.json records resulting HEAD, status and artifact/report
+hashes. Independent audit verifies eight inspected production files equal baseline
+bytes. Original .gitignore SHA256 remains
+764aac09922db4654ca6de63fd20cf014739d9292623eb979f448f38e609b759.
+
+### 10. Next Recommended Slice — Page Propagation Design Card
+
+- **Goal/baseline:** close the creation-page→view metadata gap using E28 proof;
+  default activation stays held until actual controlled D3D12 consumers pass.
+- **Boundary/scope:** retain immutable actual page enum in BufferAllocation and use
+  it for both allocation and views; ordinary allocations carry0. Existing resource
+  and view owners, shader ABI and mapping scheduler remain authoritative.
+- **Bridge:** give the existing32-bit reserved slot explicit buffer-view page
+  semantics with unchanged byte layout/call ordinals. Interpret only in
+  MTLBuffer_newTexture under SDK/runtime guards; leave generic descriptor filling
+  unchanged. Both current callers initialize it: Buffer::prepareAllocationViews
+  sends allocation value; ordinary TextureAllocation explicitly sends0. Imported
+  descriptor output stays0. Do not copy Mullion's global interpretation blindly.
+- **ABI gate:** native arm64 size48/offset32 measured; check native/PE x64 and x86
+  when available. Audit callers/field renames first. An old bridge ignoring metadata
+  must fail safely through the existing view guard, never be claimed sparse-success
+  compatible. Use matched PE/Unix. Unsupported/invalid page gets no ordinary fallback.
+- **Tests:** extend existing controlled reserved-buffer/descriptor/counter probes,
+  no new runner. Baseline failure/candidate typed SRV/UAV success plus actual MSC
+  Append/Consume at4096/8192; raw/payload/counter/guard oracles through map/remap/
+  NULL/reuse. AIRCONV where fixtures exist, wrong-value negatives, ordinary typed/
+  counter, D3D11 buffer-backed texture smoke and existing raw/texture/mixed regressions.
+  Keep legal success-oracle resources alive; record remaining lifetime gaps.
+- **Build/cost:** isolated .github/build_dxmt.sh-equivalent full x64 build, validation,
+  prefix/cache and actual image/PE-Unix identity checks. Measure allocation/view
+  record size and ordinary publication A/B cost if state touches that hot path;
+  no unmeasured performance claim.
+- **Non-scope/risks:** no activation/promotion, broad D3D11 cleanup, all-format proof,
+  view-pool migration, MSC rewrite or scheduler replacement. Metadata success does
+  not close residency/null-descriptor/asynchronous mapping obligations.
+- **Rollback/DoD:** independently revert focused metadata/bridge/test changes. Require
+  ordinary initialization safety, layout/build proof, real D3D12 typed/counter
+  evidence and unchanged public capability assertions. Gate1 ready; stop before
+  Gate2 production implementation until next slice is authorized.
