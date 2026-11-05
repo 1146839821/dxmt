@@ -69,6 +69,12 @@ bool CheckLibrarySDK(ID3D12Device1 *device,
     auto stale = serialized;
     for (unsigned i = 0; i < 4; ++i)
       stale[sdk_offset + i] = BYTE(incompatible >> (8 * i));
+    if (!CheckHR("Validate library with incompatible SDK",
+                 device->CreatePipelineLibrary(stale.data(), stale.size(),
+                                               __uuidof(ID3D12PipelineLibrary1),
+                                               nullptr),
+                 D3D12_ERROR_DRIVER_VERSION_MISMATCH))
+      return false;
     auto *sentinel = reinterpret_cast<ID3D12PipelineLibrary1 *>(uintptr_t(1));
     auto *rejected = sentinel;
     const HRESULT hr = device->CreatePipelineLibrary(stale.data(), stale.size(),
@@ -84,6 +90,53 @@ bool CheckLibrarySDK(ID3D12Device1 *device,
               << std::dec << " output=null\n";
   }
   return true;
+}
+
+bool CheckLibraryValidation(ID3D12Device1 *device,
+                            const std::vector<BYTE> &serialized) {
+  auto check = [&](const char *name, const void *data, SIZE_T size, REFIID iid,
+                   HRESULT expected) {
+    const HRESULT dry = device->CreatePipelineLibrary(data, size, iid, nullptr);
+    if (!CheckHR(name, dry, expected == S_OK ? S_FALSE : expected))
+      return false;
+    auto *sentinel = reinterpret_cast<IUnknown *>(uintptr_t(1));
+    auto *created = sentinel;
+    const HRESULT hr = device->CreatePipelineLibrary(
+        data, size, iid, reinterpret_cast<void **>(&created));
+    const bool output_valid =
+        expected == S_OK ? created && created != sentinel : created == nullptr;
+    if (created && created != sentinel)
+      created->Release();
+    if (!CheckHR(name, hr, expected) || !output_valid)
+      return false;
+    std::cout << "PERSISTENCE_VALIDATE case=" << name << " dry=0x" << std::hex
+              << static_cast<unsigned long>(dry) << " create=0x"
+              << static_cast<unsigned long>(hr) << std::dec << " passed\n";
+    return true;
+  };
+  const auto iid = __uuidof(ID3D12PipelineLibrary1);
+  if (!check("empty", nullptr, 0, iid, S_OK) ||
+      !check("zero-size", serialized.data(), 0, iid, S_OK) ||
+      !check("populated-base", serialized.data(), serialized.size(),
+             __uuidof(ID3D12PipelineLibrary), S_OK) ||
+      !check("populated", serialized.data(), serialized.size(), iid, S_OK) ||
+      !check("null-data", nullptr, serialized.size(), iid, E_INVALIDARG) ||
+      !check("truncated", serialized.data(), serialized.size() - 1, iid,
+             E_INVALIDARG))
+    return false;
+  auto malformed = serialized;
+  malformed[0] ^= 0xff;
+  if (!check("magic", malformed.data(), malformed.size(), iid, E_INVALIDARG))
+    return false;
+  malformed = serialized;
+  malformed.back() ^= 1; // Corrupt a record's token, not just its header.
+  if (!check("record", malformed.data(), malformed.size(), iid, E_INVALIDARG))
+    return false;
+  malformed = serialized;
+  malformed.push_back(0);
+  if (!check("trailing", malformed.data(), malformed.size(), iid, E_INVALIDARG))
+    return false;
+  return check("recovery", serialized.data(), serialized.size(), iid, S_OK);
 }
 
 bool
@@ -939,6 +992,8 @@ main(int argc, char **argv) {
     return fail("library serialization was not deterministic");
   if (!CheckHR("Serialize undersized library", library->Serialize(serialized.data(), serialized.size() - 1), E_INVALIDARG))
     return fail("undersized serialization was accepted");
+  if (!CheckLibraryValidation(device1, serialized))
+    return fail("library validation-only check failed");
   if (!CheckLibrarySDK(device1, serialized))
     return fail("library SDK compatibility check failed");
 

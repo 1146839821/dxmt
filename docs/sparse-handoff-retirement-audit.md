@@ -4482,3 +4482,141 @@ source; no post-commit rebuild merely to change the Git version stamp.
 validation-only mode: null output validates and returns S_FALSE on a valid
 library. Cover valid/invalid/SDK-mismatch API cases and existing recovery readback;
 retain current persistence/capability gates and backend architecture.
+
+## E38 — CreatePipelineLibrary validation-only contract (2026-11-05)
+
+**Task summary / Gate 0.** N07, one factory/publication slice after E37.
+Baseline feat/d3d12 at 0e7a5782e828876e0c2d69b4feccb1554190955d, ahead32/
+behind0; only the original .gitignore edit dirty. Read-only ls-remote checks:
+origin matches cached 85a44a0c6555398c278fc1dc48a78f4cfea7a295; Mullion HEAD
+93de32b9145885ceb2e45be7d445e56d62499b3c. No fetch/push. CodeGraph used before
+source inspection; architecture/master and N07 boundaries retained.
+
+Environment rechecked: Apple M1 Max/Apple7, macOS27.2 26B123, Xcode27.2 27B52,
+Metal32023.922, private Wine11.0 stage/prefix. Existing x64 release build uses
+build_dxmt.sh feature configuration plus tests and patched LLVM15.0.7. Compiled
+MSC SDK API4.0.3; runtime product version unknown. Dylib SHA256:
+cc487a757f431c83483346c06a3ae8558910ecc510ce59b1e4f905d5d6d72bd4.
+
+**Findings / evidence.**
+
+| Type | Source / evidence | Conclusion |
+| --- | --- | --- |
+| SPEC_REQUIRED | retained ms-create-library.source:831 | Null output still validates the blob; a valid result is S_FALSE while avoiding creation of the actual library. |
+| LOCAL_FAIL reproduced | baseline/stdout.log; baseline-result.json | Unchanged production DLL returns0x80004003 for valid empty blob/null output, expected0x1; probe fails after three successful GPU readbacks. Actual loaded export bytes/paths and Metal validation checked. |
+| SOURCE_AUDIT | baseline src/d3d12/d3d12_pipeline_persistence.cpp:1667-1681; src/d3d12/d3d12_device.cpp:2049-2051 | Device forwards to the single factory; factory rejects null output before parsing. |
+| MULLION_SOURCE_OBSERVED | pinned mullion-d3d12_pipeline_compute.cpp.source:415-427 | Mullion runs its existing initializer then returns S_FALSE for null output. Its LLVM compiled-shader payload and transient object construction are not ported. |
+
+**Gate 1 Design Card.**
+
+    GOAL: Null output validates fully and returns S_FALSE only for valid input.
+    BASELINE: 0e7a5782, N07; original .gitignore edit preserved.
+    EVIDENCE: Microsoft optional-output contract and real E_POINTER failure.
+    SCOPE: Existing deserialize, factory publication and existing persistence probe.
+    NON-SCOPE: New cache/format, adapter identity, sidecar payload or capabilities.
+    BOUNDARY: One parser/owner; validated entries temporary until actual creation.
+    PLAN: Share static deserialize; create COM object only when output requested.
+    PROOF: Baseline failure; paired valid/invalid calls; SDK mismatch; GPU recovery.
+    PERF: Full parse retained, no draw/submit work; avoid validation-only COM object.
+    RISKS: Error-path consistency, temporary allocations, existing format limitations.
+    ROLLBACK: Revert focused commit, no persistent migration.
+    DONE: Build, API/GPU/adjacent proof, delivery audit, commit without push.
+
+**Gate 2 / design decisions and changed files.**
+
+- src/d3d12/d3d12_pipeline_persistence.cpp:1027-1032 keeps entries in the same
+  owner, moving validated entries into its constructor. :1190-1256 makes the
+  existing initializer a static Deserialize accepting the device and temporary
+  entry output; all field, token, name and trailing-byte checks remain shared.
+  Temporary parsed entries publish only on complete parse success.
+  :1671-1688 clears an optional output, validates first, returns S_FALSE without
+  constructing a COM library for null output, and otherwise constructs/queries
+  the existing implementation. RAII releases temporary data; bad_alloc maps to
+  E_OUTOFMEMORY with no published output. The old initializer's pre-publication
+  mutex acquisition disappears; runtime Store/Load/Serialize locks remain.
+- tests/dx12/dx12_pipeline_persistence.cpp:72-77 adds validation-only SDK mismatch
+  assertions; :95-140 pairs null-output validation and real creation for empty,
+  nonnull zero-size, populated base/library1, null-data/nonzero-size, truncation,
+  invalid magic, corrupt record token, trailing byte and recovery cases.
+  Each creation failure must clear a sentinel output. Existing rehydrate,
+  descriptor/stream and GPU dispatch/draw oracles remain the recovery proof.
+- This report records evidence and limitations; no new file/runner/shader or
+  source port, no duplicate parser or mutable compatibility state.
+
+Rejected the header-only shortcut: corrupted records must fail even when the
+caller requests no library. Rejected constructing a transient COM library merely
+to validate: parsed temporary entries are sufficient, and actual object/device
+ownership begins only in the output-producing path. Validation still does the
+same bounded full parse and temporary allocations as creation; it is not an
+allocation-free or constant-time operation.
+
+**Gate 3 validation — LOCAL_PASS.** Evidence root:
+/Users/zhangbo/Documents/Vibe-Codeding/dxmt-test/n95-capability-gate/result-persistence-validation-20261105.
+Exact commands and environment are retained in run-final.py, runs-all.json and
+build-final.json; the external delivery-audit.json checks raw logs, result fields,
+current source hashes, stage hashes and build/stage byte pairing (129 checks).
+
+| Check | Result | Evidence |
+| --- | --- | --- |
+| Existing x64 release default-target build, meson compile -C dxmt-metal272-identity-audit-20261104 | PASS, exit0 | build-final.json/log |
+| Valid empty blob/null output against baseline production DLL | EXPECTED_FAIL reproduced, E_POINTER instead of S_FALSE | baseline-result.json; three earlier GPU readbacks succeeded |
+| Two ordinary persistence runs and one GS run | PASS, exit0 each | normal-1, normal-2, geometry stdout.log |
+| Paired validation-only / actual creation, ten valid/invalid/recovery cases per primary run | PASS, 30 pairs / 60 API calls total | PERSISTENCE_VALIDATE exact HRESULT markers and failure-output assertions |
+| Two incompatible SDK fingerprints per primary run, paired null-output / creation | PASS, six pairs / 12 API calls total | PERSISTENCE_SDK markers and CheckLibrarySDK assertions |
+| Compute + ordinary/GS graphics persistence recovery | PASS, nine compute + six graphics GPU readbacks | PERSISTENCE_READBACK exact value markers |
+| Adjacent Airconv SM5 graphics | PASS, one exact 0xffffffff readback | airconv-sm5/stdout.log |
+| Patched and serialized sidecar paths, float/uint/sint | PASS, six GPU readback scenarios | sidecar-patched and sidecar-serialized summary.json/raw logs |
+| Wrong-PSO float/uint/sint controls | EXPECTED_FAIL, three exit1 processes and exact store mismatch | sidecar-wrong summary.json/raw logs; not counted as successful readbacks |
+| Adjacent conversion-cache recovery | PASS, positive runs: 12 misses / 12 inserts / 30 hits | Each of six positive processes has two misses, two inserts, five hits |
+| Atomic unsupported-path isolation | PASS, 18 expected PSO refusals across nine sidecar processes, no atomic shader submitted | TYPED_CACHE_CREATE samples0/2 and failure-first/retry markers |
+| Actual D3D12/WineMetal load identities, Unix bridge pairing and MSC bytes | PASS | loaded paths, export-byte markers except legacy SM5, artifact hashes and build/stage comparison |
+| Metal API and GPU Validation | PASS enabled and clean in all 13 final GPU processes | raw logs and runner checks |
+| Scoped formatting and git diff --check | PASS | changed scopes only; delivery scope audit |
+
+Final batch: 13 GPU processes, 22 successful readback scenarios, three expected
+wrong-PSO negative exits. Baseline reproduction is separate and excluded from
+these totals. SM5's older executable has no export-byte marker; its loaded PE
+paths and Unix bridge identity are checked. API error-path calls run in the same
+validated primary processes, rather than being simulated parser tests.
+
+The independent external audit initially expected four descriptor elements for
+serialized mode; the existing runner and raw logs require 64. Corrected only the
+audit predicate, retaining delivery-audit-initial.json and its correction note.
+No source or GPU failure and no extra GPU run resulted from this collector error.
+
+**Capability / performance / risks.** Public FL, SM, Tier, formats and default-off
+sidecar gates unchanged. No binding ABI, shader conversion, queue/fence/residency,
+Metal3 backend or D3D11 production change. No draw/dispatch/submit allocation,
+lock, hash, scan or encoder boundary added. Factory parsing retains O(blob bytes
++ entries), moving maps instead of duplicating records. Process timings include
+Wine startup/multiple PSOs/validation and are not a compiler or A/B performance
+measurement; no speedup or no-regression claim.
+
+Remaining: adapter mismatch still returns E_INVALIDARG rather than the documented
+D3D12_ERROR_ADAPTER_NOT_FOUND (same Deserialize environment check). Full runtime
+content/OS cache identity, patched PSO/library persistence, ordinary bounded
+typed views and sidecar atomic execution remain incomplete. E_OUTOFMEMORY
+translation is source-audited; fault-injected OOM, unknown-IID validation-only
+differentials, Windows native, live Mullion, x86, other GPUs and D3D11 rendering
+are NOT_RUN. M1 Max Metal4/Placement Sparse remains available, not a hardware
+blocker. No capability promotion follows from this API result.
+
+**Gate 4 / delivery audit.** Three intended files: the persistence owner, its
+existing probe and this appended report section. Reviewed the exact source diff,
+error paths, constructor ownership, unchanged runtime locking and test oracles.
+No duplicated parser, mutable compatibility owner, vendored change or serialized
+format change. Historical report text is byte-for-byte unchanged.
+
+Original .gitignore SHA256 remains
+764aac09922db4654ca6de63fd20cf014739d9292623eb979f448f38e609b759;
+it is excluded from staging. Commit uses fix(d3d12) style, without push. The
+external delivery-manifest.json records final commit, post-commit Git state and
+evidence hashes; at delivery staged/untracked sets must be empty and only the
+original .gitignore edit remain unstaged. No rebuild solely to change embedded
+Git stamps: tested source hashes are verified against delivered source.
+
+**Next recommended slice.** N07: classify a recognized library's adapter identity
+mismatch as D3D12_ERROR_ADAPTER_NOT_FOUND in the same parser. Verify identical
+results for validation-only and creation, null failure output, malformed-data
+separation and valid-library GPU recovery; keep runtime fingerprint/capability
+and sidecar persistence gates unchanged.

@@ -15,6 +15,7 @@
 #include <cstring>
 #include <limits>
 #include <mutex>
+#include <new>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -1023,7 +1024,11 @@ struct PipelineLibraryEntry {
 
 class MTLD3D12PipelineLibraryImpl final : public MTLD3D12DeviceChild<ID3D12PipelineLibrary1> {
 public:
-  explicit MTLD3D12PipelineLibraryImpl(MTLD3D12Device *device) : MTLD3D12DeviceChild<ID3D12PipelineLibrary1>(device) {}
+  using Entries = std::unordered_map<std::wstring, PipelineLibraryEntry>;
+
+  MTLD3D12PipelineLibraryImpl(MTLD3D12Device *device, Entries &&entries) :
+      MTLD3D12DeviceChild<ID3D12PipelineLibrary1>(device),
+      entries_(std::move(entries)) {}
 
   HRESULT STDMETHODCALLTYPE
   QueryInterface(REFIID riid, void **ppvObject) override {
@@ -1182,8 +1187,8 @@ public:
     return E_INVALIDARG;
   }
 
-  HRESULT
-  Initialize(const void *blob, SIZE_T blob_size) {
+  static HRESULT
+  Deserialize(MTLD3D12Device *device, const void *blob, SIZE_T blob_size, Entries &entries) {
     if (!blob || !blob_size)
       return blob_size ? E_INVALIDARG : S_OK;
     if (blob_size > kMaxLibraryBlobSize || blob_size < kPipelineLibraryHeaderSize)
@@ -1208,14 +1213,14 @@ public:
         record_count > kMaxLibraryRecords)
       return E_INVALIDARG;
 
-    if (adapter_id != device_->GetMTLDevice().registryID() || feature_level != device_->GetFeatureLevel() ||
+    if (adapter_id != device->GetMTLDevice().registryID() || feature_level != device->GetFeatureLevel() ||
         metal_version != WMTMetalVersionMax || metal_target_version != kPipelineMetalTargetVersion ||
         binding_layout_version != kPipelineBindingLayoutVersion)
       return E_INVALIDARG;
     if (converter_version != kPipelineConverterAPIVersion)
       return D3D12_ERROR_DRIVER_VERSION_MISMATCH;
 
-    std::unordered_map<std::wstring, PipelineLibraryEntry> entries;
+    Entries parsed;
     for (uint32_t i = 0; i < record_count; i++) {
       std::wstring name;
       uint32_t type_value;
@@ -1239,15 +1244,14 @@ public:
       entry.type = type;
       entry.key = key;
       entry.blob.assign(serialized_blob, serialized_blob + blob_size_value);
-      if (!entries.emplace(std::move(name), std::move(entry)).second)
+      if (!parsed.emplace(std::move(name), std::move(entry)).second)
         return E_INVALIDARG;
     }
 
     if (reader.remaining())
       return E_INVALIDARG;
 
-    std::lock_guard lock(mutex_);
-    entries_ = std::move(entries);
+    entries = std::move(parsed);
     return S_OK;
   }
 
@@ -1328,7 +1332,7 @@ private:
   }
 
   std::mutex mutex_;
-  std::unordered_map<std::wstring, PipelineLibraryEntry> entries_;
+  Entries entries_;
 };
 
 } // namespace
@@ -1664,18 +1668,22 @@ CreateD3D12PipelineStateFromStream(
 }
 
 HRESULT
-CreateD3D12PipelineLibrary(MTLD3D12Device *device, const void *blob, SIZE_T blob_size, REFIID iid, void **library) {
-  if (!library)
-    return E_POINTER;
-  *library = nullptr;
+CreateD3D12PipelineLibrary(MTLD3D12Device *device, const void *blob, SIZE_T blob_size, REFIID iid, void **library) try {
+  if (library)
+    *library = nullptr;
   if (!device)
     return E_INVALIDARG;
 
-  auto pipeline_library = Com(new MTLD3D12PipelineLibraryImpl(device));
-  HRESULT hr = pipeline_library->Initialize(blob, blob_size);
+  MTLD3D12PipelineLibraryImpl::Entries entries;
+  HRESULT hr = MTLD3D12PipelineLibraryImpl::Deserialize(device, blob, blob_size, entries);
   if (FAILED(hr))
     return hr;
+  if (!library)
+    return S_FALSE;
+  auto pipeline_library = Com(new MTLD3D12PipelineLibraryImpl(device, std::move(entries)));
   return pipeline_library->QueryInterface(iid, library);
+} catch (const std::bad_alloc &) {
+  return E_OUTOFMEMORY;
 }
 
 } // namespace dxmt
