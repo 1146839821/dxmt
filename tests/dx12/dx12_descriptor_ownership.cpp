@@ -2381,6 +2381,7 @@ bool CheckNativeBufferViewPublication(const char *srv_path,
     ID3D12Device *device = nullptr;
     ID3D12Resource *sparse = nullptr, *input = nullptr, *replacement = nullptr;
     ID3D12Resource *upload = nullptr, *output = nullptr, *readback = nullptr;
+    ID3D12Heap *physical = nullptr;
     ID3D12DescriptorHeap *source = nullptr, *mirror = nullptr,
                          *visible = nullptr;
     ID3D12CommandQueue *queue = nullptr;
@@ -2405,6 +2406,7 @@ bool CheckNativeBufferViewPublication(const char *srv_path,
       Release(replacement);
       Release(input);
       Release(sparse);
+      Release(physical);
       Release(device);
     }
   };
@@ -2510,22 +2512,24 @@ bool CheckNativeBufferViewPublication(const char *srv_path,
         HRESULT hr =
             kind ? resource->CreateUnorderedAccessView(nullptr, &uav, handle)
                  : resource->CreateShaderResourceView(&srv, handle);
-        bool good = hr == E_FAIL;
+        bool good = hr == S_OK;
         write(o.sparse); // Exercise the public void entry point too.
         const auto after = snapshot();
-        good &= std::memcmp(&before.cpu, &after.cpu, sizeof(before.cpu)) == 0 &&
-                std::memcmp(before.air, after.air, sizeof(before.air)) == 0 &&
-                std::memcmp(before.msc, after.msc, sizeof(before.msc)) == 0 &&
-                before.generation == after.generation;
+        uint64_t air_id = 0;
+        dxmt_msc_descriptor_entry msc_entry{};
+        std::memcpy(&air_id, after.air, sizeof(air_id));
+        std::memcpy(&msc_entry, after.msc, sizeof(msc_entry));
+        good &= after.generation == before.generation + 2 && air_id != 0 &&
+                msc_entry.texture_view_id == air_id &&
+                (kind ? after.cpu.UAVTexelBuffer.buffer
+                      : after.cpu.SRVTexelBuffer.buffer) == bad;
         std::cout << "VIEW_PUBLICATION visible=" << visible_source
                   << " kind=" << kind << " seeded=" << seeded << " hr=0x"
                   << std::hex << UINT(hr) << std::dec
-                  << " native_view_rejected=" << (hr == E_FAIL)
-                  << " unchanged=" << good << std::endl;
+                  << " native_view_published=" << good << std::endl;
         ++cases;
         if (!good)
-          return false; // Never dispatch a published nil on the old
-                        // implementation.
+          return false; // Old metadata-omitting builds fail before dispatch.
         if (!seeded)
           continue;
 
@@ -2590,16 +2594,42 @@ bool CheckNativeBufferViewPublication(const char *srv_path,
           if (!e)
             return false;
           bool ok = CheckHR("publication event",
-                            o.fence->SetEventOnCompletion(value, e)) &&
-                    WaitForSingleObject(e, 10000) == WAIT_OBJECT_0;
+                            o.fence->SetEventOnCompletion(value, e));
+          const auto result = ok ? WaitForSingleObject(e, 10000) : WAIT_FAILED;
+          ok &= result == WAIT_OBJECT_0;
+          if (!ok)
+            std::cerr << "FAIL publication wait target=" << value
+                      << " completed=" << o.fence->GetCompletedValue()
+                      << " wait=" << result << " removed=0x" << std::hex
+                      << UINT(o.device->GetDeviceRemovedReason()) << std::dec
+                      << std::endl;
           CloseHandle(e);
           return ok;
         };
+        D3D12_HEAP_DESC physical_desc{};
+        physical_desc.SizeInBytes = 65536;
+        physical_desc.Properties = DefaultHeap();
+        physical_desc.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS;
+        if (!CheckHR("publication physical heap",
+                     o.device->CreateHeap(&physical_desc,
+                                          IID_PPV_ARGS(&o.physical))))
+          return false;
+        D3D12_TILED_RESOURCE_COORDINATE coordinate{};
+        D3D12_TILE_REGION_SIZE region{};
+        region.NumTiles = 1;
+        UINT heap_offset = 0;
+        o.queue->UpdateTileMappings(o.sparse, 1, &coordinate, &region,
+                                    o.physical, 1, nullptr, &heap_offset,
+                                    nullptr, D3D12_TILE_MAPPING_FLAG_NONE);
+        transition(o.sparse, D3D12_RESOURCE_STATE_COMMON,
+                   D3D12_RESOURCE_STATE_COPY_DEST);
+        o.list->CopyBufferRegion(o.sparse, 0, o.upload, 0, bytes);
         o.list->CopyBufferRegion(o.input, 0, o.upload, 0, bytes);
         o.list->CopyBufferRegion(o.replacement, 0, o.upload, bytes, bytes);
         auto state = kind ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS
                           : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
         transition(o.input, D3D12_RESOURCE_STATE_COPY_DEST, state);
+        transition(o.sparse, D3D12_RESOURCE_STATE_COPY_DEST, state);
         transition(o.replacement, D3D12_RESOURCE_STATE_COPY_DEST, state);
         if (!CheckHR("publication init close", o.list->Close()))
           return false;
@@ -2607,9 +2637,8 @@ bool CheckNativeBufferViewPublication(const char *srv_path,
         o.queue->ExecuteCommandLists(1, lists);
         if (!wait(1))
           return false;
-        // D3D12 applications keep resources alive until their GPU use
-        // completes. Snapshot identity proves the old descriptor target
-        // survived rejection.
+        // Keep sparse backing and application resources alive through
+        // completion.
         Release(o.mirror);
 
         D3D12_DESCRIPTOR_RANGE ranges[2] = {};

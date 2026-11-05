@@ -177,6 +177,7 @@ private:
   uint32_t current_suballocation_ = 0;
   uint32_t suballocation_size_;
   uint32_t suballocation_count_ = 1;
+  const WMTSparsePageSize placement_sparse_page_size_;
 
   void * placed_buffer = nullptr;
 };

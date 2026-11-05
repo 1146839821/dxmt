@@ -116,11 +116,15 @@ and does not justify another unchanged local MS_LOAD or Submit timing matrix.
   the existing buffer-backed texture API passes real M1 Max R32Uint typed read/
   write, atomic/raw alias observation and mapA→mapB→NULL→mapB. Forty positive
   processes,121 readbacks, omission and one-bit controls; native MSL only.
-  Current DXMT drops this allocation-to-view field: BACKEND_NOT_IMPLEMENTED,
-  not an Apple7 hardware limitation. Actual sparse MSC/AIRCONV typed execution
-  and MSC counters remain UNVERIFIED, rather than a proven fundamental ABI gap.
-  Publication guards remain; default activation stays HELD. Null typed GPU
-  execution and post-COM-release residency remain separate gaps.
+  E29 propagates the immutable allocation page through the existing buffer-view
+  descriptor slot with unchanged bridge layout and allocation size. Actual M1 Max
+  R32_UINT typed SRV/UAV and MSC sparse counter Append/Consume pass controlled
+  GPU readback, map/remap/NULL raw observation and guard oracles; AIRCONV counter
+  regression also passes. This closes the bounded missing-page implementation
+  gap, not all-format/null-descriptor/lifetime obligations. Publication guards
+  remain; default activation stays HELD. Null typed descriptor GPU execution,
+  post-COM-release residency and one unexplained exploratory publication wait
+  failure remain separate gaps. See [E29 delivery](sparse-handoff-retirement-audit.md#sparse-buffer-view-page-metadata--n15-delivery-2026-11-05).
   See [page-size correction and next Design Card](sparse-handoff-retirement-audit.md#sparse-typed-representation--native-page-size-contract-audit-2026-11-05)
   and the historical [native buffer-view contract audit](sparse-handoff-retirement-audit.md#sparse-buffer-texture-view-contract--n15n09-audit-2026-11-05).
 

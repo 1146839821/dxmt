@@ -3161,6 +3161,7 @@ int Run(const char *read_path, const char *write_path, UINT seed,
   const bool copy_plan = owned && (std::strstr(owned_mode, "copy") != nullptr);
   const bool live = owned && std::strstr(owned_mode, "live");
   const bool typed = owned && std::strstr(owned_mode, "typed");
+  const bool typed_uav = owned && std::strstr(owned_mode, "typed-uav");
   std::atomic<unsigned> consumer_heap_deaths{0};
   const bool gated = owned && std::strstr(owned_mode, "ungated") == nullptr;
   const UINT terminal_flags = !owned || std::strstr(owned_mode, "event") ? 0
@@ -3236,6 +3237,10 @@ int Run(const char *read_path, const char *write_path, UINT seed,
   uav.Buffer.NumElements = TileBytes / 4; uav.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
   cpu.ptr += stride; device->CreateUnorderedAccessView(output.ptr, nullptr, &uav, cpu);
   uav.Buffer.NumElements = TileBytes / 4;
+  if (typed_uav) {
+    uav.Format = DXGI_FORMAT_R32_UINT;
+    uav.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_NONE;
+  }
   cpu.ptr += stride; device->CreateUnorderedAccessView(sparse.ptr, nullptr, &uav, cpu);
   D3D12_DESCRIPTOR_RANGE ranges[2] = {
     {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, 0},
@@ -3361,7 +3366,7 @@ int Run(const char *read_path, const char *write_path, UINT seed,
       phase_list->SetDescriptorHeaps(1, heaps);
       phase_list->SetComputeRootDescriptorTable(
           0, descriptors->GetGPUDescriptorHandleForHeapStart());
-      const auto access = write
+      const auto access = write || typed_uav
                               ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS
                               : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
       Transition(phase_list.ptr, sparse.ptr, D3D12_RESOURCE_STATE_COMMON,
@@ -3634,6 +3639,7 @@ int main(int argc, char **argv) {
         << "usage: dx12_reserved_buffer <probe_read.cso> "
            "<probe_write.cso> [seed rounds "
            "[owned-same|owned-cross|owned-live-cross|owned-live-typed-cross|"
+           "owned-live-typed-uav-cross|owned-typed-wrong-oracle|"
            "owned-copy-cross|owned-"
            "delay-cross|"
            "owned-event-same|owned-ungated-same|owned-ungated-cross|"
@@ -3655,6 +3661,8 @@ int main(int argc, char **argv) {
                       !std::strcmp(argv[5], "owned-cross") ||
                       !std::strcmp(argv[5], "owned-live-cross") ||
                       !std::strcmp(argv[5], "owned-live-typed-cross") ||
+                      !std::strcmp(argv[5], "owned-live-typed-uav-cross") ||
+                      !std::strcmp(argv[5], "owned-typed-wrong-oracle") ||
                       !std::strcmp(argv[5], "owned-ungated-same") ||
                       !std::strcmp(argv[5], "owned-ungated-cross") ||
                       !std::strcmp(argv[5], "owned-copy-cross") ||
@@ -3665,9 +3673,9 @@ int main(int argc, char **argv) {
       if (!rounds || rounds > 64)
         return 2;
       for (UINT round = 0; round < rounds; ++round) {
-        int result =
-            Run(argv[1], argv[2], seed + round,
-                !std::strcmp(argv[5], "owned-wrong-oracle"), false, argv[5]);
+        int result = Run(argv[1], argv[2], seed + round,
+                         std::strstr(argv[5], "wrong-oracle") != nullptr, false,
+                         argv[5]);
         if (result)
           return result;
       }

@@ -982,7 +982,16 @@ void cs_main(uint3 id : SV_DispatchThreadID) {
 // texture handles fail before any append/consume dispatch reaches the GPU.
 bool TestAppendConsume(ID3D12Device *device, const char *append_path,
                        const char *consume_path, UINT counter_offset,
-                       UINT first_element, bool wrong_expected) {
+                       UINT first_element, bool wrong_expected,
+                       bool sparse_counter = false) {
+  if (sparse_counter) {
+    auto metal = static_cast<dxmt::MTLD3D12Device *>(device)->GetMTLDevice();
+    if (!metal.supportsPlacementSparse() ||
+        !metal.supportsFamily(WMTGPUFamilyMetal4))
+      return false;
+    SetEnvironmentVariableA("DXMT_TEST_SPARSE_SUBMISSION", "1");
+    std::cout << "SPARSE_COUNTER_DEVICE actual_placement=1 metal4=1\n";
+  }
   std::vector<uint8_t> bytecode[2];
   ComPtr<ID3D12RootSignature> root;
   if (!CreateRootSignature(device, root.put(), false, false, false, 2))
@@ -1010,33 +1019,52 @@ bool TestAppendConsume(ID3D12Device *device, const char *append_path,
   const bool msc = backend == dxmt::D3D12ShaderBackend::MetalShaderConverter;
   constexpr uint32_t guard = 0x13579bdf;
   const UINT payload_size = (first_element + 5) * 4;
-  constexpr UINT counter_size = 8192 + 8;
+  const UINT counter_size = sparse_counter ? 65536 : 8192 + 8;
+  const UINT upload_size = std::max(payload_size, counter_size * 2);
   const UINT readback_size = payload_size + 16 + counter_size * 3;
   ComPtr<ID3D12Resource> payload, consumed, counters[2], upload, readback;
+  ComPtr<ID3D12Heap> counter_heaps[2];
   if (!CreateBuffer(device, D3D12_HEAP_TYPE_DEFAULT, payload_size,
                     D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
                     D3D12_RESOURCE_STATE_COPY_DEST, payload.put()) ||
       !CreateBuffer(device, D3D12_HEAP_TYPE_DEFAULT, 16,
                     D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS, consumed.put()) ||
-      !CreateBuffer(device, D3D12_HEAP_TYPE_UPLOAD,
-                    std::max(payload_size, counter_size),
+      !CreateBuffer(device, D3D12_HEAP_TYPE_UPLOAD, upload_size,
                     D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ,
                     upload.put()) ||
       !CreateBuffer(device, D3D12_HEAP_TYPE_READBACK, readback_size,
                     D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST,
                     readback.put()))
     return false;
-  for (auto &counter : counters)
-    if (!CreateBuffer(device, D3D12_HEAP_TYPE_DEFAULT, counter_size,
-                      D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-                      D3D12_RESOURCE_STATE_COPY_DEST, counter.put()))
+  for (UINT i = 0; i < 2; ++i) {
+    if (sparse_counter) {
+      D3D12_HEAP_DESC hd{};
+      hd.SizeInBytes = counter_size;
+      hd.Properties = HeapProperties(D3D12_HEAP_TYPE_DEFAULT);
+      hd.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS;
+      auto desc = BufferDescription(counter_size,
+                                    D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+      if (!CheckHR(
+              "Create counter backing",
+              device->CreateHeap(&hd, IID_PPV_ARGS(counter_heaps[i].put()))) ||
+          !CheckHR("Create sparse counter",
+                   device->CreateReservedResource(
+                       &desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                       IID_PPV_ARGS(counters[i].put()))))
+        return false;
+    } else if (!CreateBuffer(device, D3D12_HEAP_TYPE_DEFAULT, counter_size,
+                             D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                             D3D12_RESOURCE_STATE_COPY_DEST, counters[i].put()))
       return false;
+  }
   void *mapped = nullptr;
   if (!CheckHR("Map guarded upload", upload.get()->Map(0, nullptr, &mapped)))
     return false;
-  std::fill_n(static_cast<uint32_t *>(mapped),
-              std::max(payload_size, counter_size) / 4, guard);
+  std::fill_n(static_cast<uint32_t *>(mapped), upload_size / 4, guard);
+  if (sparse_counter)
+    std::fill_n(static_cast<uint32_t *>(mapped) + counter_size / 4,
+                counter_size / 4, guard ^ 0x10203040u);
   upload.get()->Unmap(0, nullptr);
   D3D12_COMMAND_QUEUE_DESC queue_desc = {};
   ComPtr<ID3D12CommandQueue> queue;
@@ -1060,9 +1088,20 @@ bool TestAppendConsume(ID3D12Device *device, const char *append_path,
     queue.get()->ExecuteCommandLists(1, lists);
     return WaitForQueue(device, queue.get());
   };
+  if (sparse_counter) {
+    D3D12_TILED_RESOURCE_COORDINATE coordinate{};
+    D3D12_TILE_REGION_SIZE tiles{};
+    tiles.NumTiles = 1;
+    UINT offset = 0;
+    for (UINT i = 0; i < 2; ++i)
+      queue.get()->UpdateTileMappings(
+          counters[i].get(), 1, &coordinate, &tiles, counter_heaps[i].get(), 1,
+          nullptr, &offset, nullptr, D3D12_TILE_MAPPING_FLAG_NONE);
+  }
   list.get()->CopyBufferRegion(payload.get(), 0, upload.get(), 0, payload_size);
-  for (auto &counter : counters)
-    list.get()->CopyBufferRegion(counter.get(), 0, upload.get(), 0,
+  for (UINT i = 0; i < 2; ++i)
+    list.get()->CopyBufferRegion(counters[i].get(), 0, upload.get(),
+                                 sparse_counter ? i * counter_size : 0,
                                  counter_size);
   if (!execute() ||
       !CheckHR("Map counter zeros", upload.get()->Map(0, nullptr, &mapped)))
@@ -1162,9 +1201,42 @@ bool TestAppendConsume(ID3D12Device *device, const char *append_path,
     Transition(list.get(), source, D3D12_RESOURCE_STATE_COPY_SOURCE,
                D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
   };
-  // Slot reuse follows a fence. Final application object release happens while
-  // a queue wait deliberately keeps the submission in flight.
+  // Slot reuse follows a fence. Sparse resources/backing stay application-owned
+  // through completion; the ordinary case also checks pending resource release.
   for (UINT pass = 0; pass < 2; ++pass) {
+    if (sparse_counter && pass) {
+      D3D12_TILED_RESOURCE_COORDINATE coordinate{};
+      D3D12_TILE_REGION_SIZE tiles{};
+      tiles.NumTiles = 1;
+      const D3D12_TILE_RANGE_FLAGS null_range = D3D12_TILE_RANGE_FLAG_NULL;
+      for (auto &counter : counters)
+        queue.get()->UpdateTileMappings(counter.get(), 1, &coordinate, &tiles,
+                                        nullptr, 1, &null_range, nullptr,
+                                        nullptr, D3D12_TILE_MAPPING_FLAG_NONE);
+      if (!CheckHR("Reset null counter allocator", allocator.get()->Reset()) ||
+          !CheckHR("Reset null counter list",
+                   list.get()->Reset(allocator.get(), nullptr)))
+        return false;
+      for (UINT i = 0; i < 2; ++i)
+        copy_readback(counters[i].get(), i * counter_size, counter_size);
+      if (!execute() || !CheckHR("Map null counters",
+                                 readback.get()->Map(0, nullptr, &mapped)))
+        return false;
+      const auto *null_words = static_cast<const uint32_t *>(mapped);
+      const bool zero = std::all_of(null_words, null_words + counter_size / 2,
+                                    [](uint32_t value) { return value == 0; });
+      readback.get()->Unmap(0, nullptr);
+      if (!zero)
+        return false;
+      UINT offset = 0;
+      for (UINT i = 0; i < 2; ++i)
+        queue.get()->UpdateTileMappings(counters[i].get(), 1, &coordinate,
+                                        &tiles, counter_heaps[1 - i].get(), 1,
+                                        nullptr, &offset, nullptr,
+                                        D3D12_TILE_MAPPING_FLAG_NONE);
+      std::cout << "SPARSE_COUNTER_REMAP null_words=" << counter_size / 2
+                << " zero=1 swapped_backings=1 stable_view=1\n";
+    }
     if (!CheckHR("Reset append allocator", allocator.get()->Reset()) ||
         !CheckHR("Reset append list",
                  list.get()->Reset(allocator.get(), psos[0].get())))
@@ -1290,8 +1362,9 @@ bool TestAppendConsume(ID3D12Device *device, const char *append_path,
       heap.reset();
       payload.reset();
       consumed.reset();
-      for (auto &counter : counters)
-        counter.reset();
+      if (!sparse_counter)
+        for (auto &counter : counters)
+          counter.reset();
       for (auto &pso : psos)
         pso.reset();
       root.reset();
@@ -1310,6 +1383,15 @@ bool TestAppendConsume(ID3D12Device *device, const char *append_path,
     std::sort(values.begin() + payload_size / 4,
               values.begin() + payload_size / 4 + 4);
     std::vector<uint32_t> expected(values.size(), guard);
+    if (sparse_counter) {
+      for (UINT i = 0; i < 3; ++i) {
+        const UINT resource = i == 0 ? 1 - pass : i - 1;
+        const UINT backing = pass ? 1 - resource : resource;
+        std::fill_n(expected.begin() +
+                        (payload_size + 16 + i * counter_size) / 4,
+                    counter_size / 4, backing ? guard ^ 0x10203040u : guard);
+      }
+    }
     for (UINT i = 0; i < 4; ++i) {
       expected[first_element + i] = 100 + i;
       expected[payload_size / 4 + i] = 100 + i;
@@ -1319,6 +1401,12 @@ bool TestAppendConsume(ID3D12Device *device, const char *append_path,
           i == 0 ? 4 : 0;
     if (wrong_expected)
       expected[first_element]++;
+    UINT mismatches = 0;
+    for (size_t i = 0; i < values.size(); ++i)
+      mismatches += values[i] != expected[i];
+    std::cout << "COUNTER_READBACK pass=" << pass
+              << " sparse=" << sparse_counter << " words=" << values.size()
+              << " bad=" << mismatches << '\n';
     if (values != expected) {
       for (size_t i = 0; i < values.size(); ++i)
         if (values[i] != expected[i]) {
@@ -1332,6 +1420,7 @@ bool TestAppendConsume(ID3D12Device *device, const char *append_path,
   std::cout << (msc ? "MSC" : "AIRCONV")
             << " Append/Consume GPU payload/counters/guards passed offset="
             << counter_offset << " first=" << first_element
+            << " sparse=" << sparse_counter
             << " copy/mutation/reuse/pending-release passed\n";
   return true;
 }
@@ -1339,7 +1428,9 @@ bool TestAppendConsume(ID3D12Device *device, const char *append_path,
 } // namespace
 
 int main(int argc, char **argv) {
-  if ((argc == 6 || argc == 7) && std::strcmp(argv[1], "--counter-pair") == 0) {
+  if ((argc == 6 || argc == 7) &&
+      (!std::strcmp(argv[1], "--counter-pair") ||
+       !std::strcmp(argv[1], "--sparse-counter-pair"))) {
     const UINT offset = std::strtoul(argv[4], nullptr, 10);
     const UINT first = std::strtoul(argv[5], nullptr, 10);
     if (offset > 8192 || offset % D3D12_UAV_COUNTER_PLACEMENT_ALIGNMENT ||
@@ -1352,7 +1443,8 @@ int main(int argc, char **argv) {
                                    IID_PPV_ARGS(device.put()))))
       return 1;
     return TestAppendConsume(device.get(), argv[2], argv[3], offset, first,
-                             argc == 7)
+                             argc == 7,
+                             !std::strcmp(argv[1], "--sparse-counter-pair"))
                ? 0
                : 1;
   }

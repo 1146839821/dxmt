@@ -65,6 +65,9 @@ TextureAllocation::TextureAllocation(
     heap_(heap),
     flags_(flags) {
   auto info_copy = info;
+  // This path wraps ordinary backing buffers, including D3D11 descriptors whose
+  // unused fields need not have been initialized by their callers.
+  info_copy.buffer_view_sparse_page_size = 0;
   obj_ = buffer_.newTexture(info_copy, 0, bytes_per_row);
 
   gpuResourceID = info_copy.gpu_resource_id;

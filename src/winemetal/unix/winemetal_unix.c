@@ -299,7 +299,7 @@ extract_texture_descriptor(id<MTLTexture> desc, struct WMTTextureInfo *info) {
   info->sample_count = desc.sampleCount;
   info->usage = desc.usage;
   info->options = (enum WMTResourceOptions)desc.resourceOptions;
-  info->reserved = 0;
+  info->buffer_view_sparse_page_size = 0;
 };
 
 static NTSTATUS
@@ -349,7 +349,22 @@ _MTLBuffer_newTexture(void *obj) {
   MTLTextureDescriptor *desc = [[MTLTextureDescriptor alloc] init];
   fill_texture_descriptor(desc, info);
 
-  id<MTLTexture> ret = [buffer newTextureWithDescriptor:desc offset:params->offset bytesPerRow:params->bytes_per_row];
+  id<MTLTexture> ret = nil;
+  bool valid_page = info->buffer_view_sparse_page_size == 0;
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000
+  if (@available(macOS 26.0, *)) {
+    switch (info->buffer_view_sparse_page_size) {
+    case WMTSparsePageSize16:
+    case WMTSparsePageSize64:
+    case WMTSparsePageSize256:
+      desc.placementSparsePageSize = (MTLSparsePageSize)info->buffer_view_sparse_page_size;
+      valid_page = true;
+      break;
+    }
+  }
+#endif
+  if (valid_page)
+    ret = [buffer newTextureWithDescriptor:desc offset:params->offset bytesPerRow:params->bytes_per_row];
   params->ret = (obj_handle_t)ret;
   info->gpu_resource_id = [ret gpuResourceID]._impl;
   info->mach_port = 0;

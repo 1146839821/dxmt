@@ -3275,3 +3275,155 @@ bytes. Original .gitignore SHA256 remains
   ordinary initialization safety, layout/build proof, real D3D12 typed/counter
   evidence and unchanged public capability assertions. Gate1 ready; stop before
   Gate2 production implementation until next slice is authorized.
+
+
+## Sparse buffer view page metadata — N15 delivery, 2026-11-05
+
+### 1. Task Summary / Gates
+
+One authorized mechanism: preserve the placement-sparse allocation's actual
+page enum through existing buffer-backed texture view creation. Gate0/1 use the
+preceding E28 native proof and page-propagation Design Card; Gate2 implementation
+is complete. Gate3 bounded validation and Gate4 source/artifact audit PASS with
+the explicit unresolved exploratory failures below. This is not default sparse
+activation, a performance improvement, or capability promotion.
+
+### 2. Baseline Evidence
+
+- Target feat/d3d12 baseline17fb6b7306a43d11dbbb1bc52a0dd89c03b42cb7;
+  cached origin comparison behind0/ahead23 before this commit, no remote fetch.
+  Original .gitignore edit is retained, SHA256
+  764aac09922db4654ca6de63fd20cf014739d9292623eb979f448f38e609b759.
+- Actual M1 Max/Apple7, macOS27.2(26B123), Xcode27.2(27B52), Metal32023.922,
+  Wine11.0; MSC compiled SDK API4.0.3, runtime product version unknown.
+- E29 evidence root:
+  /Users/zhangbo/Documents/Vibe-Codeding/dxmt-test/n95-capability-gate/result-sparse-buffer-view-page-20261105.
+  E28 SDK/Apple document snapshots and pinned Mullion93de32b9 remain the
+  specification/reference evidence; see preceding audit source/line anchors.
+  No Mullion code is transplanted. Microsoft descriptor/counter constraints stay
+  authoritative; Mullion is a reference, not a capability oracle.
+- E29 delivery-artifact-audit.json verifies loaded native PE paths, Unix UUID/path,
+  build→stage bytes (documented Wine builtin marker adjustment only), MSC hash,
+  validation enablement, individual exit/oracle results, and .gitignore identity.
+
+### 3. Findings / Evidence Types
+
+- BACKEND_NOT_IMPLEMENTED at baseline: native sparse buffer allocation selected
+  64KiB, but its buffer texture descriptor omitted that page. The candidate passes
+  it; the same new publication executable on the matched baseline rejects with
+  E_FAIL before GPU dispatch. Evidence: SOURCE plus LOCAL_FAIL baseline2-regression
+  versus LOCAL_PASS delivery3-publication logs. This is not Apple7 hardware lack.
+- LOCAL_PASS: existing R32_UINT typed SRV/UAV views and the actual MSC indirect
+  R32 counter texture work on M1 Max with this metadata. Raw reads observe swapped
+  physical counter backing after NULL→remap; cached texture identity stays stable.
+  Scope is these tested formats/offsets, not every typed format or shader feature.
+- The first field placement grew BufferAllocation728→736 and broke an internal
+  test-header/baseline-DLL layout comparison. Moving immutable metadata into the
+  existing tail padding restores728 and old member offsets; baseline comparison
+  then fails cleanly at the intended E_FAIL check. The crash is retained as a
+  discarded mismatched internal ABI experiment, not a baseline GPU result.
+
+### 4. Design Decisions / Changed Files
+
+- src/dxmt/dxmt_buffer.hpp:180 and dxmt_buffer.cpp:32–57,141 retain an immutable
+  actual allocation page (ordinary0; current sparse64KiB) and use the same value
+  for allocation and view. Existing allocation/view owners and caches remain.
+- src/winemetal/winemetal.h:536–542 assigns the old reserved32-bit slot explicit
+  buffer-view page semantics and asserts size48/page32/resourceID40. No call
+  ordinal, descriptor stride, MSC ABI or field byte layout changes.
+- src/winemetal/unix/winemetal_unix.c:299,345–373 initializes imported output0;
+  only MTLBuffer_newTexture interprets the field, guarded by SDK/runtime26.0.
+  Ordinary0 uses the original path; valid16/64/256 sets descriptor page; unknown
+  nonzero or unavailable SDK/runtime returns nil/ID0 without ordinary fallback.
+  Only64KiB sparse creation is GPU-validated here.
+- src/dxmt/dxmt_texture.cpp:67–71 explicitly sends0 for ordinary buffer-backed
+  texture allocations, including D3D11 callers with unused descriptor fields
+  that are not initialized. Generic fill_texture_descriptor remains unchanged.
+- tests/dx12/dx12_descriptor_ownership.cpp:2377 changes the legal sparse view
+  oracle to success, covers CPU/visible source×SRV/UAV×empty/seeded publication,
+  replay and live replacement, keeps legal resources through completion, and
+  reports fence wait diagnostics on future failures. Existing failure-before-
+  publication guards remain unchanged in production.
+- tests/dx12/dx12_airconv_compute_residency.cpp:983 extends the existing real
+  Append/Consume oracle with reserved counter buffers, whole-page guards, NULL
+  raw readback, physical backing swap, descriptor mutation/cache and residency
+  checks. Ordinary mode remains; sparse resources/backing remain application-owned.
+- tests/dx12/dx12_reserved_buffer.cpp:3164, reserved_buffer.hlsl, meson.build
+  extend the existing consumer test with typed UAV read/write and a wrong-word
+  control, plus one fixture. No new repository test runner or scheduler.
+- docs/D3D12_RESOURCE_AUDIT_CHECKLIST.md and this report update bounded evidence.
+
+### 5. Validation Results
+
+Final production binaries after padding placement and formatting are distinguished
+from earlier exploratory builds. E29 audit covers41 final processes, all with API
+and GPU validation enabled and no recorded Metal validation diagnostics:
+
+| Check | Result / exact boundary |
+| --- | --- |
+| Full x64 release default target, D3D12/tests/NVAPI/NVNGX | PASS build-delivery.log; script-equivalent isolated configuration |
+| Full x86 release default target | PASS build-x86-delivery.log; script-equivalent D3D12/tests disabled, compile only |
+| Native arm64/PE x64/PE x86 bridge layout | PASS size48/page32/mach36/ID40; x86 via compiled static assertions |
+| Allocation/view cost in bytes | PASS allocation728→728, view40→40, compiler-emitted LLVM constants |
+| Publication, five positive processes | PASS40 publications,60 GPU readbacks,61440 data+1920 guard DWORDs,20 null-publication controls |
+| Sparse typed SRV/UAV two seeds each | PASS44 phases,1245184 DWORDs; mapA/B/NULL, writes/CopyTiles, replay, live descriptors, cross-queue gated issue and lifetime controls |
+| MSC sparse counters offsets0/4096/8192 | PASS two Append/Consume passes each, complete payload/counter/guard arrays,32768 NULL-read DWORDs per process, swapped backing and stable views |
+| MSC ordinary same offsets, AIRCONV ordinary/sparse4096 | PASS actual selected backends and exact GPU payload/counter/guard oracles |
+| Wrong-word controls | PASS expected exit1: publication exactly4 wrong words with intact guards; typed first-word oracle and counter exactly1 wrong word |
+| Matched baseline | PASS regression detection: E_FAIL/native_view_published=0, no GPU dispatch |
+| Ordinary sidecar/ranges/formats/counter/permissions and feature test | PASS existing probes; public capabilities source unchanged |
+| D3D11 dynamic buffer-backed texture | PASS external E29 probe65×17,three WRITE_DISCARD→CopyResource→Map cycles,3315 exact DWORDs |
+| Existing raw reserved/owned and standard/packed textures | PASS mapping/remap/NULL/copy/alias/lifetime probes |
+| Mixed common issue normal/reverse/copy/lifetime | PASS existing four modes under controlled switch |
+| Bridge malformed page control | PASS ordinary0 creates real view;1/63/1024/UINT_MAX return nil/ID0 |
+| Scope/style | PASS scoped clang-format, git diff --check, unchanged-contracts.json |
+| Windows native, other GPU, older macOS, sparse16/256 creation | NOT_RUN |
+
+Exploratory failures are retained and excluded from the41-process final set:
+old external counter diagnostic timeout60s (no authoritative current-repository
+result); one pre-final publication exited1 after its final publication before
+readback with no detailed wait diagnosis. Its cause remains UNVERIFIED, including
+whether a fence wait timed out. Same-artifact retry and subsequent complete runs
+passed; no claim is made that metadata fixed this intermittent failure. The final
+test now prints target/completed/event result/device reason if waiting fails.
+Initial Meson target-before-reconfigure and temporary probe escaping/format-log
+path failures are setup failures, not GPU failures. Original logs remain.
+
+### 6. Cost / Capability Impact / Regression Risks
+
+Validation-on ordinary publication ABBA, identical executable/fixtures/MSC with
+matched baseline/candidate DLL pairs, two processes per build,48 warm batches each:
+
+| us/write | Baseline median / P95 / range | Candidate median / P95 / range |
+| --- | --- | --- |
+| 10000 writes/batch |0.227285 /0.245850 /0.220900–0.269460|0.227510 /0.251740 /0.220990–0.276290|
+
+Median difference+0.000225us (~0.10%), overlapping distributions; inconclusive for
+small changes, not evidence of speedup or zero regression. No new allocation,
+lock, traversal or GPU synchronization is introduced by metadata propagation.
+Production queue/fence/barrier policy, Metal3 shadow path, D3D11 architecture,
+shader conversion and public Tier/FL/SM declarations are unchanged (source hashes
+in unchanged-contracts.json). No SDK/runtime API compatibility promise is inferred
+for unmatched bridge binaries.
+
+Remaining blockers: null typed descriptor GPU execution is MSC_SEMANTIC_GAP /
+SPEC_UNVERIFIED pending backend-specific proof; post-COM-release sparse view/
+backing residency is BACKEND_NOT_IMPLEMENTED or UNVERIFIED until owner audit;
+unmapped counter atomic operations are SPEC_UNVERIFIED (raw NULL read is not
+an atomic oracle); all-format and cross-device proof is UNVERIFIED /
+TARGET_DEVICE_NOT_AVAILABLE for absent devices. Default activation stays HELD.
+The unexplained early publication wait/failure remains UNVERIFIED, not hardware.
+
+### 7. Git State / Next Recommended Slice
+
+Delivery commit uses fix(d3d12) repository style and includes only the metadata,
+bridge, adjacent tests and two reports; see E29 delivery-manifest.json for exact
+commit/file hashes and post-commit status. No push. Original .gitignore remains
+unstaged; no intended staged or untracked deliverables remain.
+
+Next single slice: **audit and design null typed descriptor GPU semantics at the
+existing descriptor owner**. Compare Microsoft null SRV/UAV rules, actual MSC and
+AIRCONV descriptor forms, and legal zero/discard execution; build the smallest
+real readback/negative oracle before choosing an implementation. Include the
+unresolved publication wait diagnostic in that validation gate. Do not enable
+common sparse by default or promote capability based on this bounded success.

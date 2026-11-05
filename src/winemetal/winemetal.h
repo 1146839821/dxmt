@@ -533,10 +533,13 @@ struct WMTTextureInfo {
   uint32_t sample_count       : 8;
   enum WMTTextureUsage usage  : 8;
   enum WMTResourceOptions options;
-  uint32_t reserved;
+  uint32_t buffer_view_sparse_page_size; // MTLBuffer_newTexture only; 0 for ordinary backing
   mach_port_t mach_port; // in/out
   uint64_t gpu_resource_id; // out
 };
+STATIC_ASSERT(sizeof(WMTTextureInfo) == 48);
+STATIC_ASSERT(__builtin_offsetof(WMTTextureInfo, buffer_view_sparse_page_size) == 32);
+STATIC_ASSERT(__builtin_offsetof(WMTTextureInfo, gpu_resource_id) == 40);
 
 WINEMETAL_API obj_handle_t MTLDevice_newTexture(obj_handle_t device, struct WMTTextureInfo *info);
 

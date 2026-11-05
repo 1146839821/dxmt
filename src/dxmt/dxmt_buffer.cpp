@@ -36,7 +36,8 @@ BufferAllocation::BufferAllocation(
     heap_(heap),
     info_(info),
     length_(info.length),
-    flags_(flags) {
+    flags_(flags),
+    placement_sparse_page_size_(placement_sparse ? WMTSparsePageSize64 : WMTSparsePageSize(0)) {
   // (sub)allocate a minimum of 256B buffer so that texture can be created
   info_.length = std::max(info_.length, 256ull);
   suballocation_size_ = info_.length;
@@ -50,8 +51,8 @@ BufferAllocation::BufferAllocation(
     placed_buffer = wsi::aligned_malloc(info_.length, DXMT_PAGE_SIZE);
     info_.memory.set(placed_buffer);
   }
-  obj_ = placement_sparse ? device.newPlacementSparseBuffer(info_, WMTSparsePageSize64)
-                          : (heap_ ? heap_.newBuffer(info_, offset) : device.newBuffer(info_));
+  obj_ = placement_sparse_page_size_ ? device.newPlacementSparseBuffer(info_, placement_sparse_page_size_)
+                                     : (heap_ ? heap_.newBuffer(info_, offset) : device.newBuffer(info_));
   gpuAddress_ = info_.gpu_address;
   mappedMemory_ = info_.memory.get_accessible_or_null();
 };
@@ -137,6 +138,7 @@ Buffer::prepareAllocationViews(BufferAllocation *allocation) {
     info.sample_count = 1;
     info.pixel_format = format;
     info.options = allocation->info_.options;
+    info.buffer_view_sparse_page_size = allocation->placement_sparse_page_size_;
     auto usage = WMTTextureUsageShaderRead;
     if (!viewDescriptors_[version].read_only && !allocation->flags().test(BufferAllocationFlag::GpuReadonly) &&
         (allocation->flags().test(BufferAllocationFlag::GpuManaged) ||
