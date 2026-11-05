@@ -4167,3 +4167,179 @@ tree; their version stamp is not rebuilt after commit.
 cache/pipeline-library isolation and failure-not-poisoning using existing pipeline
 persistence probes, keeping the opt-in gate and capability declarations unchanged.
 Do not start atomic execution or broad resource-backend replacement from this refusal result.
+
+## E36 — MSC sidecar cache and pipeline-library isolation (2026-11-05)
+
+**Task summary.** N07, one cache-isolation validation slice, based on E35's
+explicit atomic rejection contract. Verify that gate changes and failed PSO
+creation cannot reuse a patched PSO as an ordinary PSO or publish patched data
+through the existing token/library path. This is not sidecar persistence support.
+No production source, capability, cache format or ABI changes. Gates 0–4 results
+are scoped below.
+
+**Baseline evidence.** `feat/d3d12`,
+`63df1db831092dcef232dbb1434a6a10d64c170b`; cached origin ahead/behind 30/0
+(no target remote refresh). Only the user's pre-existing `.gitignore` edit was
+dirty. Mullion HEAD rechecked via ls-remote:
+`93de32b9145885ceb2e45be7d445e56d62499b3c`. Apple M1 Max/Apple7, macOS27.2
+26B123, Xcode27.2 27B52, Metal32023.922, isolated runtime Wine11.0. Compiled MSC
+SDK API4.0.3; runtime product version unknown. Actual loaded runtime dylib hash
+`cc487a757f431c83483346c06a3ae8558910ecc510ce59b1e4f905d5d6d72bd4`.
+The x64 release build retains the build_dxmt.sh feature configuration and the
+previously validated patched LLVM installation; deployment uses an isolated
+stage and existing isolated test prefix, never the user's main Wine installation.
+
+**Gate 0 evidence / findings.**
+
+| Evidence type | Source anchor | Finding |
+| --- | --- | --- |
+| SPEC_REQUIRED | retained ms-cached-pso.source:813-816; ms-library-load.source:801-826 | Cached PSO data is hardware/driver/machine specific; the rest of the descriptor remains valid and matching. Library loads match name/description. GetCachedBlob and library success alone do not establish GPU output. |
+| SOURCE_AUDIT | src/d3d12/d3d12_shader_converter.cpp:203-208,1830-1877,1914-1919 | Process-local conversion cache returns a value copy. Persistent conversion reads/writes are disabled by the existing constant; this slice does not enable or newly disable them. |
+| SOURCE_AUDIT | src/d3d12/d3d12_pipeline_compute.cpp:109-153,305-313 | Sidecar patches the private conversion result after cache lookup. The PSO keeps its sidecar flag; GetCachedBlob rejects that PSO independently of the environment's later value. |
+| SOURCE_AUDIT | src/d3d12/d3d12_pipeline_persistence.cpp:1046-1078,1102-1128,1151-1178,1251-1292 | Failed StorePipeline returns before entry insertion. Compute gate guards both live and serialized library loads; stream load routes through the same guard. With gate off, live PSOs are retained; rehydrated records lazily call the existing creator. |
+| MULLION_SOURCE_OBSERVED | pinned mullion-d3d12_pipeline_compute.cpp.source:130-165,168-220,310-365 | Mullion carries compiled shader cache records with each library entry and materializes missing live PSOs through its own creator/cache. DXMT currently has canonical tokens plus live objects and a separate MSC conversion owner. Its formats, backend and binding ABI cannot be transplanted as a sidecar cache fix. No code ported. |
+| LOCAL_FAIL / existing MSC_SEMANTIC_GAP | preliminary live/*.log | A raw ordinary four-element typed view reports 64 and permits element4, while the patched four-element view passes. This confirms the known bounded-view gap; it is not evidence of cache poisoning. Retained as failure, not relabeled PASS. |
+| SOURCE_AUDIT / next issue | src/d3d12/d3d12_pipeline_persistence.cpp:27,690,1210,1302 versus d3d12_shader_converter.cpp:209-210 and include/metal_shader_converter/ir_version.h:22-24 | Persistence still hard-codes 0x040001 while the shader-conversion cache derives SDK4.0.3 from headers. This slice does not claim SDK-version invalidation is correct; fix it in the next focused slice. |
+
+**Gate 1 Design Card.**
+
+```text
+GOAL: Preserve the private sidecar boundary across shared conversion and library reuse.
+BASELINE: 63df1db8, only pre-existing .gitignore edit; existing N07 owners.
+SCOPE: Sequential gate changes, failure-first atomic creation, cached tokens and library recovery.
+NON-SCOPE: Enable patched persistence, repair normal bounded views, new cache/scheduler, capability promotion.
+ARCHITECTURE: Existing texture sampler executable/runner; existing converter and library stay authoritative.
+PLAN: Failed atomic -> off/on/off retry; raw token -> patched PSO; rejected stores/loads leave library reusable.
+PROOF: Same-process cache trace plus patched unaligned4 and ordinary full64 GPU readback.
+EDGE: Production and legacy switches; live/rehydrated descriptor and stream loads; deliberately wrong raw PSO.
+PERF: Test-only trace/timestamps; no production hot-path work or optimization claim.
+RISKS: Export/load refusal remains a gap; full64 success does not repair normal bounded-view semantics.
+ROLLBACK: Revert this focused test/report commit; no persistent migration.
+DONE: Build, loaded identity/validation, positive/negative oracles and report, commit without push.
+```
+
+The initial raw-library probe reused the existing four-element bounded-view
+fixture and failed. The final raw-library workload explicitly declares the full
+64-element view, for which element4 is a legal write, GetDimensions must be64,
+and element UINT_MAX must read zero. It checks the other59 elements remain the
+seed value. The patched workload retains the four-element, FirstElement5
+nonaligned view, with discarded element4 writes, dimensions4 and guards. This
+separates cache isolation from the known unpatched bounds defect; both remain
+reported, and no raw bounded-view success is asserted.
+
+While extending the raw guard, two preliminary harness revisions incorrectly
+covered an uninitialized/unread guard region and then failed to grow the upload
+allocation for its larger copy. Those failed batches are retained separately.
+The final test owns one typed_guard_size used for initialization and both copies,
+allocates its upload range through offset64+size (320 bytes for raw), retains a
+256-byte output buffer, and reads back all256 guard bytes. No preliminary failure
+is counted as final GPU acceptance.
+
+**Gate 2 changed files / decisions.**
+
+- `tests/dx12/dx12_texture_sampler.cpp`: CheckTypedSidecarCache runs failure-first
+  and repeated atomic refusal/recovery, raw token import into a new patched PSO,
+  immutable patched export refusal after gate disable, failed-store byte stability
+  and name reuse, and live/serialized descriptor/stream load guards and recovery.
+  It retains the selected PSO for the existing GPU readback flow. Raw atomic PSOs
+  are never submitted. Gate changes are sequential test inputs, not a production
+  thread-safety or environment-mutation contract. Test-only creation timings are
+  logged alongside the existing conversion-cache trace. Raw full-view initialization,
+  copy extents and independent guard checks share one explicit test layout.
+- `tests/dx12/run_r32_typed_uav.py`: --cache-isolation chooses patched/live/serialized
+  or deliberate wrong-PSO control, reuses existing scalar and integer atomic DXIL,
+  validates fixture/build/stage and actual loaded PE/Unix/MSC identity, and requires
+  exactly two conversion misses/inserts, at least five hits, two final entries and
+  stable aggregate metallib size at that entry count. It requires both the API
+  isolation markers and independent GPU oracle, not just cache counters.
+- This report records the design, failures, final proof limits and next slice.
+
+No new D3D12 module, duplicate state owner, cache implementation, ABI or serializer.
+The existing direct/load creator paths remain unchanged. Timings include PSO/Metal
+creation and validation; trace establishes which conversions hit. They are not pure
+MSC compile timings or a performance A/B, and do not establish a speedup.
+
+**Gate 3 validation.** LOCAL_PASS on the final source/artifact identity:
+
+| Check | Final result / evidence |
+| --- | --- |
+| x64 release default-target build | PASS, incremental full target build using existing configuration; build-layout-final.log. Existing LifetimeMarker nonvirtual-destructor warning retained. Not a clean rebuild or x86 result. |
+| Production patched cache | 3/3 GPU readbacks PASS: R32_FLOAT/UINT/SINT, nonaligned four-element view, independent guards/dimensions/OOB oracle. |
+| Production live library | 3/3 GPU readbacks PASS: explicit full64 view from the recovered live stream-load PSO. |
+| Production serialized library | 3/3 GPU readbacks PASS: explicit full64 view from the recovered rehydrated stream-load PSO. Both descriptor and stream APIs were checked before submission. |
+| Legacy experimental patched cache | 3/3 GPU readbacks PASS with the production switch absent. |
+| Deliberately wrong raw PSO with four-element nonaligned view | 3/3 expected negative GPU exits=1, exact first-element store mismatch captured. API isolation/cache checks and loaded identity/Metal validation still PASS. No timeout/crash accepted as the negative oracle. |
+| Existing typed NULL UAV regression | 3/3 GPU readbacks PASS. |
+| Existing typed atomic compare-exchange refusal regression | 2/2 expected refusal cases PASS, UINT/SINT, no command submission; not GPU atomic execution. |
+| Actual loaded binaries / validation | All20 processes PASS loaded PE export-byte/path checks, WineMetal Unix path and MSC path, API+GPU validation enabled with no reported validation error. Build/stage bytes rechecked, allowing only existing D3D12/DXGI Wine override marker edits. |
+| Static checks | Python AST PASS; git diff --check PASS; final C++/runner hashes match validated-layout-source.json. |
+
+Final batch: **20 processes, 15 positive GPU readbacks, three expected wrong-PSO
+GPU failures and two expected refusal-only regression processes**. The12 positive
+cache processes each observe exactly2 misses,2 inserts and5 hits: aggregate
+24/24/60. Each also rejects the actual atomic shader twice (failure-first and
+cached retry), while off-gate creation/export recovery succeeds. The three
+wrong-PSO processes have the same API/cache sequence but fail the independent
+GPU store oracle. These process counts and internal rejection counts are distinct.
+There are exactly two cached conversion records per cache process; aggregate
+metallib bytes remain stable after entry2. This is bounded test evidence, not an
+unbounded-growth or memory-leak proof.
+
+Evidence root (external):
+/Users/zhangbo/Documents/Vibe-Codeding/dxmt-test/n95-capability-gate/result-sidecar-cache-isolation-20261105.
+Authoritative commands/exits are in runs-layout-final.json; logs/summaries in
+layout-final/{live,serialized,patched,wrong,legacy,atomic-regression,null-regression};
+delivery-audit.json independently checks the row results, negative reason, cache
+sequence and artifact hashes. Earlier patched-first/live/final/delivery batches
+are retained separately and are not substituted for this final acceptance.
+
+Descriptive PSO creation time (microseconds),12 positive-cache processes per row,
+API/GPU validation enabled,72 samples total (timing-summary.json):
+
+| Sample / operation | Median | Min-max |
+| --- | ---: | ---: |
+| 0 atomic first conversion + rejected patch | 12974.55 | 12712.8-50023.1 |
+| 1 raw atomic recovery, conversion hit | 1991.60 | 1820.8-2718.3 |
+| 2 repeated rejected patch, conversion hit | 763.45 | 666.3-1043.7 |
+| 3 raw atomic token recovery, conversion hit | 716.30 | 684.4-975.2 |
+| 4 ordinary scalar first conversion/PSO | 6358.60 | 5665.3-14499.1 |
+| 5 patched scalar with raw token, conversion hit | 5311.40 | 4901.0-9365.5 |
+
+These different operations are sequential, include failure/Metal/validation work,
+and mix first-use and warmed effects. No performance A/B, speedup or no-regression
+claim follows. x86, D3D11 rendering, Windows native, live Mullion and other-GPU
+execution are NOT_RUN this round; production D3D11 and resource backend sources
+are unchanged.
+
+**Capability impact / remaining blockers.** All Feature Level, SM, Tier, format
+capability and backend-selection gates remain unchanged; sidecar remains default-off.
+D3D11 production behavior is unchanged. BACKEND_NOT_IMPLEMENTED: patched PSO export
+and patched library persistence. MSC_SEMANTIC_GAP: ordinary bounded typed views,
+sidecar atomics/NULL atomic semantics and broader stages. SPEC_UNVERIFIED: full
+persistence identity across SDK/runtime/OS changes, concurrent gate mutations and
+cross-stage semantics. TARGET_DEVICE_NOT_AVAILABLE applies to Windows native,
+live Mullion and other-GPU comparisons, all NOT_RUN; M1 Max Placement Sparse is
+available, and is not a hardware blocker. Cross-process MSC conversion-cache tests
+are NOT_RUN because that existing cache remains disabled, not a PASS result.
+
+**Gate 4 / Git state.** Reviewed two existing test files plus this report;
+no production source, new target/fixture, vendored code or license port changed.
+Changed-code anchors: tests/dx12/dx12_texture_sampler.cpp:307 (API/cache sequence),
+:548 (modes), :864 (upload extent), :985 (explicit full64 view), :1097 (selected
+PSO), :1642 (independent data/guard oracle); tests/dx12/run_r32_typed_uav.py:31,
+:58,:109,:182 (CLI, fixture identity and trace/oracle checks).
+Scope is independently revertible. The staged set excludes the original
+.gitignore edit; its SHA256 remains
+764aac09922db4654ca6de63fd20cf014739d9292623eb979f448f38e609b759.
+Delivery uses the existing test(d3d12) commit style without pushing. The external
+delivery-manifest.json records the commit identity and post-commit Git state,
+source/artifact hashes and validation references. Only the original .gitignore
+edit is to remain unstaged; no staged/untracked work belongs to this slice.
+Runtime binaries match the validated pre-commit source tree; their Git version
+stamp is not rebuilt after this documentation/commit step.
+
+**Next recommended slice.** N07: replace persistence's stale manual MSC SDK version
+identity with the header-derived SDK API version, then verify serialized library
+headers and invalidation/recovery using the existing persistence probes. Keep
+SDK API identity distinct from runtime product/content identity and keep patched
+persistence/capability gates closed until their own implementation and proof.

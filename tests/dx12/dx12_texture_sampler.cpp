@@ -302,6 +302,225 @@ TypedNullSRV(DXGI_FORMAT format) {
   return desc;
 }
 
+// Sequential gate changes are test inputs; a PSO's compiled state stays fixed.
+static bool
+CheckTypedSidecarCache(ID3D12Device *device,
+                       const D3D12_COMPUTE_PIPELINE_STATE_DESC &desc,
+                       const char *atomic_path, bool return_raw,
+                       bool serialized_load, ID3D12PipelineState **selected) {
+  char enabled[2] = {};
+  const char *gate_name = "DXMT_MSC_TYPED_BUFFER_EXECUTION";
+  if (GetEnvironmentVariableA(gate_name, enabled, sizeof(enabled)) != 1 ||
+      enabled[0] != '1') {
+    gate_name = "DXMT_TEST_MSC_TYPED_BUFFER_PATCH";
+    if (GetEnvironmentVariableA(gate_name, enabled, sizeof(enabled)) != 1 ||
+        enabled[0] != '1')
+      return false;
+  }
+  struct RestoreGate {
+    const char *name;
+    ~RestoreGate() { SetEnvironmentVariableA(name, "1"); }
+  } restore{gate_name};
+  auto set_gate = [&](bool on) {
+    return SetEnvironmentVariableA(gate_name, on ? "1" : nullptr) != FALSE;
+  };
+  auto check = [](const char *name, HRESULT actual, HRESULT expected = S_OK) {
+    if (actual == expected)
+      return true;
+    std::cerr << name << " returned 0x" << std::hex << actual << ", expected 0x"
+              << expected << std::dec << "\n";
+    return false;
+  };
+  LARGE_INTEGER frequency{};
+  if (!QueryPerformanceFrequency(&frequency) || !frequency.QuadPart)
+    return false;
+  unsigned create_index = 0;
+  auto create = [&](const D3D12_COMPUTE_PIPELINE_STATE_DESC *input, REFIID iid,
+                    void **output) {
+    LARGE_INTEGER begin{}, end{};
+    QueryPerformanceCounter(&begin);
+    const HRESULT hr = device->CreateComputePipelineState(input, iid, output);
+    QueryPerformanceCounter(&end);
+    std::cout << "TYPED_CACHE_CREATE sample=" << create_index++ << " us="
+              << double(end.QuadPart - begin.QuadPart) * 1000000.0 /
+                     double(frequency.QuadPart)
+              << " hr=0x" << std::hex << hr << std::dec << "\n";
+    return hr;
+  };
+  auto release = [](auto *&object) {
+    if (object)
+      object->Release();
+    object = nullptr;
+  };
+  ID3D12Device1 *device1 = nullptr;
+  ID3D12PipelineState *original = nullptr, *patched = nullptr,
+                      *loaded = nullptr, *atomic = nullptr;
+  ID3DBlob *blob = nullptr, *probe_blob = nullptr, *atomic_blob = nullptr;
+  ID3D12PipelineLibrary1 *library = nullptr, *rehydrated = nullptr;
+  const bool passed = [&] {
+    std::ifstream file(atomic_path, std::ios::binary | std::ios::ate);
+    if (!file || file.tellg() <= 0)
+      return false;
+    std::vector<char> atomic_shader(static_cast<size_t>(file.tellg()));
+    file.seekg(0);
+    if (!file.read(atomic_shader.data(), atomic_shader.size()))
+      return false;
+    auto atomic_desc = desc;
+    atomic_desc.CS = {atomic_shader.data(), atomic_shader.size()};
+    if (!check("Cache failure-first atomic",
+               create(&atomic_desc, IID_PPV_ARGS(&atomic)), E_NOTIMPL) ||
+        atomic)
+      return false;
+    if (!set_gate(false) ||
+        !check("Cache raw atomic",
+               create(&atomic_desc, IID_PPV_ARGS(&atomic))) ||
+        !check("Cache raw atomic blob", atomic->GetCachedBlob(&atomic_blob)))
+      return false;
+    release(atomic);
+    if (!set_gate(true) ||
+        !check("Cache repeated atomic refusal",
+               create(&atomic_desc, IID_PPV_ARGS(&atomic)), E_NOTIMPL) ||
+        atomic)
+      return false;
+    atomic_desc.CachedPSO = {atomic_blob->GetBufferPointer(),
+                             atomic_blob->GetBufferSize()};
+    if (!set_gate(false) ||
+        !check("Cache raw atomic recovery",
+               create(&atomic_desc, IID_PPV_ARGS(&atomic))) ||
+        !check("Cache recovered atomic blob",
+               atomic->GetCachedBlob(&probe_blob)) ||
+        probe_blob->GetBufferSize() != atomic_blob->GetBufferSize() ||
+        memcmp(probe_blob->GetBufferPointer(), atomic_blob->GetBufferPointer(),
+               probe_blob->GetBufferSize()))
+      return false;
+    release(atomic);
+    release(probe_blob);
+    std::cout << "typed cache atomic failure-first/retry recovery passed; no "
+                 "atomic submission\n";
+
+    if (!check("Cache raw PSO", create(&desc, IID_PPV_ARGS(&original))) ||
+        !check("Cache raw blob", original->GetCachedBlob(&blob)) ||
+        !check("Cache device1",
+               device->QueryInterface(IID_PPV_ARGS(&device1))) ||
+        !check("Cache library", device1->CreatePipelineLibrary(
+                                    nullptr, 0, IID_PPV_ARGS(&library))) ||
+        !check("Cache raw store", library->StorePipeline(L"raw", original)))
+      return false;
+    auto serialize = [&](std::vector<BYTE> &bytes) {
+      const SIZE_T size = library->GetSerializedSize();
+      if (!size)
+        return false;
+      bytes.resize(size);
+      return check("Cache serialize",
+                   library->Serialize(bytes.data(), bytes.size()));
+    };
+    std::vector<BYTE> before, after;
+    if (!serialize(before) || !set_gate(true))
+      return false;
+    auto cached = desc;
+    cached.CachedPSO = {blob->GetBufferPointer(), blob->GetBufferSize()};
+    if (!check("Cache patched PSO with raw token",
+               create(&cached, IID_PPV_ARGS(&patched))) ||
+        !check("Cache patched blob pointer", patched->GetCachedBlob(nullptr),
+               E_POINTER) ||
+        !check("Cache patched export", patched->GetCachedBlob(&probe_blob),
+               E_NOTIMPL) ||
+        probe_blob ||
+        !check("Cache patched store",
+               library->StorePipeline(L"failed-store", patched), E_NOTIMPL) ||
+        !serialize(after) || before != after ||
+        !check(
+            "Cache live load blocked",
+            library->LoadComputePipeline(L"raw", &desc, IID_PPV_ARGS(&loaded)),
+            E_NOTIMPL) ||
+        loaded)
+      return false;
+    struct Stream {
+      struct alignas(void *) {
+        D3D12_PIPELINE_STATE_SUBOBJECT_TYPE type;
+        ID3D12RootSignature *value;
+      } root;
+      struct alignas(void *) {
+        D3D12_PIPELINE_STATE_SUBOBJECT_TYPE type;
+        D3D12_SHADER_BYTECODE value;
+      } cs;
+    } stream{{D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE,
+              desc.pRootSignature},
+             {D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CS, desc.CS}};
+    D3D12_PIPELINE_STATE_STREAM_DESC stream_desc{sizeof(stream), &stream};
+    if (!check(
+            "Cache stream load blocked",
+            library->LoadPipeline(L"raw", &stream_desc, IID_PPV_ARGS(&loaded)),
+            E_NOTIMPL) ||
+        loaded ||
+        !check("Cache rehydrate",
+               device1->CreatePipelineLibrary(before.data(), before.size(),
+                                              IID_PPV_ARGS(&rehydrated))) ||
+        !check("Cache serialized load blocked",
+               rehydrated->LoadComputePipeline(L"raw", &desc,
+                                               IID_PPV_ARGS(&loaded)),
+               E_NOTIMPL) ||
+        loaded ||
+        !check("Cache serialized stream blocked",
+               rehydrated->LoadPipeline(L"raw", &stream_desc,
+                                        IID_PPV_ARGS(&loaded)),
+               E_NOTIMPL) ||
+        loaded)
+      return false;
+    if (!set_gate(false) ||
+        !check("Cache patched export after disable",
+               patched->GetCachedBlob(&probe_blob), E_NOTIMPL) ||
+        probe_blob ||
+        !check("Cache patched store after disable",
+               library->StorePipeline(L"failed-store", patched), E_NOTIMPL) ||
+        !serialize(after) || before != after ||
+        !check("Cache failed name reusable",
+               library->StorePipeline(L"failed-store", original)))
+      return false;
+    for (auto *source : {library, rehydrated}) {
+      for (bool use_stream : {false, true}) {
+        HRESULT hr = use_stream ? source->LoadPipeline(L"raw", &stream_desc,
+                                                       IID_PPV_ARGS(&loaded))
+                                : source->LoadComputePipeline(
+                                      L"raw", &desc, IID_PPV_ARGS(&loaded));
+        if (!check("Cache raw load recovery", hr) ||
+            !check("Cache raw load blob", loaded->GetCachedBlob(&probe_blob)) ||
+            blob->GetBufferSize() != probe_blob->GetBufferSize() ||
+            memcmp(blob->GetBufferPointer(), probe_blob->GetBufferPointer(),
+                   blob->GetBufferSize()))
+          return false;
+        release(probe_blob);
+        if (return_raw && source == (serialized_load ? rehydrated : library) &&
+            use_stream) {
+          *selected = loaded;
+          loaded = nullptr;
+        } else
+          release(loaded);
+      }
+    }
+    if (!return_raw) {
+      *selected = patched;
+      patched = nullptr;
+    }
+    if (device->GetDeviceRemovedReason() != S_OK)
+      return false;
+    std::cout << "typed cache raw token/patched export/live+serialized stream "
+                 "isolation passed\n";
+    return true;
+  }();
+  release(atomic_blob);
+  release(probe_blob);
+  release(blob);
+  release(atomic);
+  release(loaded);
+  release(patched);
+  release(original);
+  release(rehydrated);
+  release(library);
+  release(device1);
+  return passed;
+}
+
 int
 main(int argc, char **argv) {
   char identity_requested[2] = {};
@@ -326,6 +545,13 @@ main(int argc, char **argv) {
   if (argc < 2 || argc > 5)
     return 2;
   const bool placed = argc == 5 && strcmp(argv[4], "--placed") == 0;
+  const bool cache_live = argc == 5 && strcmp(argv[2], "--typed-buffer-cache-live") == 0;
+  const bool cache_serialized = argc == 5 && strcmp(argv[2], "--typed-buffer-cache-serialized") == 0;
+  const bool cache_wrong = argc == 5 && strcmp(argv[2], "--typed-buffer-cache-wrong") == 0;
+  const bool cache_isolation = cache_live || cache_serialized || cache_wrong ||
+      (argc == 5 && strcmp(argv[2], "--typed-buffer-cache-patched") == 0);
+  const bool cache_raw = cache_live || cache_serialized;
+  const UINT typed_guard_size = cache_raw ? 256u : 64u;
   const bool atomic_reject = argc == 4 && strcmp(argv[2], "--typed-buffer-atomic-reject") == 0;
   const bool direct_null = argc == 3 && strcmp(argv[2], "--direct-indexed-late-null") == 0;
   const bool late_null = argc == 4 && strcmp(argv[2], "--typed-uav-late-null") == 0;
@@ -361,12 +587,14 @@ main(int argc, char **argv) {
   const bool typed_srv = srv_live || srv_null;
   const bool null_uav_live = argc == 4 && strcmp(argv[2], "--typed-buffer-null-live") == 0;
   const bool null_uav = null_uav_live || (argc == 4 && strcmp(argv[2], "--typed-buffer-null") == 0);
-  const bool unaligned_buffer = argc == 4 && strcmp(argv[2], "--typed-buffer-unaligned") == 0;
+  const bool unaligned_buffer = (cache_isolation && !cache_live && !cache_serialized) ||
+      (argc == 4 && strcmp(argv[2], "--typed-buffer-unaligned") == 0);
   const bool indirect_late_skip = argc == 4 && strcmp(argv[2], "--typed-buffer-indirect-late-skip") == 0;
   const bool indirect_late = indirect_late_skip || (argc == 4 && strcmp(argv[2], "--typed-buffer-indirect-late") == 0);
   const bool late_copy = indirect_late || (argc == 4 && strcmp(argv[2], "--typed-buffer-late-copy") == 0);
   const bool late_buffer = late_copy || (argc == 4 && strcmp(argv[2], "--typed-buffer-late") == 0);
-  const bool zero_offset_buffer = argc == 4 && strcmp(argv[2], "--typed-buffer-zero") == 0;
+  const bool zero_offset_buffer = cache_live || cache_serialized ||
+      (argc == 4 && strcmp(argv[2], "--typed-buffer-zero") == 0);
   const bool rerecord_wrong = argc == 4 && strcmp(argv[2], "--typed-buffer-rerecord-wrong") == 0;
   const bool rerecord_zero = argc == 4 && strcmp(argv[2], "--typed-buffer-rerecord-zero") == 0;
   const bool rerecord = rerecord_wrong || rerecord_zero || (argc == 4 && strcmp(argv[2], "--typed-buffer-rerecord") == 0);
@@ -385,7 +613,7 @@ main(int argc, char **argv) {
   const bool encoder_break = indirect_heap || (argc == 4 && strcmp(argv[2], "--typed-buffer-heap-switch-encoder") == 0);
   const bool heap_switch = wrong_heap_expected || encoder_break || (argc == 4 && strcmp(argv[2], "--typed-buffer-heap-switch") == 0);
   const bool typed_buffer = atomic_reject || typed_srv || null_uav || unaligned_buffer || late_buffer || zero_offset_buffer || heap_switch || pending_reset || indirect_reject || indirect || indirect_count || (argc == 4 && strcmp(argv[2], "--typed-buffer") == 0);
-  if (argc == 5 && !placed)
+  if (argc == 5 && !placed && !cache_isolation)
     return 2;
   const TypedFormat *typed_format = nullptr;
   if (argc >= 4) {
@@ -633,15 +861,23 @@ main(int argc, char **argv) {
   buffer_desc.MipLevels = 1;
   buffer_desc.SampleDesc.Count = 1;
   buffer_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-  if (!CheckHR(
-          "CreateUploadBuffer",
-          device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &buffer_desc,
-                                           D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&upload))))
-    goto cleanup;
+  {
+    auto upload_desc = buffer_desc;
+    if (cache_raw)
+      upload_desc.Width = 64 + typed_guard_size;
+    if (!CheckHR("CreateUploadBuffer",
+                 device->CreateCommittedResource(
+                     &upload_heap, D3D12_HEAP_FLAG_NONE, &upload_desc,
+                     D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                     IID_PPV_ARGS(&upload))))
+      goto cleanup;
+  }
   if (srv_only) {
-    if (!CheckHR("CreateSRVOnlyBuffer", device->CreateCommittedResource(
-            &upload_heap, D3D12_HEAP_FLAG_NONE, &buffer_desc, D3D12_RESOURCE_STATE_GENERIC_READ,
-            nullptr, IID_PPV_ARGS(&srv_only_resource))))
+    if (!CheckHR("CreateSRVOnlyBuffer",
+                 device->CreateCommittedResource(
+                     &upload_heap, D3D12_HEAP_FLAG_NONE, &buffer_desc,
+                     D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                     IID_PPV_ARGS(&srv_only_resource))))
       goto cleanup;
     void *data = nullptr;
     if (!CheckHR("MapSRVOnlyBuffer", srv_only_resource->Map(0, nullptr, &data)))
@@ -660,7 +896,7 @@ main(int argc, char **argv) {
          typed_format && typed_format->kind == 'a' ? &alpha_pixel : &pixel,
          sizeof(pixel));
   if (typed_buffer)
-    memset(static_cast<char *>(upload_data) + 64, 0xa5, 64);
+    memset(static_cast<char *>(upload_data) + 64, 0xa5, typed_guard_size);
   if (indirect || indirect_count) {
     const D3D12_DISPATCH_ARGUMENTS dispatch = {1, 1, 1};
     memcpy(static_cast<char *>(upload_data) + 128, &dispatch, sizeof(dispatch));
@@ -746,6 +982,10 @@ main(int argc, char **argv) {
     if (typed_buffer) {
       texture_uav_desc.Buffer.FirstElement = zero_offset_buffer ? 0 : unaligned_buffer ? 5 : 4;
       texture_uav_desc.Buffer.NumElements = indirect_late ? 2 : 4;
+      // The raw path's bounded-view gap is separate from cache isolation. Use
+      // a full, explicit 64-element view there; element 4 is a valid write.
+      if (cache_raw)
+        texture_uav_desc.Buffer.NumElements = static_cast<UINT>(output_texture_desc.Width / sizeof(UINT));
     }
     auto texture_uav_cpu = resource_cpu;
     texture_uav_cpu.ptr += descriptor_increment * (srv_multi ? 3 : 2);
@@ -854,7 +1094,12 @@ main(int argc, char **argv) {
     result = 0;
     goto cleanup;
   }
-  if (!CheckHR("CreateComputePipelineState", device->CreateComputePipelineState(&pso_desc, IID_PPV_ARGS(&pso))))
+  if (cache_isolation) {
+    if (!CheckTypedSidecarCache(device, pso_desc, argv[4], cache_live || cache_serialized || cache_wrong,
+                               cache_serialized, &pso))
+      goto cleanup;
+    std::cout << "typed cache execution mode=" << argv[2] << "\n";
+  } else if (!CheckHR("CreateComputePipelineState", device->CreateComputePipelineState(&pso_desc, IID_PPV_ARGS(&pso))))
     goto cleanup;
   if (!CheckHR(
           "CreateCommandList",
@@ -868,7 +1113,7 @@ main(int argc, char **argv) {
   texture_src.PlacedFootprint = footprint;
   list->CopyTextureRegion(&texture_dst, 0, 0, 0, &texture_src, nullptr);
   if (typed_buffer) {
-    list->CopyBufferRegion(output_texture, 0, upload, 64, 64);
+    list->CopyBufferRegion(output_texture, 0, upload, 64, typed_guard_size);
     D3D12_RESOURCE_BARRIER buffer_barrier = {};
     buffer_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     buffer_barrier.Transition = {output_texture, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
@@ -1015,7 +1260,7 @@ main(int argc, char **argv) {
     texture_barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
     list->ResourceBarrier(1, &texture_barrier);
     if (typed_buffer) {
-      list->CopyBufferRegion(readback, 512, output_texture, 0, 64);
+      list->CopyBufferRegion(readback, 512, output_texture, 0, typed_guard_size);
     } else {
     D3D12_TEXTURE_COPY_LOCATION texture_readback = {};
     texture_readback.pResource = readback;
@@ -1394,12 +1639,13 @@ main(int argc, char **argv) {
     if (heap_switch)
       std::cout << "heap switch dimensions=4,2 passed\n";
     bool valid_bounds = true;
-    if (mapped[17] != 0) {
+    const UINT forty_two = typed_format->kind == 'f' ? 0x42280000u : 42u;
+    if (mapped[17] != (cache_raw ? forty_two : 0u)) {
       std::cerr << "typed buffer out-of-bounds load mismatch: 0x" << std::hex
                 << mapped[17] << std::dec << "\n";
       valid_bounds = false;
     }
-    if (mapped[18] != 4 || mapped[19] != 0) {
+    if (mapped[18] != (cache_raw ? 64u : 4u) || mapped[19] != 0) {
       std::cerr << "typed buffer dimensions/max-index mismatch: count=" << mapped[18]
                 << " value=0x" << std::hex << mapped[19] << std::dec << "\n";
       valid_bounds = false;
@@ -1409,15 +1655,22 @@ main(int argc, char **argv) {
       goto cleanup;
     }
     const auto *guard = reinterpret_cast<const UINT *>(reinterpret_cast<const char *>(mapped) + 512);
-    for (unsigned i = 0; i < 16; ++i) {
+    if (cache_raw && guard[4] != forty_two) {
+      std::cerr << "typed cache full-view element 4 write mismatch\n";
+      readback->Unmap(0, nullptr);
+      goto cleanup;
+    }
+    for (unsigned i = 0; i < (cache_raw ? 64u : 16u); ++i) {
       const unsigned start = zero_offset_buffer ? 0 : (unaligned_buffer || late_buffer) ? 5 : 4;
-      if ((i < start || i >= start + 4) && guard[i] != 0xa5a5a5a5u) {
+      if ((i < start || i >= start + (cache_raw ? 5u : 4u)) && guard[i] != 0xa5a5a5a5u) {
         std::cerr << "typed buffer guard mismatch at " << i << "\n";
         readback->Unmap(0, nullptr);
         goto cleanup;
       }
     }
     std::cout << "typed buffer guards and out-of-bounds load passed\n";
+    if (cache_isolation)
+      std::cout << "typed cache descriptor elements=" << (cache_raw ? 64 : 4) << " readback passed\n";
   }
   texture_value = direct_indexed_uav_texture
                       ? *reinterpret_cast<UINT *>(reinterpret_cast<char *>(mapped) + output_texture_footprint.Offset)

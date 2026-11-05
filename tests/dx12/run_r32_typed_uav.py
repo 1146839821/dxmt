@@ -28,6 +28,7 @@ def main():
     parser.add_argument("--experimental-patch", action="store_true", help="enable the experimental MSC sidecar path")
     parser.add_argument("--production-gate", action="store_true", help="enable the opt-in MSC typed-buffer execution gate")
     parser.add_argument("--atomic", choices=("add", "and", "or", "xor", "min", "max", "exchange", "compare-exchange", "compare-store"), help="expect explicit sidecar PSO rejection for a real typed atomic shader; no GPU submission")
+    parser.add_argument("--cache-isolation", choices=("patched", "live", "serialized", "wrong"), help="check gate transitions, PSO/library persistence and conversion-cache recovery")
     parser.add_argument("--no-compute-residency", action="store_true", help="verify rejection is independent of the MSC residency debug switch")
     parser.add_argument("--null-update", choices=("late-null", "late-live", "late-null-outside", "replay-null", "direct-null"), help="test submission-time typed NULL validation")
     parser.add_argument("--unused-null", action="store_true", help="put a typed NULL outside the bound root-table ranges")
@@ -54,6 +55,12 @@ def main():
     parser.add_argument("--null-uav-live", action="store_true", help="negative control using a live UAV")
     parser.add_argument("--srv", choices=("null", "live", "null-to-live", "live-to-null", "null-to-live-skip", "live-to-null-skip", "null-to-live-only", "null-to-live-only-skip", "null-to-live-only-pending", "null-to-live-only-pending-skip", "null-to-live-only-rerecord", "null-to-live-only-rerecord-wrong", "copy-to-live", "copy-to-null", "copy-to-live-skip", "copy-to-null-skip", "multi", "multi-skip", "multi-wrong", "multi-merge", "multi-merge-skip", "multi-split", "multi-split-skip"), help="test a typed SRV and optional post-Close update")
     args = parser.parse_args()
+    if args.cache_isolation and (not args.buffer or not args.scalar or
+                                 args.production_gate == args.experimental_patch or
+                                 any(value for name, value in vars(args).items() if name not in (
+                                     "stage", "prefix", "build", "converter", "output", "cache_isolation",
+                                     "buffer", "scalar", "production_gate", "experimental_patch"))):
+        parser.error("--cache-isolation requires --buffer --scalar and exactly one sidecar gate, with no other test mode")
     if args.atomic and (not args.buffer or not args.scalar or not args.production_gate or
                         any(value for name, value in vars(args).items() if name not in (
                             "stage", "prefix", "build", "converter", "output", "atomic",
@@ -99,6 +106,9 @@ def main():
     fixtures = {kind: "texture_sampler_direct_indexed.cs.cso" if args.null_update == "direct-null" else
                 f"{prefix_name}_{kind}.cs.cso" for kind, _ in cases}
     pairs += [(f"tests/dx12/{name}", name) for name in fixtures.values()]
+    atomic_fixtures = {kind: f"typed_buffer_atomic_add_{'sint' if kind == 'sint' else 'uint'}.cs.cso"
+                       for kind, _ in cases} if args.cache_isolation else {}
+    pairs += [(f"tests/dx12/{name}", name) for name in sorted(set(atomic_fixtures.values()))]
     for source, target in pairs:
         expected = (build / source).read_bytes()
         if source in ("src/d3d12/d3d12.dll", "src/dxgi/dxgi.dll") and expected[64:80] == b"Wine builtin DLL":
@@ -121,6 +131,8 @@ def main():
         env["DXMT_MSC_TYPED_BUFFER_EXECUTION"] = "1"
     else:
         env.pop("DXMT_MSC_TYPED_BUFFER_EXECUTION", None)
+    if args.cache_isolation:
+        env["DXMT_MSC_CACHE_TRACE"] = "1"
     identities = [f"LOADED_CODE {dll} {symbol} {pe_export_bytes(stage / dll, symbol)}" for dll, symbol in
                   (("d3d12.dll", "D3D12CreateDevice"), ("winemetal.dll", "DXMTMSCPatchSamplerLOD"))]
     rows = []
@@ -133,6 +145,9 @@ def main():
             command[3] = "--typed-buffer-srv-" + args.srv
         if args.atomic:
             command[3] = "--typed-buffer-atomic-reject"
+        if args.cache_isolation:
+            command[3] = "--typed-buffer-cache-" + args.cache_isolation
+            command.append(atomic_fixtures[kind])
         if args.unused_null:
             command[3] = "--typed-uav-null-outside"
         if args.null_update:
@@ -164,6 +179,19 @@ def main():
             passed = (result.returncode == 0 and
                       "typed atomic PSO rejected; no command list submitted; device healthy" in log and
                       "MSC typed-buffer test patch rejected: result=0 status=2" in log)
+        cache_events = re.findall(r"MSC_CACHE event=(\w+) entries=(\d+) metallib_bytes=(\d+)", log)
+        cache_pass = True
+        if args.cache_isolation:
+            cache_pass = (sum(e[0] == "miss" for e in cache_events) == 2 and
+                          sum(e[0] == "insert" for e in cache_events) == 2 and
+                          sum(e[0] == "hit" for e in cache_events) >= 5 and
+                          cache_events[-1][1] == "2" and
+                          len({e[2] for e in cache_events if e[1] == "2"}) == 1)
+            passed = (passed and cache_pass and
+                      "typed cache atomic failure-first/retry recovery passed; no atomic submission" in log and
+                      "typed cache raw token/patched export/live+serialized stream isolation passed" in log and
+                      f"typed cache descriptor elements={64 if args.cache_isolation in ('live', 'serialized') else 4} readback passed" in log and
+                      "typed cache execution mode=--typed-buffer-cache-" + args.cache_isolation in log)
         if args.null_update:
             updated = "typed NULL post-Close update mode=--typed-uav-" + args.null_update in log
             rejected = "typed NULL submission rejected; readback guard unchanged" in log
@@ -197,7 +225,8 @@ def main():
         rows.append(dict(kind=kind, format=fmt, exit=result.returncode, case_pass=passed,
                          readback_pass=passed and not args.atomic,
                          oracle="PSO_UNSUPPORTED_NO_SUBMISSION" if args.atomic else "existing scenario",
-                         identity_pass=identity, validation_pass=validation))
+                         identity_pass=identity, validation_pass=validation,
+                         cache_pass=cache_pass, cache_events=cache_events))
         print(rows[-1], flush=True)
     summary = {"cases": rows, "converter_sha256": sha(converter),
                "artifacts": {target: sha(stage / target) for _, target in pairs}}
