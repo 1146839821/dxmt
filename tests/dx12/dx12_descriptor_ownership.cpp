@@ -2374,6 +2374,251 @@ bool CheckTypedViewFormats(UINT mode = 0, bool cost = false) {
   return good;
 }
 
+bool CheckNullViewIdentity(bool wrong_mapping, bool cost) {
+  struct Objects {
+    ID3D12Device *device = nullptr;
+    ID3D12DescriptorHeap *source = nullptr, *mirror = nullptr;
+    ID3D12Resource *buffer = nullptr;
+    ~Objects() {
+      Release(mirror);
+      Release(source);
+      Release(buffer);
+      Release(device);
+    }
+  } o;
+  if (!CheckHR("null identity device",
+               D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+                                 IID_PPV_ARGS(&o.device))))
+    return false;
+  const auto properties = DefaultHeap();
+  const auto resource_desc =
+      BufferDescription(256, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+  if (!CheckHR("null identity resource",
+               o.device->CreateCommittedResource(
+                   &properties, D3D12_HEAP_FLAG_NONE, &resource_desc,
+                   D3D12_RESOURCE_STATE_COMMON, nullptr,
+                   IID_PPV_ARGS(&o.buffer))))
+    return false;
+  auto *device = static_cast<dxmt::MTLD3D12Device *>(o.device);
+  bool good = true;
+  UINT cases = 0;
+  for (bool visible : {false, true}) {
+    D3D12_DESCRIPTOR_HEAP_DESC hd{};
+    hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    hd.NumDescriptors = 2;
+    hd.Flags = visible ? D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE
+                       : D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+    if (!CheckHR("null identity source",
+                 o.device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&o.source))))
+      return false;
+    hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    if (!CheckHR("null identity mirror",
+                 o.device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&o.mirror))))
+      return false;
+    auto *heap = static_cast<dxmt::MTLD3D12DescriptorHeap *>(o.source);
+    auto *mirror = static_cast<dxmt::MTLD3D12DescriptorHeap *>(o.mirror);
+    const auto handle = o.source->GetCPUDescriptorHandleForHeapStart();
+    const auto destination = o.mirror->GetCPUDescriptorHandleForHeapStart();
+    const auto copy = [&]() {
+      const auto generation = mirror->GetMutationGeneration();
+      o.device->CopyDescriptorsSimple(1, destination, handle, hd.Type);
+      return mirror->GetMutationGeneration() == generation + 1;
+    };
+    const auto zero_gpu = [&]() {
+      const auto gpu = o.mirror->GetGPUDescriptorHandleForHeapStart();
+      for (auto address :
+           {gpu.ptr, mirror->GetMSCDescriptorTableAddress(gpu)}) {
+        uint64_t offset = 0;
+        auto *allocation = device->LookupBufferByVA(address, &offset);
+        if (!allocation || !allocation->mappedMemory(0))
+          return false;
+        const auto *bytes =
+            static_cast<const uint8_t *>(allocation->mappedMemory(0)) + offset;
+        for (UINT i = 0; i < (address == gpu.ptr ? 32u : 24u); ++i)
+          if (bytes[i])
+            return false;
+      }
+      return true;
+    };
+    const auto verify = [&](dxmt::NullViewKind kind, DXGI_FORMAT format,
+                            UINT dimension, UINT mapping) {
+      const auto cpu = ReadDescriptorFields(heap, 0);
+      const auto copied = ReadDescriptorFields(mirror, 0);
+      const auto matches = [&](const auto &v) {
+        const auto *payload = reinterpret_cast<const uint8_t *>(&v.NullView);
+        for (size_t i = sizeof(v.NullView); i < sizeof(v.UAVBuffer); ++i)
+          if (payload[i])
+            return false;
+        return v.type == dxmt::ShaderVisibleDescriptorType::Null &&
+               !v.allocation && v.NullView.kind == kind &&
+               v.NullView.format == format &&
+               v.NullView.dimension == dimension &&
+               v.NullView.component_mapping == mapping;
+      };
+      auto batch = heap->ReadDescriptorBatch();
+      return matches(cpu) && matches(copied) &&
+             batch.first_resource() == UINT_MAX && zero_gpu();
+    };
+    good &=
+        copy() && verify(dxmt::NullViewKind::None, DXGI_FORMAT_UNKNOWN, 0, 0);
+    for (auto format :
+         {DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32_SINT})
+      for (bool uav : {false, true})
+        for (bool seeded : {false, true})
+          for (bool custom : {false, true}) {
+            D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+            srv.Format = format;
+            srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+            srv.Buffer.FirstElement = 4;
+            srv.Buffer.NumElements = 4;
+            srv.Shader4ComponentMapping =
+                custom ? D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(5, 4, 1, 0)
+                       : D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            D3D12_UNORDERED_ACCESS_VIEW_DESC uv{};
+            uv.Format = format;
+            uv.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+            uv.Buffer.FirstElement = 4;
+            uv.Buffer.NumElements = 4;
+            const auto write = [&](ID3D12Resource *resource) {
+              if (uav)
+                o.device->CreateUnorderedAccessView(resource, nullptr, &uv,
+                                                    handle);
+              else
+                o.device->CreateShaderResourceView(resource, &srv, handle);
+            };
+            heap->ClearDescriptor(0);
+            if (seeded) {
+              // Seed a counter-bearing descriptor, including owned counter and
+              // its texture view.
+              D3D12_UNORDERED_ACCESS_VIEW_DESC counter{};
+              counter.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+              counter.Buffer.NumElements = 4;
+              counter.Buffer.StructureByteStride = 4;
+              o.device->CreateUnorderedAccessView(o.buffer, o.buffer, &counter,
+                                                  handle);
+              const auto descriptor = ReadDescriptorFields(heap, 0);
+              if (descriptor.type !=
+                      dxmt::ShaderVisibleDescriptorType::UAVBuffer ||
+                  descriptor.UAVBuffer.buffer != descriptor.UAVBuffer.counter)
+                return false;
+            }
+            const auto generation = heap->GetMutationGeneration();
+            write(nullptr);
+            bool pass =
+                heap->GetMutationGeneration() == generation + 1 && copy();
+            const UINT expected_mapping =
+                uav ? 0
+                    : srv.Shader4ComponentMapping ^ (wrong_mapping ? 1u : 0u);
+            pass &= verify(uav ? dxmt::NullViewKind::UnorderedAccess
+                               : dxmt::NullViewKind::ShaderResource,
+                           format,
+                           uav ? UINT(D3D12_UAV_DIMENSION_BUFFER)
+                               : UINT(D3D12_SRV_DIMENSION_BUFFER),
+                           expected_mapping);
+            const auto before = ReadDescriptorFields(heap, 0);
+            const auto invalid_generation = heap->GetMutationGeneration();
+            // Invalid typed descriptions must leave identity, GPU bytes and
+            // generation intact.
+            if (uav) {
+              for (UINT invalid = 0; invalid < 3; ++invalid) {
+                auto bad = uv;
+                if (!invalid)
+                  bad.Buffer.StructureByteStride = 4;
+                else if (invalid == 1)
+                  bad.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+                else
+                  bad.Buffer.CounterOffsetInBytes = 4096;
+                pass &= heap->AddUnorderedAccessView(0, &bad) == E_INVALIDARG;
+              }
+              pass &=
+                  heap->AddUnorderedAccessView(
+                      0, static_cast<const D3D12_UNORDERED_ACCESS_VIEW_DESC *>(
+                             nullptr)) == E_INVALIDARG;
+              pass &= heap->AddUnorderedAccessView(2, &uv) == E_INVALIDARG;
+            } else {
+              for (UINT invalid = 0; invalid < 5; ++invalid) {
+                auto bad = srv;
+                if (!invalid)
+                  bad.Buffer.StructureByteStride = 4;
+                else if (invalid == 1)
+                  bad.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+                else if (invalid == 2)
+                  bad.Shader4ComponentMapping = 0;
+                else if (invalid == 3)
+                  bad.Shader4ComponentMapping =
+                      D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(6, 1, 2, 3);
+                else
+                  bad.Shader4ComponentMapping |= 1u << 31;
+                pass &= heap->AddShaderResourceView(0, &bad) == E_INVALIDARG;
+              }
+              pass &=
+                  heap->AddShaderResourceView(
+                      0, static_cast<const D3D12_SHADER_RESOURCE_VIEW_DESC *>(
+                             nullptr)) == E_INVALIDARG;
+              pass &= heap->AddShaderResourceView(2, &srv) == E_INVALIDARG;
+            }
+            const auto after = ReadDescriptorFields(heap, 0);
+            pass &= std::memcmp(&before, &after, sizeof(before)) == 0 &&
+                    heap->GetMutationGeneration() == invalid_generation;
+            pass &= copy() && zero_gpu();
+            heap->ClearDescriptor(0);
+            pass &= heap->GetMutationGeneration() == invalid_generation + 1 &&
+                    copy() &&
+                    verify(dxmt::NullViewKind::None, DXGI_FORMAT_UNKNOWN, 0, 0);
+            write(o.buffer);
+            pass &= ReadDescriptorFields(heap, 0).type ==
+                    (uav ? dxmt::ShaderVisibleDescriptorType::UAVTexelBuffer
+                         : dxmt::ShaderVisibleDescriptorType::SRVTexelBuffer);
+            write(nullptr);
+            pass &= copy() && verify(uav ? dxmt::NullViewKind::UnorderedAccess
+                                         : dxmt::NullViewKind::ShaderResource,
+                                     format,
+                                     uav ? UINT(D3D12_UAV_DIMENSION_BUFFER)
+                                         : UINT(D3D12_SRV_DIMENSION_BUFFER),
+                                     uav ? 0 : srv.Shader4ComponentMapping);
+            good &= pass;
+            ++cases;
+            std::cout << "NULL_IDENTITY visible=" << visible
+                      << " format=" << format << " uav=" << uav
+                      << " seeded=" << seeded << " custom=" << custom
+                      << " pass=" << pass << "\n";
+          }
+    // Existing null dimensions/formats remain generic rather than claiming
+    // typed support.
+    D3D12_SHADER_RESOURCE_VIEW_DESC other{};
+    other.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    other.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    other.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    other.Texture2D.MipLevels = 1;
+    o.device->CreateShaderResourceView(nullptr, &other, handle);
+    good &=
+        copy() && verify(dxmt::NullViewKind::None, DXGI_FORMAT_UNKNOWN, 0, 0);
+    if (cost) {
+      D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+      srv.Format = DXGI_FORMAT_R32_UINT;
+      srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+      srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+      srv.Buffer.NumElements = 4;
+      for (UINT round = 0; round < 25; ++round) {
+        const auto start = std::chrono::steady_clock::now();
+        for (UINT i = 0; i < 10000; ++i)
+          o.device->CreateShaderResourceView(nullptr, &srv, handle);
+        const auto us = std::chrono::duration<double, std::micro>(
+                            std::chrono::steady_clock::now() - start)
+                            .count();
+        std::cout << "NULL_IDENTITY_COST visible=" << visible
+                  << " round=" << round << " writes=10000 us=" << us << "\n";
+      }
+    }
+    Release(o.mirror);
+    Release(o.source);
+  }
+  std::cout << "NULL_IDENTITY_RESULT cases=" << cases
+            << " cpu_size=" << sizeof(dxmt::ShaderVisibleDescriptorCPUStorage)
+            << " pass=" << good << "\n";
+  return good;
+}
+
 bool CheckNativeBufferViewPublication(const char *srv_path,
                                       const char *uav_path, UINT seed,
                                       bool wrong_word) {
@@ -2897,6 +3142,14 @@ int main(int argc, char **argv) {
       std::cout << "\n";
     }
   }
+  if (argc == 2 && (std::string(argv[1]) == "--null-view-identity" ||
+                    std::string(argv[1]) == "--null-view-identity-wrong" ||
+                    std::string(argv[1]) == "--null-view-identity-cost"))
+    return CheckNullViewIdentity(
+               std::string(argv[1]) == "--null-view-identity-wrong",
+               std::string(argv[1]) == "--null-view-identity-cost")
+               ? 0
+               : 1;
   if ((argc == 5 || argc == 6) &&
       std::string(argv[1]) == "--native-buffer-view-publication")
     return CheckNativeBufferViewPublication(

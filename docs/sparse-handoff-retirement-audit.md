@@ -3414,6 +3414,77 @@ an atomic oracle); all-format and cross-device proof is UNVERIFIED /
 TARGET_DEVICE_NOT_AVAILABLE for absent devices. Default activation stays HELD.
 The unexplained early publication wait/failure remains UNVERIFIED, not hardware.
 
+### E31 — Explicit typed NULL view identity in the descriptor CPU owner (2026-11-05)
+
+**Task Summary / scope.** The descriptor heap now preserves the identity of a
+legal null R32 FLOAT/UINT/SINT buffer SRV or UAV in its existing CPU union. The
+payload records view kind, format, dimension, and SRV component mapping. This is
+metadata preparation only: native GPU descriptor records remain zero, the slot
+does not enter the resource index, and production shader NULL execution is still
+OPEN.
+
+**Baseline and evidence.** Baseline was `909aa4fd8ad6735269ede7c7c7c505d5599d3d27`
+on `feat/d3d12`, with the pre-existing `.gitignore` edit preserved. The owner and
+publication path are `src/d3d12/d3d12_descriptor_heap.hpp:129-165` and
+`src/d3d12/d3d12_descriptor_heap.cpp:236-258,674-712`. The shared publication
+path clears the whole union, releases descriptor-owned texture/buffer/counter
+references, clears both GPU ABI forms, updates the resource index, and advances
+the existing mutation generation under the heap mutex.
+
+**Design decisions.** A 16-byte `NullViewCPUStorage` fits the existing largest
+union member and the compiler-visible CPU record remains 56 bytes. Typed null
+admission validates R32 buffer shape, SRV mapping, and UAV raw/structure/counter
+fields before publication; all other null dimensions retain the generic clear
+behavior. No side table, dummy resource, shader patch, queue change, residency
+walk, capability promotion, or Metal 4 requirement was added.
+
+**Changed files.** `src/d3d12/d3d12_descriptor_heap.hpp` adds the compact
+identity payload and size/alignment assertions. `src/d3d12/d3d12_descriptor_heap.cpp`
+adds the shared null publication helper and typed null admission. The existing
+`tests/dx12/dx12_descriptor_ownership.cpp:2377-2635` probe covers CPU-only and
+shader-visible heaps, fresh and counter-seeded slots, all three formats, SRV/UAV
+kind, copy, clear, overwrite, invalid descriptions, generation, zero GPU bytes,
+resource-index exclusion, and a deliberately wrong mapping oracle.
+
+**Validation.** The `.github/build_dxmt.sh`-equivalent x64 release build passed
+after the final source and test rebuild; the separate x86 configuration also
+passed (its D3D12 target is disabled by the script). The final candidate passed
+48/48 identity cases; the wrong-mapping control passed by failing the 24 SRV
+cases; the old production DLL failed all 48 candidate cases as the regression
+oracle. Existing ownership, range, format, sidecar, counter, feature, native
+view publication, and D3D11 backend-boundary probes passed. The D3D11 probe
+reported legacy SHEX/SHDR AIRCONV success and the expected DXIL-only rejection.
+The controlled experimental MSC readbacks passed for R32 FLOAT/UINT/SINT NULL
+UAV, NULL SRV, and copy-to-NULL modes with Metal API/GPU validation enabled; the
+experimental switch and existing GPU shader path are not promoted to production
+semantics.
+
+**Performance and capability impact.** Descriptor CPU storage stayed 56 bytes.
+Across 48 warm samples per visibility and build, candidate write medians were
+0.097225/0.097335 microseconds versus baseline 0.098195/0.099025; distributions
+overlap, so this is inconclusive and is not claimed as an optimization. Public
+Feature Level, Shader Model, tiled-resource tier, D3D11 behavior, MSC runtime
+compatibility, and Metal 3 shadow backing remain unchanged.
+
+**Remaining blockers and risks.** Production NULL GPU execution remains a
+`MSC_SEMANTIC_GAP` / `SPEC_UNVERIFIED` item because the zero GPU ABI has not been
+proven to implement every D3D12 typed-null operation. Post-COM-release sparse
+backing residency remains `BACKEND_NOT_IMPLEMENTED`/`UNVERIFIED`; all-format and
+cross-device validation remain `UNVERIFIED` or `TARGET_DEVICE_NOT_AVAILABLE`.
+The test intentionally does not claim that a typed null is executable merely
+because its CPU identity is now retained.
+
+**Git state and delivery.** The focused implementation is committed as
+`fix(d3d12): preserve explicit null buffer view identity` (no push). The existing
+`.gitignore` modification was not staged. Full hashes, runtime identities, logs,
+and readback summaries are retained in
+`/Users/zhangbo/Documents/Vibe-Codeding/dxmt-test/n95-capability-gate/result-null-view-identity-20261105`.
+
+**Next recommended slice.** Design and validate one production execution gate
+for the retained NULL identity, starting with a backend-specific R32 read path
+and explicit rejection for unsupported operations. Keep the current zero-ABI
+default until that gate has positive and negative GPU evidence.
+
 ### 7. Git State / Next Recommended Slice
 
 Delivery commit uses fix(d3d12) repository style and includes only the metadata,

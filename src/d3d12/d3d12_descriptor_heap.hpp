@@ -129,12 +129,25 @@ struct UAVBufferCPUStorage {
 
 using SRVBufferCPUStorage = UAVBufferCPUStorage;
 
+// CPU identity only. A typed null remains non-resource-bearing and both GPU
+// descriptor ABIs remain zero until its execution semantics are implemented.
+enum class NullViewKind : uint32_t { None, ShaderResource, UnorderedAccess };
+struct NullViewCPUStorage {
+  NullViewKind kind = NullViewKind::None;
+  DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+  uint32_t dimension = 0;
+  uint32_t component_mapping = 0;
+};
+static_assert(sizeof(NullViewCPUStorage) == sizeof(CBVCommonStorage));
+static_assert(alignof(NullViewCPUStorage) <= alignof(CBVCommonStorage));
+
 struct ShaderVisibleDescriptorCPUStorage {
   ShaderVisibleDescriptorType type;
   union {
     SRVTextureCPUStorage SRVTexture;
     SRVAccelerationStructureCPUStorage SRVAccelerationStructure;
     CBVCommonStorage ConstantBuffer;
+    NullViewCPUStorage NullView;
     UAVTextureCPUStorage UAVTexture;
     UAVTexelBufferCPUStorage UAVTexelBuffer;
     UAVBufferCPUStorage UAVBuffer;
@@ -145,7 +158,9 @@ struct ShaderVisibleDescriptorCPUStorage {
   // is released. The descriptor heap owns the matching Rc separately.
   BufferAllocation *allocation = nullptr;
 
-  ShaderVisibleDescriptorCPUStorage() : type(ShaderVisibleDescriptorType::Null), ConstantBuffer{}, allocation(nullptr) {}
+  ShaderVisibleDescriptorCPUStorage() : type(ShaderVisibleDescriptorType::Null), UAVBuffer{}, allocation(nullptr) {
+    NullView = {};
+  }
 };
 
 // Keep the type, union payload and heap-owned resources stable for the whole

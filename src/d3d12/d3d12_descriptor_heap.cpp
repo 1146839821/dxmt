@@ -233,6 +233,23 @@ class MTLD3D12DescriptorHeapImpl : public MTLD3D12Pageable<MTLD3D12DescriptorHea
     mutation_generation_.fetch_add(1, std::memory_order_release);
   }
 
+  void
+  PublishNullDescriptor(UINT Index, NullViewCPUStorage View = {}) {
+    std::lock_guard lock(descriptor_mutex_);
+    auto &cpu_storage = descriptors_[Index];
+    cpu_storage.type = ShaderVisibleDescriptorType::Null;
+    // Clear the full union so an old counter identity cannot survive a null publication.
+    cpu_storage.UAVBuffer = {};
+    cpu_storage.NullView = View;
+    cpu_storage.allocation = nullptr;
+    ReleaseDescriptorResources(Index);
+    if (mapped_argument_buffer_)
+      mapped_argument_buffer_[Index].ZeroFilled = {{}};
+    SetMSCDescriptor(Index, {});
+    UpdateResourceIndex(Index);
+    MarkDescriptorMutation();
+  }
+
 public:
   MTLD3D12DescriptorHeapImpl(MTLD3D12Device *pDevice) : MTLD3D12Pageable<MTLD3D12DescriptorHeap>(pDevice) {}
 
@@ -469,19 +486,7 @@ public:
     if (Index >= descriptors_.size())
       return;
 
-    std::lock_guard lock(descriptor_mutex_);
-    auto &cpu_storage = descriptors_[Index];
-    cpu_storage.type = ShaderVisibleDescriptorType::Null;
-    // Keep the inactive union bytes deterministic so descriptor copies cannot
-    // retain a stale CBV address in CPU-side storage.
-    cpu_storage.ConstantBuffer = {};
-    cpu_storage.allocation = nullptr;
-    ReleaseDescriptorResources(Index);
-    if (mapped_argument_buffer_)
-      mapped_argument_buffer_[Index].ZeroFilled = {{}};
-    SetMSCDescriptor(Index, {});
-    UpdateResourceIndex(Index);
-    MarkDescriptorMutation();
+    PublishNullDescriptor(Index);
   }
 
   virtual HRESULT
@@ -669,10 +674,23 @@ public:
       return E_INVALIDARG;
     if (!pDesc)
       return E_INVALIDARG;
-    /**
-     * TODO: support null descriptor properly (respect different view dimensions)
-     */
-    ClearDescriptor(Index);
+    NullViewCPUStorage view{};
+    if (pDesc->ViewDimension == D3D12_SRV_DIMENSION_BUFFER &&
+        (pDesc->Format == DXGI_FORMAT_R32_FLOAT || pDesc->Format == DXGI_FORMAT_R32_UINT ||
+         pDesc->Format == DXGI_FORMAT_R32_SINT)) {
+      if (pDesc->Buffer.StructureByteStride || pDesc->Buffer.Flags != D3D12_BUFFER_SRV_FLAG_NONE)
+        return E_INVALIDARG;
+      const auto mapping = pDesc->Shader4ComponentMapping;
+      if (!(mapping & D3D12_SHADER_COMPONENT_MAPPING_ALWAYS_SET_BIT_AVOIDING_ZEROMEM_MISTAKES) ||
+          (mapping & ~UINT(0x1fff)))
+        return E_INVALIDARG;
+      for (UINT component = 0; component < 4; ++component)
+        if (D3D12_DECODE_SHADER_4_COMPONENT_MAPPING(component, mapping) > D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_1)
+          return E_INVALIDARG;
+      view = {NullViewKind::ShaderResource, pDesc->Format, uint32_t(pDesc->ViewDimension), mapping};
+    }
+    // Other null dimensions/formats retain the generic clear behavior.
+    PublishNullDescriptor(Index, view);
     return S_OK;
   }
 
@@ -682,10 +700,16 @@ public:
       return E_INVALIDARG;
     if (!pDesc)
       return E_INVALIDARG;
-    /**
-     * TODO: support null descriptor properly (respect different view dimensions)
-     */
-    ClearDescriptor(Index);
+    NullViewCPUStorage view{};
+    if (pDesc->ViewDimension == D3D12_UAV_DIMENSION_BUFFER &&
+        (pDesc->Format == DXGI_FORMAT_R32_FLOAT || pDesc->Format == DXGI_FORMAT_R32_UINT ||
+         pDesc->Format == DXGI_FORMAT_R32_SINT)) {
+      if (pDesc->Buffer.StructureByteStride || pDesc->Buffer.Flags != D3D12_BUFFER_UAV_FLAG_NONE ||
+          pDesc->Buffer.CounterOffsetInBytes)
+        return E_INVALIDARG;
+      view = {NullViewKind::UnorderedAccess, pDesc->Format, uint32_t(pDesc->ViewDimension), 0};
+    }
+    PublishNullDescriptor(Index, view);
     return S_OK;
   }
 
