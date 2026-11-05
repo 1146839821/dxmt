@@ -124,7 +124,13 @@ and does not justify another unchanged local MS_LOAD or Submit timing matrix.
   gap, not all-format/null-descriptor/lifetime obligations. Publication guards
   remain; default activation stays HELD. Null typed descriptor GPU execution,
   post-COM-release residency and one unexplained exploratory publication wait
-  failure remain separate gaps. See [E29 delivery](sparse-handoff-retirement-audit.md#sparse-buffer-view-page-metadata--n15-delivery-2026-11-05).
+  failure remain separate gaps. E30 revalidates experimental R32 null compute
+  guards (15 positive typed processes), six expected typed controls, and two
+  publication positives plus one negative. Production null execution remains OPEN;
+  production live typed SRV dimensions still fail64 vs4 in all three formats.
+  Preserve explicit null view identity first; no Apple7 hardware blocker or sparse
+  activation is inferred. See [E30 audit / Design Card](sparse-handoff-retirement-audit.md#null-typed-descriptor-semantics--n09-audit-and-design-card-2026-11-05)
+  and [E29 delivery](sparse-handoff-retirement-audit.md#sparse-buffer-view-page-metadata--n15-delivery-2026-11-05).
   See [page-size correction and next Design Card](sparse-handoff-retirement-audit.md#sparse-typed-representation--native-page-size-contract-audit-2026-11-05)
   and the historical [native buffer-view contract audit](sparse-handoff-retirement-audit.md#sparse-buffer-texture-view-contract--n15n09-audit-2026-11-05).
 

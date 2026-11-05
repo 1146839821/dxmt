@@ -3427,3 +3427,221 @@ AIRCONV descriptor forms, and legal zero/discard execution; build the smallest
 real readback/negative oracle before choosing an implementation. Include the
 unresolved publication wait diagnostic in that validation gate. Do not enable
 common sparse by default or promote capability based on this bounded success.
+
+
+## Null typed descriptor semantics — N09 audit and Design Card, 2026-11-05
+
+- Goal/baseline: audit legal null typed SRV/UAV GPU semantics at 7cac6bab;
+  preserve the current descriptor owner, sparse activation hold and capability gates.
+- Current path: Device null view→descriptor heap zero entry→backend access;
+  the MSC typed sidecar transform already has null guards, but only a test switch
+  selects it. Establish production behavior independently from that experiment.
+- Scope: existing R32 float/uint/sint probes, descriptor mutation/copy/replay,
+  exact zero/discard/readback guards, backend identity and relevant source/spec evidence.
+- Non-scope: no production shader/descriptor/queue changes, no default activation,
+  no capability promotion, no unsupported GPU fault experiments or new test runner.
+- Plan: verify Microsoft null-view requirements and native Metal/MSC contracts;
+  reuse current tests after inspecting their oracle and hazards; compare Mullion source.
+- Performance/rollback: no production hot-path change; docs/evidence only can be
+  reverted independently. Build only missing existing fixtures; keep isolated runtimes.
+- DoD: classify measured behavior vs hypotheses, identify bounded gaps and write
+  the next smallest implementation/validation card. Stop before independent implementation.
+
+### E30 Task Summary / Gate Conclusions
+
+**Audit and design completed; implementation remains OPEN.** This round changes
+only this report and the resource audit checklist. It establishes a descriptor
+representation/translation gap, not an Apple7 hardware limitation. Gate 0 evidence,
+Gate 1 design and Gate 3 bounded revalidation pass. Gate 2 production implementation
+was not entered; Gate 4 delivery is docs-only. Common native sparse activation stays
+HELD. No Feature Level, Shader Model, Tiled Resources Tier or public Options change.
+
+### Baseline Evidence
+
+- DXMT branch feat/d3d12, baseline 7cac6bab99cde4046760d17626805e78d6a146f1.
+  Entry workspace contained only the original .gitignore edit. Cached origin is
+  behind local by 24 commits; it was not refreshed. No source changes this round.
+- Actual environment: M1 Max, macOS 27.2 (26B123), Xcode 27.2 (27B52), Metal
+  32023.922, x64 Wine 11.0. MSC compiled SDK API 4.0.3; loaded dylib product version
+  remains unknown. Its SHA256 is
+  cc487a757f431c83483346c06a3ae8558910ecc510ce59b1e4f905d5d6d72bd4.
+- Mullion remote HEAD/main were independently read with git ls-remote and equal
+  93de32b9145885ceb2e45be7d445e56d62499b3c. Comparison uses pinned, fetched source;
+  the retained source directory is not a Git checkout. No Mullion GPU execution.
+- E30 evidence root:
+  /Users/zhangbo/Documents/Vibe-Codeding/dxmt-test/n95-capability-gate/result-null-typed-audit-20261105.
+  baseline.json, sources.json, artifact-audit.json, gpu-audit.json and per-process
+  logs retain versions, exact commands, source/content hashes and outcomes.
+- Stage/prefix are separate clones stage-null-typed-audit-20261105 and
+  prefix-null-typed-audit-20261105. E29 binaries are reused without production
+  changes; six existing R32 DXIL fixtures were rebuilt successfully. This is not
+  a fresh full build claim. Sixteen build/stage artifact pairs are byte-verified,
+  allowing only the existing native-override PE marker change. Actual loaded PE
+  paths/export bytes, WineMetal Unix path/UUID and MSC path/hash are checked.
+
+### Specification and Source Findings
+
+| Evidence type | Finding / anchors |
+| --- | --- |
+| SPEC_REQUIRED | Microsoft CreateShaderResourceView / CreateUnorderedAccessView require valid null-resource view descriptions and defined zero-read/discard-write behavior. Retained ms-srv.source:814 and ms-uav.source:815. |
+| SPEC_REQUIRED | Resource Binding, NULL Descriptors, requires shader access compatible with the declared view type. A null root descriptor dereference is a different, undefined case and is excluded. ms-resource-binding.source:618–639. |
+| SPEC_REQUIRED | Apple Metal Shading Language specification, 2026-06-04, section 6.13.18, pp.288–289: null texture detection is supported; texture member calls on null have undefined behavior. Retained PDF and metal-spec.txt:13950–13978. A zero-looking result is insufficient. |
+| SOURCE_CONFIRMED | Device null-resource SRV/UAV routes through the heap overloads: src/d3d12/d3d12_device.cpp:1173–1202,1218–1233. Heap overloads ignore the valid description after checking it exists, then ClearDescriptor: src/d3d12/d3d12_descriptor_heap.cpp:667–689. |
+| SOURCE_CONFIRMED | ClearDescriptor writes CPU Null, releases resource references, zeros AIRCONV/MSC GPU entries and advances mutation generation: d3d12_descriptor_heap.cpp:467–484. It retains no null view dimension, sample format or SRV component mapping. Explicit typed null and generic cleared slot are indistinguishable. |
+| SOURCE_CONFIRMED | CPU descriptor union already belongs to the heap: d3d12_descriptor_heap.hpp:83–148. CopyDescriptors copies CPU data, references and both GPU forms under existing locks, updates resource index and generation: d3d12_descriptor_heap.cpp:716–743. Preserve this owner; do not create a parallel null-descriptor registry. |
+| SOURCE_CONFIRMED | AIRCONV CreateRead/CreateWrite directly emit texture intrinsics; typed loads remap out-of-range indices, not null handles: src/airconv/nt/air_builder.cpp:627–756; nt/dxbc_converter_base.cpp:1367–1497,1508–1548. CreateTextureFence also emits directly: air_builder.cpp:1036–1063. |
+| SOURCE_CONFIRMED | AIRCONV query zero selection at air_builder.cpp:974–978 still constructs the query call before the select. It is not a control-flow guard suppressing a null member call. No AIRCONV null GPU PASS is claimed. |
+| SOURCE_CONFIRMED | Experimental MSC transform guards recognized typed read/write/fence calls with null-test branches; width comes from sidecar count: src/airconv/transforms/msc_typed_buffer_sidecar.cpp:208–257. It rejects unknown operations and sparse status consumers:76–205. |
+| SOURCE_CONFIRMED | This transform is selected only by DXMT_TEST_MSC_TYPED_BUFFER_PATCH=1 in src/d3d12/d3d12_pipeline_compute.cpp:103–143, after conversion/cache lookup. It is compute-only evidence, not production coverage. |
+| CONVERTER_OBSERVED | Fresh conversion of existing UINT SRV/UAV fixtures using installed MSC, Apple7 target, macOS14 minimum and textureMinLODClamp contains unguarded texture read/write/fence calls. Width uses is_null plus a select. Retained msc-unpatched-srv.ll:15–28, scalar.ll:32–49. CLI conversion uses its own generated root layout; this is converter evidence, not an exact runtime metallib capture. |
+| LOCAL_FAIL | Production live R32 SRV FLOAT/UINT/SINT each reads the sentinel and OOB zero correctly, but GetDimensions returns64 rather than view length4. All three have unchanged guards and clean enabled validation. This is an independent bounded view-length defect, not proof of null behavior. |
+
+Primary sources (exact fetched bytes/hashes in sources.json):
+
+- https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12device-createshaderresourceview
+- https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12device-createunorderedaccessview
+- https://microsoft.github.io/DirectX-Specs/d3d/ResourceBinding.html#null-descriptors
+- https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf
+
+The sources inspected do not independently establish the null GetDimensions
+oracle, custom SRV component mapping, sparse feedback status or atomic return
+values. Zero dimensions is LOCAL_OBSERVED, with its full normative contract still
+SPEC_UNVERIFIED. No inference that all vector components/mappings are correct is
+made from scalar X-component tests.
+
+### Mullion Comparison and Design Decisions
+
+Pinned Mullion src/d3d12/d3d12_descriptor_heap.cpp:383–418 distinguishes
+raw/structured buffers from typed textures. AddUnboundTexture:425–441 chooses the
+texture type and numeric sample class, obtains a real stand-in and registers its
+texture/backing residency, then records SM50_TEXTURE_METADATA_UNBOUND. Its
+src/mullion/mullion_command.cpp:122–159 caches stand-ins by type/sample/write;
+texture-buffer stand-ins have real buffer backing. This is **source reference**,
+not a locally observed Mullion conformance pass.
+
+A stand-in alone does not implement zero/discard. Mullion's header:203–211 explicitly
+requires shader handling, and src/airconv/nt/dxbc_converter_base.cpp:2824–2825 shows
+an unbound result override on a sampling path. That does not establish every typed
+load/store/atomic path. No wholesale port is proposed. DXMT's MSC three-qword ABI,
+converter behavior, two backend forms and existing descriptor ownership differ.
+Any future selective code port still needs license/source review; this round copies
+no Mullion code into DXMT.
+
+Decision: retain explicit null-view identity at the existing CPU descriptor owner
+before selecting a bounded execution solution. Alternatives remain conditional:
+
+- Pure nil descriptor: rejected as sufficient evidence; ordinary texture calls can
+  reach Metal undefined behavior.
+- Shared writable dummy texture without shader suppression: rejected; writes can
+  alter later null reads and introduce unintended cross-descriptor state.
+- Automatically enable the sidecar experiment: rejected; admitted operation/stage
+  coverage and sparse feedback are incomplete, and the separate live view-length
+  defect must not be silently bundled into a null fix.
+- Reuse Mullion semantics and tests as reference: accepted; directly transplanting
+  its backend, ABI, residency model or cache is not justified.
+
+### Validation Results / Test Matrix
+
+Existing tests/dx12/run_r32_typed_uav.py and dx12_texture_sampler.cpp are reused
+unchanged. Oracles are at texture_sampler.cpp:1190–1228, shader scalar load/store
+and dimensions in typed_buffer_srv.hlsl / texture_sampler.hlsl. These cases use
+matching descriptor-table types, not undefined zero root GPU addresses.
+
+| Current-head-equivalent binary case | Processes | Result / limit |
+| --- | ---: | --- |
+| Experimental null typed UAV, R32 FLOAT/UINT/SINT |3| LOCAL_PASS zero before/after write, dimensions0 and16 sentinel words unchanged per case. |
+| Experimental null typed SRV, three formats |3| LOCAL_PASS scalar zero, OOB zero, dimensions0,16 guards per case. |
+| Experimental live SRV control, three formats |3| LOCAL_PASS sentinel, OOB zero, dimensions4 and guards. |
+| Experimental live→null after Close, three formats |3| LOCAL_PASS expected null values and guards. |
+| Experimental CPU-source CopyDescriptors→null after Close, three formats |3| LOCAL_PASS expected null values and guards. |
+| Skip that descriptor copy, three formats |3| EXPECTED_NEGATIVE exit1 / readback mismatch; identity and validation pass. |
+| Live UAV against null oracle, three formats |3| EXPECTED_NEGATIVE exit1 / readback mismatch; identity and validation pass. |
+| Production live typed SRV, three formats |3| LOCAL_FAIL dimensions64 vs4; scalar sentinel/OOB/guards correct. |
+| Existing native-view publication, two fresh seeds |2| LOCAL_PASS24 GPU readbacks,24,576 data DWORDs,768 guards; explicit null ABI publication checked without null dispatch. |
+| Publication one-word oracle control |1| EXPECTED_NEGATIVE exit1, four one-word mismatches over12 readbacks; all guards intact. |
+| Fresh production null SRV/UAV dispatch |0| NOT_RUN: source reaches undefined native null texture calls; earlier E26 invalid-null diagnostic retained. No deliberate repeat of unsafe native execution. |
+| AIRCONV null GPU / graphics stages / custom mappings / atomic/feedback |0| NOT_RUN, not covered by compute MSC scalar success. |
+| Windows native / live Mullion / x86 / other GPU / real Metal3 device |0| NOT_RUN; M1 Max is available and is not classified unavailable. |
+
+Totals:27 GPU processes,17 positive processes,7 expected negative controls and3
+known production failures. Experimental positive results are not production passes.
+All27 processes have enabled API/GPU validation, verified runtime identities and
+none of the audited invalid-usage/assertion/shader-error/address-fault/aborted-command
+or recording-failure diagnostics. Independent shader-validation instrumentation of
+rewritten metallibs remains UNVERIFIED. Sentinel preservation only proves the
+checked region, not absence of writes to arbitrary unrelated memory.
+
+The prior exploratory publication wait failure did not reproduce in the two new
+seeded publication runs. Its cause remains UNVERIFIED; repeated passes do not close
+it. The existing fixture's wait behavior was not modified. E29 historical failures
+and E30 negative controls are retained rather than erased or relabeled as passes.
+
+Fixture-only build: PASS (six existing targets; build-fixtures.log). Production
+full build, performance A/B, fresh shader-instrumentation proof and full D3D11 suite:
+NOT_RUN this docs-only audit. No performance claim; no production hot-path change.
+
+### Remaining Blockers
+
+| Classification | Exact remaining obligation |
+| --- | --- |
+| BACKEND_NOT_IMPLEMENTED | Preserve valid null view identity through creation/copy/publication and implement legal ordinary AIRCONV/MSC typed null execution. Nil bytes alone do not complete it. |
+| MSC_SEMANTIC_GAP | Test-only compute sidecar guards cover a strict operation subset. Production view-length correction, graphics/indirect/direct-indexed coverage, counters/atomics and feedback need separate gates. |
+| SPEC_UNVERIFIED | Null dimensions, component mapping/vector defaults, feedback/atomic details and unexplained publication wait diagnostic. |
+| BACKEND_NOT_IMPLEMENTED / ownership investigation | Post-application-COM-release residency remains unresolved; E30 keeps application resources alive and does not close this gap. |
+| TARGET_DEVICE_NOT_AVAILABLE | Windows native/live Mullion/other-GPU runtime comparison only. Apple7 Placement Sparse is not a hardware blocker. |
+
+### Next Recommended Slice — Explicit Null View Identity Design Card
+
+- **Goal:** distinguish a legal typed-buffer null SRV/UAV from an uninitialized or
+  cleared heap slot, using existing descriptor CPU storage. This is preparation
+  for a later execution gate, not a claim to fix GPU null behavior by itself.
+- **Baseline/evidence:** E30 above; ClearDescriptor and both null overloads erase
+  view shape. CopyDescriptors already owns the relevant transfer and locking.
+- **Scope:** valid BUFFER typed R32 FLOAT/UINT/SINT null descriptions; retain view
+  dimension, numeric format, SRV mapping and SRV/UAV kind in the existing union
+  under type Null. Use a compact payload within the existing largest union member,
+  verified by compiler size/offset assertions. Keep generic ClearDescriptor generic.
+- **Non-scope:** no shader transform enablement, real dummy resources, new GPU
+  descriptor ABI, queue/residency scheduler, counter semantics, root descriptor0,
+  sparse default activation or feature promotion. Other null dimensions must retain
+  their present behavior until separately designed; do not claim them complete.
+- **Architecture/module boundary:** d3d12_descriptor_heap.hpp/.cpp and adjacent
+  tests/dx12/dx12_descriptor_ownership.cpp only. No new source file, side table,
+  per-stage binder or heap scan. Both GPU forms stay unchanged in this metadata
+  slice. No new object lifetime or residency entry is introduced.
+- **Proposed changes:** prevalidate the candidate description; publish explicit
+  null metadata atomically under the existing heap mutex after releasing stale
+  references; keep zero native ABI and update the existing generation/index once.
+  CopyDescriptors copies the payload via its existing CPU assignment. Explicit
+  null view creation must not masquerade as a valid resource-bearing entry.
+- **Test plan:** extend existing descriptor ownership modes for CPU-only and
+  shader-visible heaps, fresh/seeded slots, all three formats × SRV/UAV, direct
+  creation and CPU→visible copy, clear/overwrite/reuse and invalid argument cases.
+  Assert payload, no stale resource/counter identity, both GPU byte forms and
+  mutation generation. Negative one-field oracle must fail. Re-run current
+  controlled null readbacks and publication oracle without unsafe production null
+  dispatch. Record full script-equivalent build and D3D11 boundary regression.
+- **Risks:** preserving metadata does not suppress native nil calls; union size,
+  generic clear behavior, descriptor-copy overlap contract and generation locking
+  need explicit review. API Create*View is void: do not invent a new error-return
+  contract or silently publish a resource-backed fallback on failed admission.
+- **Performance:** require unchanged descriptor record size and no additional
+  per-draw work, lock or resource map. Measure descriptor-write cost if hot-path
+  code changes; inconclusive samples must remain inconclusive.
+- **Rollback:** one focused commit reverting the payload and its creation/tests;
+  current GPU descriptor bytes and shader behavior remain independent.
+- **Definition of Done:** exact CPU metadata/copy/clear negative tests and build
+  pass, artifact/runtime identities recorded, no new GPU errors, unchanged public
+  capabilities/defaults, report explicitly says GPU semantics still OPEN. Stop
+  before the independent production null execution slice.
+
+### Changed Files / Git State
+
+- docs/sparse-handoff-retirement-audit.md: E30 source/spec/Mullion comparison,
+  exact measured matrix, limitations, blockers and next Design Card.
+- docs/D3D12_RESOURCE_AUDIT_CHECKLIST.md: distinguish experimental passes from
+  production gaps and retain sparse activation hold.
+- No source, shader, build configuration, vendored header or test code changed.
+  Original .gitignore remains unstaged and byte-identical to entry. Delivery is a
+  focused docs commit following repository history; no push. Exact resulting SHA,
+  file hashes and final Git state are in E30 delivery-manifest.json.
