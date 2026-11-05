@@ -285,6 +285,7 @@ main(int argc, char **argv) {
   if (argc < 2 || argc > 5)
     return 2;
   const bool placed = argc == 5 && strcmp(argv[4], "--placed") == 0;
+  const bool unused_typed_null = argc == 4 && strcmp(argv[2], "--typed-uav-null-outside") == 0;
   const bool srv_merge_skip = argc == 4 && strcmp(argv[2], "--typed-buffer-srv-multi-merge-skip") == 0;
   const bool srv_split_skip = argc == 4 && strcmp(argv[2], "--typed-buffer-srv-multi-split-skip") == 0;
   const bool srv_merge = srv_merge_skip || (argc == 4 && strcmp(argv[2], "--typed-buffer-srv-multi-merge") == 0);
@@ -340,7 +341,7 @@ main(int argc, char **argv) {
     return 2;
   const TypedFormat *typed_format = nullptr;
   if (argc >= 4) {
-    if (strcmp(argv[2], "--typed-uav") != 0 && !typed_buffer)
+    if (strcmp(argv[2], "--typed-uav") != 0 && !unused_typed_null && !typed_buffer)
       return 2;
     char *end = nullptr;
     const auto format = strtoul(argv[3], &end, 10);
@@ -544,7 +545,7 @@ main(int argc, char **argv) {
     goto cleanup;
 
   resource_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-  resource_heap_desc.NumDescriptors = texture_uav ? (srv_multi ? 4 : 3) : 2;
+  resource_heap_desc.NumDescriptors = unused_typed_null ? 4 : texture_uav ? (srv_multi ? 4 : 3) : 2;
   resource_heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
   sampler_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
   sampler_heap_desc.NumDescriptors = 1;
@@ -700,7 +701,20 @@ main(int argc, char **argv) {
     }
     auto texture_uav_cpu = resource_cpu;
     texture_uav_cpu.ptr += descriptor_increment * (srv_multi ? 3 : 2);
-    device->CreateUnorderedAccessView(null_uav && !null_uav_live ? nullptr : output_texture, nullptr, &texture_uav_desc, texture_uav_cpu);
+    device->CreateUnorderedAccessView(
+        null_uav && !null_uav_live ? nullptr : output_texture, nullptr,
+        &texture_uav_desc, texture_uav_cpu);
+    if (unused_typed_null) {
+      D3D12_SHADER_RESOURCE_VIEW_DESC unused = {};
+      unused.Format = typed_format->format;
+      unused.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+      unused.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+      unused.Buffer.NumElements = 4;
+      auto handle = resource_cpu;
+      handle.ptr += descriptor_increment * 3;
+      device->CreateShaderResourceView(nullptr, &unused, handle);
+      std::cout << "typed NULL outside root tables slot=3\n";
+    }
     if (typed_srv) {
       D3D12_SHADER_RESOURCE_VIEW_DESC typed_srv_desc = {};
       typed_srv_desc.Format = typed_format->format;

@@ -4188,9 +4188,9 @@ public:
       }
       EncodeMSCBufferResourceUse(buffer.handle, compute, render_stages);
       EncodeMSCBufferResourceUse(allocator_->gpu_heap_buffer_.handle, compute, render_stages);
-    } else if (descriptor_heap && descriptor_heap->HasTypedNullDescriptors()) {
+    } else if (descriptor_heap && HasTypedNullDescriptorsInUse(pRootSig, pStaging, descriptor_heap)) {
       recording_error_ = E_NOTIMPL;
-      FailRecording(__func__, "MSC typed NULL descriptor requires the typed-buffer sidecar gate");
+      FailRecording(__func__, "MSC reachable typed NULL descriptor requires the typed-buffer sidecar gate");
       return 0;
     }
     if (use_lod_sidecar) {
@@ -4270,6 +4270,58 @@ public:
     }
     memcpy(Ptr, pRootSig->EncodedStaticSamplers, static_sampler_encode_size);
     return Offset;
+  }
+
+  bool
+  HasTypedNullDescriptorsInUse(MTLD3D12RootSignature *root, const uint64_t staging[64], MTLD3D12DescriptorHeap *heap) {
+    if (!root || !staging || !heap)
+      return false;
+    const auto heap_desc = heap->GetDesc();
+    if (root->IsResourceHeapDirectlyIndexed())
+      return heap->HasTypedNullDescriptors();
+
+    D3D12_GPU_DESCRIPTOR_HANDLE heap_start{};
+    heap->GetGPUDescriptorHandleForHeapStart(&heap_start);
+    const uint64_t stride = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    if (!stride)
+      return false;
+    auto batch = heap->ReadDescriptorBatch();
+    for (UINT table_index = 0; table_index < root->RootDescriptorTableCount; ++table_index) {
+      const auto &table = root->RootDescriptorTables[table_index];
+      if (table.source_qword >= root->UploadQwords || table.source_qword >= 64 ||
+          table.first_range > root->RootDescriptorRangeCount ||
+          table.range_count > root->RootDescriptorRangeCount - table.first_range)
+        continue;
+      const uint64_t handle = staging[table.source_qword];
+      if (!handle || handle < heap_start.ptr)
+        continue;
+      const uint64_t byte_offset = handle - heap_start.ptr;
+      if (byte_offset % stride)
+        continue;
+      const uint64_t base_index = byte_offset / stride;
+      if (base_index >= heap_desc.NumDescriptors)
+        continue;
+      for (UINT range_index = 0; range_index < table.range_count; ++range_index) {
+        const auto &range = root->RootDescriptorRanges[table.first_range + range_index];
+        if (range.type != D3D12_DESCRIPTOR_RANGE_TYPE_SRV && range.type != D3D12_DESCRIPTOR_RANGE_TYPE_UAV)
+          continue;
+        const uint64_t range_offset = range.offset == UINT64_MAX ? heap_desc.NumDescriptors - base_index : range.offset;
+        if (base_index > UINT64_MAX - range_offset)
+          continue;
+        const uint64_t first = base_index + range_offset;
+        if (first >= heap_desc.NumDescriptors)
+          continue;
+        const uint64_t count = range.num_descriptors == UINT_MAX
+                                   ? heap_desc.NumDescriptors - first
+                                   : std::min<uint64_t>(range.num_descriptors, heap_desc.NumDescriptors - first);
+        for (uint64_t i = 0; i < count; ++i) {
+          const auto &descriptor = batch.get(static_cast<UINT>(first + i));
+          if (descriptor.type == ShaderVisibleDescriptorType::Null && descriptor.NullView.kind != NullViewKind::None)
+            return true;
+        }
+      }
+    }
+    return false;
   }
 
   template <typename F>

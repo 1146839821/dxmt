@@ -27,6 +27,7 @@ def main():
     parser.add_argument("--zero-offset", action="store_true", help="use a zero-offset texture view")
     parser.add_argument("--experimental-patch", action="store_true", help="enable the experimental MSC sidecar path")
     parser.add_argument("--production-gate", action="store_true", help="enable the opt-in MSC typed-buffer execution gate")
+    parser.add_argument("--unused-null", action="store_true", help="put a typed NULL outside the bound root-table ranges")
     parser.add_argument("--late-copy", action="store_true", help="copy the buffer view after Close and before submission")
     parser.add_argument("--heap-switch", action="store_true", help="switch between heaps with distinct view lengths")
     parser.add_argument("--encoder-break", action="store_true", help="insert a blit between the two heap-switch dispatches")
@@ -50,6 +51,8 @@ def main():
     parser.add_argument("--null-uav-live", action="store_true", help="negative control using a live UAV")
     parser.add_argument("--srv", choices=("null", "live", "null-to-live", "live-to-null", "null-to-live-skip", "live-to-null-skip", "null-to-live-only", "null-to-live-only-skip", "null-to-live-only-pending", "null-to-live-only-pending-skip", "null-to-live-only-rerecord", "null-to-live-only-rerecord-wrong", "copy-to-live", "copy-to-null", "copy-to-live-skip", "copy-to-null-skip", "multi", "multi-skip", "multi-wrong", "multi-merge", "multi-merge-skip", "multi-split", "multi-split-skip"), help="test a typed SRV and optional post-Close update")
     args = parser.parse_args()
+    if args.unused_null and (args.buffer or args.experimental_patch or args.production_gate):
+        parser.error("--unused-null requires the default texture path with the sidecar gate disabled")
     if args.experimental_patch and args.production_gate:
         parser.error("--experimental-patch and --production-gate are mutually exclusive")
     if args.srv and (not args.buffer or not args.scalar or any(getattr(args, name) for name in (
@@ -97,6 +100,8 @@ def main():
         env["DXMT_TEST_MSC_TYPED_BUFFER_PATCH"] = "1"
     if args.production_gate:
         env["DXMT_MSC_TYPED_BUFFER_EXECUTION"] = "1"
+    else:
+        env.pop("DXMT_MSC_TYPED_BUFFER_EXECUTION", None)
     identities = [f"LOADED_CODE {dll} {symbol} {pe_export_bytes(stage / dll, symbol)}" for dll, symbol in
                   (("d3d12.dll", "D3D12CreateDevice"), ("winemetal.dll", "DXMTMSCPatchSamplerLOD"))]
     rows = []
@@ -107,6 +112,8 @@ def main():
                    f"{prefix_name}_{kind}.cs.cso", "--typed-buffer-null-live" if args.null_uav_live else "--typed-buffer-null" if args.null_uav else "--typed-buffer-indirect-math-wrong" if args.indirect_math_wrong else "--typed-buffer-indirect-math" if args.indirect_math else "--typed-buffer-indirect-heap-wrong" if args.indirect_heap_wrong else "--typed-buffer-indirect-heap" if args.indirect_heap else "--typed-buffer-indirect-late-skip" if args.indirect_late_skip else "--typed-buffer-indirect-late" if args.indirect_late else "--typed-buffer-rerecord-zero" if args.rerecord_zero else "--typed-buffer-rerecord-wrong" if args.rerecord_wrong else "--typed-buffer-rerecord" if args.rerecord else "--typed-buffer-indirect-pending-wrong" if args.indirect_pending_wrong else "--typed-buffer-indirect-pending" if args.indirect_pending else "--typed-buffer-indirect-count-wrong" if args.indirect_count_wrong else "--typed-buffer-indirect-count" if args.indirect_count else "--typed-buffer-indirect-reject" if args.indirect_reject else "--typed-buffer-indirect" if args.indirect else "--typed-buffer-pending-reset" if args.pending_reset else "--typed-buffer-heap-switch-encoder" if args.encoder_break else "--typed-buffer-heap-switch" if args.heap_switch else "--typed-buffer-late-copy" if args.late_copy else "--typed-buffer-zero" if args.zero_offset else "--typed-buffer-unaligned" if args.unaligned else "--typed-buffer" if args.buffer else "--typed-uav", str(fmt)]
         if args.srv:
             command[3] = "--typed-buffer-srv-" + args.srv
+        if args.unused_null:
+            command[3] = "--typed-uav-null-outside"
         result = subprocess.run(command, cwd=stage, env=env, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, timeout=120)
         log = result.stdout.decode(errors="replace")
@@ -126,6 +133,8 @@ def main():
                   (not (args.heap_switch or args.indirect_heap or args.indirect_heap_wrong or args.indirect_math or args.indirect_math_wrong) or "heap switch dimensions=4,2 passed" in log) and
                   (not (args.encoder_break or args.indirect_heap or args.indirect_heap_wrong or args.indirect_math or args.indirect_math_wrong) or "encoder break copy passed" in log) and
                   (not (args.pending_reset or args.indirect_pending or args.indirect_pending_wrong or args.rerecord or args.rerecord_wrong or args.rerecord_zero) or "pending reset fence passed" in log))
+        if args.unused_null:
+            passed = passed and "typed NULL outside root tables slot=3" in log
         if args.rerecord or args.rerecord_wrong or args.rerecord_zero:
             passed = passed and "rerecord dimensions=2 passed" in log
         if args.indirect_math or args.indirect_math_wrong:

@@ -3535,6 +3535,89 @@ slice and will be committed without pushing.
 shader-reachable descriptor check, then add negative UAV/atomic and persistence
 coverage before any default enablement discussion.
 
+### E33 — Bound root-table typed NULL rejection (2026-11-05)
+
+**Task summary / Gate 0.** Baseline is `ac53ce70b6afd9d5a1d1b7bd9e8fe43a473a31f5`
+on `feat/d3d12`, 27 commits ahead of the cached origin and zero behind; no remote
+refresh is claimed. Entry workspace contained the preserved `.gitignore` edit and
+this slice's unfinished command-list change. The device is M1 Max, macOS 27.2
+(26B123), Xcode 27.2 (27B52), Wine 11.0, compiled MSC SDK API 4.0.3. The runtime
+product version remains unknown. Evidence types below distinguish source review
+from GPU observation.
+
+**Evidence / design decision.** `SOURCE_CONFIRMED`: E32 rejected every typed NULL
+in the bound resource heap, including slots outside all descriptor-table ranges.
+The existing root signature owns table/range metadata (`d3d12_device.hpp:604-620`)
+and the command list already uses it for residency traversal
+(`d3d12_command_list.cpp:4329-4440`). Reuse that metadata and the device descriptor
+increment; do not add a descriptor registry or infer exact shader usage.
+`SPEC_REQUIRED`: retained E30 Microsoft Resource Binding NULL-descriptor rules
+(`ms-resource-binding.source:618-639`) and view creation requirements still apply.
+Mullion comparison remains pinned to `93de32b9145885ceb2e45be7d445e56d62499b3c`:
+its null buffer handling (`mullion-descriptor.source:383-418`) does not establish
+MSC execution safety. No Mullion code or capability declaration is transplanted.
+
+**Gate 1 Design Card.** Goal: allow an unused typed NULL outside bound root tables
+without weakening rejection inside them. Scope: record-time MSC argument encoding
+and one GPU regression in the existing texture probe. Non-scope: shader-exact
+footprints, volatile submission-time validation, atomic semantics, graphics NULL
+execution, public capability promotion or backend replacement. The command list
+uses the existing heap owner, one locked descriptor batch, bounded SRV/UAV range
+walks, and a conservative full-heap scan for directly indexed heaps. Overflow,
+misalignment and heap-range checks follow existing traversal conventions. Keep the
+sidecar opt-in and existing default rejection for reachable typed NULL. Rollback:
+revert this focused commit, restoring E32 heap-wide rejection. Definition of done:
+full x64 build, out-of-range NULL GPU success, reachable NULL explicit rejection,
+and unchanged opt-in NULL SRV/UAV positive readbacks with matched runtime identity.
+
+**Gate 2 / changed files.** `src/d3d12/d3d12_command_list.cpp:4191-4195,4275-4326`
+replaces the heap-wide call with `HasTypedNullDescriptorsInUse`, traversing only
+bound SRV/UAV ranges unless the heap is directly indexed. This is root-table
+reachability, not an exact MSC shader footprint. `tests/dx12/dx12_texture_sampler.cpp`
+adds `--typed-uav-null-outside`: allocate four resource descriptors, retain live
+slots 0-2, and create typed NULL SRV at slot 3 outside the declared ranges.
+`tests/dx12/run_r32_typed_uav.py` adds `--unused-null`, checks the sentinel log and
+removes inherited production-gate activation for gate-disabled runs. This document
+records the bounded claim and remaining work.
+
+**Gate 3 validation matrix.** All GPU batches use isolated stage/cache paths,
+matched WineMetal PE/Unix libraries, loaded DLL export bytes and paths, and Metal
+API/GPU Validation. Each row covers R32 FLOAT, UINT and SINT.
+
+| Check | Result | Evidence type |
+| --- | --- | --- |
+| x64 release default-target full build | PASS | LOCAL_PASS; build-final.log |
+| Existing x86 release config build | PASS; D3D12/tests disabled in this config | LOCAL_PASS; build-x86.log; not D3D12 x86 coverage |
+| Gate disabled, typed NULL outside bound ranges | 3/3 readback PASS | LOCAL_PASS; unused-null/summary.json |
+| Gate disabled, reachable typed NULL SRV | 3/3 expected recording rejection, Close E_NOTIMPL | LOCAL_PASS negative; reachable-disabled logs; runner readback false is expected |
+| Gate enabled, reachable typed NULL SRV | 3/3 readback PASS | LOCAL_PASS; reachable-enabled/summary.json |
+| Gate enabled, typed NULL UAV reads/discarded writes | 3/3 readback PASS | LOCAL_PASS; uav-enabled/summary.json |
+| Direct heap indexing, unbounded ranges, graphics, Windows/Mullion GPU | NOT_RUN | UNVERIFIED; retained conservative direct-indexed scan only |
+| Descriptor changed to NULL after Close, atomics and cache persistence | NOT_RUN this slice | UNVERIFIED; not covered by this gate |
+
+**Gate 4 / capability impact / risks.** This slice changes rejection scope, not
+Feature Level, Shader Model, Tiled Resources Tier, Metal 3 shadow backing, D3D11
+behavior, MSC conversion ABI or the default-off sidecar setting. No performance
+claim is made. `MSC_SEMANTIC_GAP` remains for broader NULL operations and stages.
+`BACKEND_NOT_IMPLEMENTED`: submission-time enforcement of the disabled-sidecar
+NULL gate. `CollectResourceUsesForSubmission` delegates to
+`ResolveVolatileDescriptorUses` (`d3d12_command_list.cpp:1606-1609,4519`), whereas
+this check sees descriptors during argument encoding. A descriptor changed from
+live to NULL after Close can escape that recording-time check; this slice does
+not claim to close that gap. MSC lacks an exact descriptor footprint here, so
+unused slots inside a declared range remain conservatively rejected.
+`TARGET_DEVICE_NOT_AVAILABLE` applies to other device/native runtime comparisons,
+not M1 Max Placement Sparse. No hardware blocker is introduced.
+
+**Git state / next recommended slice.** Commit only the command list, existing
+probe/runner and this report using `fix(d3d12)` style, with no push; leave the
+original `.gitignore` unstaged. Evidence root:
+`/Users/zhangbo/Documents/Vibe-Codeding/dxmt-test/n95-capability-gate/result-null-reachability-audit-20261105`.
+Next: design and implement submission-time reachable typed NULL enforcement for
+volatile descriptor updates using existing pending-descriptor ownership, with
+live-to-NULL and NULL-to-live negative/positive tests. Do not enable the sidecar by
+default or expand sparse capability until that contract is validated.
+
 ### 7. Git State / Next Recommended Slice
 
 Delivery commit uses fix(d3d12) repository style and includes only the metadata,
