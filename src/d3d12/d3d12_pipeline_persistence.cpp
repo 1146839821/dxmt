@@ -8,6 +8,7 @@
 #include "d3d12_pageable.hpp"
 #include "log/log.hpp"
 #include "Metal.hpp"
+#include "metal_shader_converter/ir_version.h"
 
 #include <algorithm>
 #include <array>
@@ -24,7 +25,8 @@ namespace {
 
 constexpr char kPipelineKeyNamespace[] = "dxmt-d3d12-pipeline";
 constexpr uint32_t kPipelineKeyVersion = 3;
-constexpr uint32_t kPipelineConverterAPIVersion = 0x040001;
+// Compiled SDK API identity, not the loaded converter's product version.
+constexpr uint32_t kPipelineConverterAPIVersion = (IR_VERSION_MAJOR << 16) | (IR_VERSION_MINOR << 8) | IR_VERSION_PATCH;
 constexpr uint32_t kPipelineBindingLayoutVersion = 2;
 constexpr uint32_t kPipelineMetalTargetVersion = 0;
 constexpr char kPipelineEntryPointPolicy[] = "auto-from-dxil";
@@ -1207,9 +1209,11 @@ public:
       return E_INVALIDARG;
 
     if (adapter_id != device_->GetMTLDevice().registryID() || feature_level != device_->GetFeatureLevel() ||
-        metal_version != WMTMetalVersionMax || converter_version != kPipelineConverterAPIVersion ||
-        metal_target_version != kPipelineMetalTargetVersion || binding_layout_version != kPipelineBindingLayoutVersion)
+        metal_version != WMTMetalVersionMax || metal_target_version != kPipelineMetalTargetVersion ||
+        binding_layout_version != kPipelineBindingLayoutVersion)
       return E_INVALIDARG;
+    if (converter_version != kPipelineConverterAPIVersion)
+      return D3D12_ERROR_DRIVER_VERSION_MISMATCH;
 
     std::unordered_map<std::wstring, PipelineLibraryEntry> entries;
     for (uint32_t i = 0; i < record_count; i++) {

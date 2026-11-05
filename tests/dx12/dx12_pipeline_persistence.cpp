@@ -3,11 +3,14 @@
 #include <windows.h>
 #include <d3d12.h>
 
+#include "metal_shader_converter/ir_version.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -39,6 +42,48 @@ CheckHR(const char *name, HRESULT actual, HRESULT expected = S_OK) {
   std::cerr << name << " returned 0x" << std::hex << static_cast<unsigned long>(actual) << ", expected 0x"
             << static_cast<unsigned long>(expected) << std::dec << "\n";
   return false;
+}
+
+bool CheckLibrarySDK(ID3D12Device1 *device,
+                     const std::vector<BYTE> &serialized) {
+  // DXMTLIB1 v3: magic, format version, adapter, feature level, Metal version.
+  constexpr size_t sdk_offset = 8 + 4 + 8 + 4 + 4;
+  constexpr uint32_t sdk_api =
+      (IR_VERSION_MAJOR << 16) | (IR_VERSION_MINOR << 8) | IR_VERSION_PATCH;
+  if (serialized.size() < sdk_offset + sizeof(uint32_t) ||
+      memcmp(serialized.data(), "DXMTLIB1", 8))
+    return false;
+  uint32_t actual = 0;
+  for (unsigned i = 0; i < 4; ++i)
+    actual |= uint32_t(serialized[sdk_offset + i]) << (8 * i);
+  std::cout << "PERSISTENCE_SDK compiled=0x" << std::hex << sdk_api
+            << " serialized=0x" << actual << std::dec << "\n";
+  if (actual != sdk_api) {
+    std::cerr
+        << "library SDK API fingerprint does not match compiled headers\n";
+    return false;
+  }
+  for (uint32_t incompatible : {0x040001u, sdk_api ^ 1u}) {
+    if (incompatible == sdk_api)
+      continue;
+    auto stale = serialized;
+    for (unsigned i = 0; i < 4; ++i)
+      stale[sdk_offset + i] = BYTE(incompatible >> (8 * i));
+    auto *sentinel = reinterpret_cast<ID3D12PipelineLibrary1 *>(uintptr_t(1));
+    auto *rejected = sentinel;
+    const HRESULT hr = device->CreatePipelineLibrary(stale.data(), stale.size(),
+                                                     IID_PPV_ARGS(&rejected));
+    if (!CheckHR("Create library with incompatible SDK", hr,
+                 D3D12_ERROR_DRIVER_VERSION_MISMATCH) ||
+        rejected) {
+      if (SUCCEEDED(hr) && rejected != sentinel)
+        Release(rejected);
+      return false;
+    }
+    std::cout << "PERSISTENCE_SDK rejected=0x" << std::hex << incompatible
+              << std::dec << " output=null\n";
+  }
+  return true;
 }
 
 bool
@@ -147,6 +192,7 @@ RunCompute(ID3D12Device *device, ID3D12PipelineState *pipeline, ID3D12RootSignat
     goto cleanup;
   }
   readback->Unmap(0, nullptr);
+  std::cout << "PERSISTENCE_READBACK compute value=1234\n";
   result = true;
 
 cleanup:
@@ -314,6 +360,8 @@ bool RunGraphics(ID3D12Device *device, ID3D12PipelineState *pipeline,
     std::cerr << "loaded graphics readback mismatch: 0x" << std::hex << pixel << std::dec << "\n";
     goto cleanup;
   }
+  std::cout << "PERSISTENCE_READBACK graphics value=0x" << std::hex << pixel
+            << std::dec << "\n";
   result = true;
 
 cleanup:
@@ -369,6 +417,26 @@ struct InvalidTypeStream {
 
 int
 main(int argc, char **argv) {
+  char identity_requested[2] = {};
+  if (GetEnvironmentVariableA("DXMT_TEST_PRINT_LOADED_CODE", identity_requested,
+                              sizeof(identity_requested)) == 1 &&
+      identity_requested[0] == '1') {
+    for (const auto &entry :
+         {std::pair{"d3d12.dll", "D3D12CreateDevice"},
+          std::pair{"winemetal.dll", "DXMTMSCPatchSamplerLOD"}}) {
+      const auto module = GetModuleHandleA(entry.first);
+      const auto address = module ? reinterpret_cast<const unsigned char *>(
+                                        GetProcAddress(module, entry.second))
+                                  : nullptr;
+      if (!address)
+        return 1;
+      static constexpr char hex[] = "0123456789abcdef";
+      std::cout << "LOADED_CODE " << entry.first << " " << entry.second << " ";
+      for (unsigned i = 0; i < 16; ++i)
+        std::cout << hex[address[i] >> 4] << hex[address[i] & 15];
+      std::cout << "\n";
+    }
+  }
   if (argc != 4 && argc != 5) {
     std::cerr << "usage: dx12_pipeline_persistence <compute_root_uav.cso> "
                  "<vertex.cso> <pixel.cso> [geometry.cso]\n";
@@ -871,6 +939,8 @@ main(int argc, char **argv) {
     return fail("library serialization was not deterministic");
   if (!CheckHR("Serialize undersized library", library->Serialize(serialized.data(), serialized.size() - 1), E_INVALIDARG))
     return fail("undersized serialization was accepted");
+  if (!CheckLibrarySDK(device1, serialized))
+    return fail("library SDK compatibility check failed");
 
   if (!CheckHR(
           "Create rehydrated library",
@@ -895,6 +965,7 @@ main(int argc, char **argv) {
     Release(loaded_compute);
     return fail("rehydrated pipeline execution failed");
   }
+  std::cout << "PERSISTENCE_SDK recovered compute+graphics readback passed\n";
   Release(loaded_graphics);
   Release(loaded_compute);
 

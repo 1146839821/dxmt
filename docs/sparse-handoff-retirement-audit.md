@@ -4343,3 +4343,142 @@ identity with the header-derived SDK API version, then verify serialized library
 headers and invalidation/recovery using the existing persistence probes. Keep
 SDK API identity distinct from runtime product/content identity and keep patched
 persistence/capability gates closed until their own implementation and proof.
+
+## E37 — Header-derived MSC SDK identity for pipeline persistence (2026-11-05)
+
+**Task summary / Gate 0.** N07, one persistence compatibility slice following
+E36. Baseline feat/d3d12 at 08dc285d71d4bb15e5d05883e132b88894de2c0c;
+only the original .gitignore edit was dirty. Origin's branch was checked read-only
+with ls-remote: 85a44a0c6555398c278fc1dc48a78f4cfea7a295, matching the cached
+origin ref (baseline ahead31/behind0); no fetch or push. Mullion HEAD rechecked:
+93de32b9145885ceb2e45be7d445e56d62499b3c. CodeGraph used before source inspection.
+
+Environment rechecked: Apple M1 Max/Apple7, macOS27.2 26B123, Xcode27.2 27B52,
+Metal32023.922, Wine11.0 in a private stage/prefix. The x64 release build uses
+build_dxmt.sh's feature configuration plus tests and the previously validated
+patched LLVM15 installation. Compiled MSC SDK API4.0.3; loaded runtime product
+version remains unknown. Actual dylib SHA256:
+cc487a757f431c83483346c06a3ae8558910ecc510ce59b1e4f905d5d6d72bd4.
+
+**Findings / evidence.**
+
+| Type | Source / evidence anchor | Conclusion |
+| --- | --- | --- |
+| LOCAL_FAIL, reproduced baseline | baseline-probe.log; baseline-probe-result.json | Probe against unchanged production DLL reports compiled=0x40003, serialized=0x40001. Two compute and one graphics readback succeed before the exact SDK check fails. Export-byte/path identity and Metal validation clean. |
+| SOURCE_AUDIT | baseline src/d3d12/d3d12_pipeline_persistence.cpp:27,690,1210,1302 | Manual0x040001 feeds canonical keys, serialized headers and load checks despite current headers4.0.3. |
+| SOURCE_AUDIT | src/d3d12/d3d12_shader_converter.cpp:209-210; include/metal_shader_converter/ir_version.h:22-24 | Conversion-cache identity already derives from vendored SDK macros; these identify compiled API headers, not the dylib's product version. |
+| SPEC_REQUIRED | retained ms-create-library.source:830-831; ms-cached-pso.source:815-816 | Recognized data from an incompatible driver/runtime differs from corrupted/unrecognized data. Cached PSO identity is hardware/driver/machine dependent. |
+| MULLION_SOURCE_OBSERVED | pinned mullion-d3d12_pipeline_compute.cpp.source:226-262 | Mullion distinguishes AIRCONV_VERSION mismatch, malformed data and adapter mismatch. Its LLVM/payload/checksum format is different; only error classification is a reference. No source port. |
+
+**Gate 1 Design Card.**
+
+    GOAL: Correct compiled SDK identity and mismatch recovery in existing N07 owner.
+    BASELINE: 08dc285d, feat/d3d12; original .gitignore edit preserved.
+    EVIDENCE: Real compiled4.0.3/serialized4.0.1 contradiction; MS compatibility contract.
+    SCOPE: Header-derived key/header/load value, SDK mismatch HRESULT and existing probe.
+    NON-SCOPE: Runtime product/content fingerprint, cache redesign, sidecar persistence.
+    BOUNDARY: pipeline_persistence owns tokens/library; existing PSO creators unchanged.
+    PLAN: Derive IR_VERSION_*; SDK mismatch returns DRIVER_VERSION_MISMATCH.
+    PROOF: Baseline fails; fixed header, mismatch null output, recovery GPU readbacks.
+    PERF: Existing fixed-width field, constexpr version; no draw/submit work added.
+    RISKS: Old libraries require recreation; shared Airconv namespace invalidates too.
+    ROLLBACK: Revert focused commit; cache recreation, no resource/data migration.
+    DONE: Build, positive/negative proof, adjacent regression, commit without push.
+
+**Gate 2 / changed files and decisions.**
+
+- src/d3d12/d3d12_pipeline_persistence.cpp:11,28-29 derives the packed SDK API
+  version from existing vendored ir_version.h. The same existing constant feeds
+  canonical keys (:692), header serialization (:1306) and load checks (:1215-1216).
+  Identifiable SDK mismatch now returns D3D12_ERROR_DRIVER_VERSION_MISMATCH.
+  Other existing header/error handling is not full HRESULT conformance.
+- tests/dx12/dx12_pipeline_persistence.cpp:47 verifies the private DXMTLIB1 SDK
+  field equals compiled headers, substitutes legacy0x040001 and a different SDK
+  value, requires exact mismatch HRESULT and null output from a sentinel pointer.
+  It then reuses the original valid bytes, existing descriptor/stream creators
+  and GPU workloads. :195,:363,:968 record independent compute/pixel readbacks;
+  :419 records optional loaded-export bytes using the existing test convention.
+- This report records baseline failure, design, final evidence and limits.
+
+No new src/d3d12 file, target, shader source, runner, cache owner or format bump.
+The pre-existing fixed-width SDK field now has its correct value. Keys already
+include it, so old tokens cease matching and retain the existing cache-miss /
+recreation path; incompatible libraries require caller recreation. Shared identity
+also invalidates Airconv entries on SDK upgrade; no backend-specific namespace
+is introduced. Compiled headers stay the single source of version truth.
+
+**Gate 3 validation — LOCAL_PASS.**
+
+| Check | Result / artifact |
+| --- | --- |
+| Baseline regression sensitivity | EXPECTED_FAIL: unchanged production DLL records0x40001 despite compiled0x40003; fails exact field check after three successful GPU readbacks. Not counted as final success. |
+| x64 release default targets | PASS, incremental full target build; build-final.log/build-final.json. Six existing fixture targets generated separately through Meson/DXC; build-fixtures.log. Not a clean rebuild or x86 claim. |
+| Ordinary persistence, two independent processes | PASS: correct0x40003 header; per process two SDK mismatch rejections, null output, fresh rehydrate; three compute and two graphics readbacks each. |
+| GS persistence, one process | PASS: same SDK/recovery assertions and three compute/two GS graphics readbacks. |
+| Airconv SM5 list | PASS: exact0xffffffff pixel and existing shared-stage/geometry footprint checks. Loaded path/paired Unix library and validation clean; this older executable has no loaded-export byte marker. |
+| Existing sidecar isolation, patched and serialized | PASS: six processes / six GPU readbacks, R32_FLOAT/UINT/SINT. Per process two misses, two inserts, five hits; positive aggregate12/12/30. |
+| Deliberately wrong sidecar PSO | Three expected negative exits=1, exact store mismatch; cache/API isolation and loaded identity/validation still PASS. Not crashes/timeouts. |
+| Identity / validation | PASS for all13 final processes: intended PE paths, WineMetal Unix path, matched build/stage bytes, API+GPU validation enabled and clean. Loaded D3D12/WineMetal export bytes additionally checked in all persistence/sidecar cases (12 processes). |
+| T0 delivery checks | PASS: git diff --check; final C++ source hashes equal validated-source.json; artifact SHA256 and build/stage pairs rechecked in delivery-audit.json. |
+
+Final acceptance: **13 processes,22 successful GPU readbacks, three expected
+wrong-PSO GPU failures**. Within the three primary persistence processes, six
+SDK mismatch creations return the exact documented error/null output; they are
+API negative cases, not extra GPU executions. Nine sidecar processes each also
+perform two expected atomic patch refusals (18 events), never atomic GPU dispatch.
+No conversion disk cache, cache-hit speedup or atomic execution claim.
+
+External evidence root:
+/Users/zhangbo/Documents/Vibe-Codeding/dxmt-test/n95-capability-gate/result-persistence-sdk-20261105.
+Commands/exits: build-final.json, build-fixtures.json, runs-all.json;
+authoritative row audit: runs-direct-audited.json, delivery-audit.json;
+normal-1/normal-2/geometry/airconv-sm5 stdout.log; sidecar-*/summary.json and logs;
+validated-source.json, stage-artifacts.json and sources.json.
+The baseline collector initially undercounted the existing stream compute
+readback; the SM5 collector initially searched an incorrect legacy success string.
+Both original records remain retained; corrected audits match actual source/logs
+without repeating the successful GPU runs or changing production code.
+Windows native, live Mullion, x86 and D3D11 rendering: NOT_RUN.
+
+**Performance / capability impact.** A constexpr value and existing factory
+compatibility classification change; key/header sizes and field counts stay
+fixed. No added draw/dispatch/submit hash, allocation, lock, heap scan, residency
+operation or encoder boundary. Process wall times in runs-direct-audited.json
+include Wine startup, multiple PSOs and validation, and do not isolate cold/warm
+MSC compilation. No A/B or speedup claim. Public FL/SM/Tier/format capabilities,
+default-off sidecar selection, shader/bridge ABI, Metal3 resources and D3D11
+production sources are unchanged.
+
+**Remaining blockers / regression risks.**
+
+- BACKEND_NOT_IMPLEMENTED: patched PSO export/library persistence remains refused;
+  disk MSC conversion-cache reads/writes remain disabled by their existing owner.
+  This slice does not newly disable them or establish persistent conversion hits.
+- MSC_SEMANTIC_GAP: ordinary bounded typed views, sidecar atomic execution and
+  broader stage/NULL-atomic semantics retain their existing proof limits.
+- SPEC_UNVERIFIED / adjacent API gaps: full SDK/runtime-content/OS identity remains
+  unproven. CreateD3D12PipelineLibrary returns E_POINTER for null output
+  (src/d3d12/d3d12_pipeline_persistence.cpp:1668-1669), while the documented validation-only success is S_FALSE
+  (ms-create-library.source:831). Adapter mismatch still shares E_INVALIDARG
+  (:1211-1214). Neither is repaired by this SDK-only slice; no Windows-native proof.
+- TARGET_DEVICE_NOT_AVAILABLE: Windows native/other-GPU comparisons. Live Mullion,
+  x86 and D3D11 rendering are NOT_RUN. M1 Max Metal4/Placement Sparse is available,
+  not a hardware blocker. No sparse capability claim.
+- Rollback or another SDK change can invalidate libraries again; callers recreate.
+  No user cache/prefix or existing artifacts deleted.
+
+**Gate 4 / Git state.** Three intended files: the persistence owner,
+existing probe, and this report. Scope diff reviewed; no additional state owner,
+vendor change, runtime gate or serialized layout change. Original .gitignore
+SHA256 is preserved:
+764aac09922db4654ca6de63fd20cf014739d9292623eb979f448f38e609b759.
+Use the repository's fix(d3d12) commit style; no push. The external
+delivery-manifest.json records the final commit, post-commit state and evidence
+hashes. Only the original .gitignore edit remains unstaged; staged/untracked
+sets must be empty at delivery. Runtime binaries match the validated pre-commit
+source; no post-commit rebuild merely to change the Git version stamp.
+
+**Next recommended slice.** N07: implement the existing factory's documented
+validation-only mode: null output validates and returns S_FALSE on a valid
+library. Cover valid/invalid/SDK-mismatch API cases and existing recovery readback;
+retain current persistence/capability gates and backend architecture.
