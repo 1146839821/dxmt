@@ -18,6 +18,7 @@ public:
   uint64_t sampler_state_cube_handle;
 
   static Rc<Sampler> createSampler(WMT::Device device, const WMTSamplerInfo &info, float lod_bias);
+  WMT::Reference<WMT::SamplerState> createLODUnclampedState(WMT::Device device, uint64_t &resource_id) const;
 
 private:
   WMTSamplerInfo info_;

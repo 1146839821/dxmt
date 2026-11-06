@@ -18,24 +18,89 @@
 
 #pragma once
 
+#include "d3d12.h"
 #include "dxmt_texture.hpp"
+#include "dxmt_scaler.hpp"
+#include "com/com_pointer.hpp"
+#include <cstddef>
 #include <cstdint>
+#include <vector>
 
 namespace dxmt {
+
+struct IndirectRenderCommandData {
+  uint64_t cmd_buf;
+  uint64_t max_count;
+  uint64_t max_count_buffer;
+  uint64_t argument_buffer;
+  uint64_t static_samplers;
+  uint64_t rootsig_qwords;
+  uint32_t rootsig_qwords_stride;
+  uint32_t primitive_type;
+  uint64_t vertex_buffer;
+  uint64_t index_buffer;
+  DXGI_FORMAT index_buffer_format;
+  uint32_t vertex_argbuf_stride;
+  uint32_t vertex_slot_mask;
+};
+static_assert(offsetof(IndirectRenderCommandData, vertex_slot_mask) == 80);
+static_assert(sizeof(IndirectRenderCommandData) == 88);
+
+class MTLD3D12Resource;
+class MTLD3D12GraphicsPipelineState;
 
 enum class EncoderType {
   Null,
   Clear,
   Render,
   Blit,
+  CopyTiles,
   Compute,
   Resolve,
+  TemporalUpscale,
+  SampleTimestamp,
+  AccelerationStructure,
 };
+
+class MTLD3D12CommandSignature;
 
 struct EncoderData {
   EncoderType type;
   EncoderData *next = nullptr;
   uint64_t id;
+  // Barriers recorded inside this encoder and in its trailing gap. Before the
+  // first encoder, the recording-head sentinel owns this summary. It is an
+  // overapproximation, not an ordered event list or a resource-state owner.
+  struct BarrierUse {
+    enum Kind : uint32_t {
+      LegacyTransition = 1 << 0,
+      LegacyUAV = 1 << 1,
+      Aliasing = 1 << 2,
+      Enhanced = 1 << 3,
+      SplitBegin = 1 << 4,
+      SplitEnd = 1 << 5,
+    };
+    uint32_t kinds = 0;
+    WMTRenderStages legacy_stages_before = (WMTRenderStages)0;
+    WMTRenderStages legacy_stages_after = (WMTRenderStages)0;
+    D3D12_BARRIER_SYNC sync_before = D3D12_BARRIER_SYNC_NONE;
+    D3D12_BARRIER_SYNC sync_after = D3D12_BARRIER_SYNC_NONE;
+  } barriers;
+  // Commands store native resource handles for compact translation. Keep a
+  // strong reference alongside each encoder so a D3D12 resource released
+  // after Close() cannot invalidate the handle before ExecuteCommandLists
+  // translates or completes the Metal command buffer.
+  std::vector<WMT::Reference<WMT::Resource>> resource_refs;
+  // Graphics-owned variants may execute in an internal compute encoder too.
+  std::vector<Com<MTLD3D12GraphicsPipelineState, false>> pipeline_refs;
+  std::vector<Com<MTLD3D12CommandSignature, false>> signature_refs;
+};
+
+struct SubmissionResourceUse {
+  EncoderData *encoder;
+  WMT::Resource resource;
+  WMTResourceUsage usage;
+  WMTRenderStages stages;
 };
 
 struct ClearEncoderData : EncoderData {
@@ -44,10 +109,15 @@ struct ClearEncoderData : EncoderData {
     std::pair<float, uint8_t> depth_stencil;
   };
   TextureViewRef attachment;
+  D3D12_RECT *rects = nullptr;
+  WMTPixelFormat format = WMTPixelFormatInvalid;
   unsigned clear_dsv;
   unsigned array_length;
   unsigned width;
   unsigned height;
+  unsigned rect_count = 0;
+  uint8_t raster_sample_count = 1;
+  unsigned depth_plane = 0;
 
   ClearEncoderData() {}
 };
@@ -87,6 +157,22 @@ struct RenderEncoderStencilAttachmentData {
 };
 
 struct RenderEncoderData : EncoderData {
+  // IA coverage only, not a shader/resource/alias/barrier dependency proof.
+  // Concrete binding history stays in cmd_head; accumulate across every draw.
+  struct InputAssemblyUse {
+    uint32_t vertex_slots = 0;
+    bool indexed = false;
+    bool direct = false;
+    bool unclassified = false;
+
+    bool
+    complete() const {
+      return direct && !unclassified;
+    }
+  } input_assembly;
+  // Recorded native PSO handles (including stride variants and depth state) must
+  // survive PSO switches, closed-list replay and pending submissions.
+  WMT::RenderPipelineState current_pipeline = {};
   std::array<RenderEncoderColorAttachmentData, 8> colors;
   RenderEncoderDepthAttachmentData depth;
   RenderEncoderStencilAttachmentData stencil;
@@ -100,6 +186,7 @@ struct RenderEncoderData : EncoderData {
   uint8_t dsv_readonly_flags;
   uint8_t render_target_count;
   bool use_visibility_result = 0;
+  WMT::Reference<WMT::Buffer> visibility_buffer;
   bool use_tessellation = 0;
   bool use_geometry = 0;
 };
@@ -107,15 +194,78 @@ struct RenderEncoderData : EncoderData {
 struct BlitEncoderData : EncoderData {
   wmtcmd_blit_nop cmd_head;
   wmtcmd_base *cmd_tail;
+  // Immutable immediate values share a bounded bump buffer. resource_refs owns
+  // every completed chunk as well as this current one until allocator reset.
+  WMT::Buffer immediate_buffer = {};
+  void *immediate_mapping = nullptr;
+  size_t immediate_offset = 0;
+};
+
+struct CopyTilesEncoderData : EncoderData {
+  Com<MTLD3D12Resource, false> tiled_resource;
+  Com<MTLD3D12Resource, false> linear_resource;
+  D3D12_TILED_RESOURCE_COORDINATE region_start_coordinate = {};
+  D3D12_TILE_REGION_SIZE region_size = {};
+  UINT64 buffer_offset = 0;
+  D3D12_TILE_COPY_FLAGS flags = D3D12_TILE_COPY_FLAG_NONE;
+  bool has_region_start_coordinate = false;
+  bool buffer_to_tiled = false;
+  bool tiled_to_buffer = false;
 };
 
 struct ComputeEncoderData : EncoderData {
+  WMT::Reference<WMT::ComputePipelineState> internal_pipeline;
   wmtcmd_compute_nop cmd_head;
   wmtcmd_base *cmd_tail;
+  WMT::Reference<WMT::ComputePipelineState> ray_dispatch_pso;
+  WMT::Reference<WMT::VisibleFunctionTable> ray_dispatch_visible_function_table;
+  WMT::Reference<WMT::IntersectionFunctionTable> ray_dispatch_intersection_function_table;
 };
 struct ResolveEncoderData : EncoderData {
   TextureViewRef src;
   TextureViewRef dst;
+};
+
+struct TemporalUpscaleData : EncoderData {
+  WMT::Reference<WMT::Texture> input;
+  WMT::Reference<WMT::Texture> output;
+  WMT::Reference<WMT::Texture> depth;
+  WMT::Reference<WMT::Texture> motion_vector;
+  WMT::Reference<WMT::Texture> exposure;
+  Rc<TemporalScaler> scaler;
+  WMTFXTemporalScalerProps props;
+};
+
+struct SampleTimestampData : EncoderData {
+  WMT::Reference<WMT::CounterSampleBuffer> sample_buffer;
+  uint64_t sample_index;
+};
+
+enum class AccelerationStructureCommandType {
+  Build,
+  Refit,
+  Copy,
+  CopyAndCompact,
+  WriteCompactedSize,
+};
+
+struct AccelerationStructureCommand {
+  AccelerationStructureCommandType type = AccelerationStructureCommandType::Build;
+  WMT::Reference<WMT::AccelerationStructure> destination;
+  WMT::Reference<WMT::AccelerationStructure> source;
+  WMT::Reference<WMT::AccelerationStructure> acceleration_structure;
+  WMT::Reference<WMT::Buffer> scratch;
+  WMT::Reference<WMT::Buffer> buffer;
+  WMTAccelerationStructureDescriptorInfo descriptor = {};
+  std::vector<WMT::Reference<WMT::Buffer>> referenced_buffers;
+  std::vector<WMT::Reference<WMT::AccelerationStructure>> referenced_acceleration_structures;
+  uint64_t scratch_offset = 0;
+  uint64_t buffer_offset = 0;
+  uint32_t size_data_type = WMTAccelerationStructureSizeDataTypeUInt64;
+};
+
+struct AccelerationStructureEncoderData : EncoderData {
+  std::vector<AccelerationStructureCommand> commands;
 };
 
 }; // namespace dxmt

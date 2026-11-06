@@ -36,7 +36,7 @@
 #include "airconv_public.h"
 #include <cassert>
 
-#define DXMT_IMPLEMENT_ME __builtin_unreachable();
+#define DXMT_IMPLEMENT_ME do { WARN("DXMT: operation is not implemented"); } while (0)
 #define DXMT_UNREACHABLE __builtin_unreachable();
 
 namespace dxmt {
@@ -102,7 +102,6 @@ struct UnorderedAccessViewBinding {
 
 struct StreamOutputBinding {
   Rc<Buffer> buffer;
-  uint64_t offset;
   Rc<Buffer> counter;
 };
 
@@ -137,6 +136,7 @@ struct GSDispatchArgumentsMarshal {
   WMT::Buffer dispatch_arguments_buffer;
   uint64_t dispatch_arguments_va;
   uint32_t vertex_count_per_warp;
+  uint32_t index_count = 0;
 };
 
 struct TSDispatchArgumentsMarshal {
@@ -192,6 +192,7 @@ struct RenderEncoderData : EncoderData {
   uint32_t render_target_height;
   uint32_t render_target_width;
   std::vector<GSDispatchArgumentsMarshal> gs_arg_marshal_tasks;
+  std::vector<GSDispatchArgumentsMarshal> gs_bounded_arg_marshal_tasks;
   std::vector<TSDispatchArgumentsMarshal> ts_arg_marshal_tasks;
   wmtcmd_render_nop cmd_head;
   wmtcmd_base *cmd_tail;
@@ -235,6 +236,7 @@ struct ClearEncoderData : EncoderData {
   unsigned array_length;
   unsigned width;
   unsigned height;
+  unsigned depth_plane = 0;
 
   ClearEncoderData() {}
 };
@@ -334,6 +336,9 @@ struct AllocatedTempBufferSlice {
 class ArgumentEncodingContext {
   friend struct SimpleCommandContext<ArgumentEncodingContext>;
 private:
+  WMT::Device device_;
+  CommandQueue& queue_;
+
   template <PipelineStage stage> void track(GenericAccessTracker &tracker, int flags);
 
 public:
@@ -477,14 +482,31 @@ public:
   void bindStreamOutputBuffer(unsigned slot, unsigned offset, Rc<Buffer> &&buffer, Rc<Buffer> &&counter) {
     auto &entry = so_[slot];
     entry.buffer = std::move(buffer);
-    entry.offset = offset;
     entry.counter = std::move(counter);
+    bindStreamOutputBufferOffset(slot, offset);
   }
-  
+
   void bindStreamOutputBufferOffset(unsigned slot, unsigned offset) {
     auto &entry = so_[slot];
-    entry.offset = offset;
+    if (entry.counter && offset != UINT32_MAX) {
+      // A binding reset is ordered by the existing ST stream. Renaming keeps
+      // prior submitted draws' cursor allocation alive and avoids CPU/GPU races.
+      auto allocation = entry.counter->allocate({});
+      allocation->updateContents(0, &offset, sizeof(offset));
+      entry.counter->rename(std::move(allocation));
+    }
   }
+
+  void prepareStreamOutputIndexPrefix(
+      StreamOutputDraw arguments, uint64_t index_offset, Rc<Buffer> scratch, Rc<Buffer> indirect = {},
+      uint64_t indirect_offset = 0
+  );
+  void bindGeometryIndexPrefix(Rc<Buffer> scratch, uint64_t descriptor_offset,
+                               uint32_t summary_count, uint32_t index_count);
+  void encodeStreamOutputDraw(
+      StreamOutputDraw arguments, uint64_t argument_offset, uint64_t index_offset, Rc<Buffer> scratch = {},
+      Rc<Buffer> indirect = {}, uint64_t indirect_offset = 0
+  );
 
   void
   bindVertexBuffer(unsigned slot, unsigned offset, unsigned stride, Rc<Buffer> &&buffer) {
@@ -514,6 +536,7 @@ public:
   };
 
   void clearState() {
+    so_ = {{}};
     vbuf_ = {{}};
     ibuf_ = {};
     cbuf_ = {{}};
@@ -622,6 +645,18 @@ public:
   }
 
   void
+  encodeGSIndexedRestartArgumentsMarshal(
+      WMT::Buffer draw_args, uint64_t draw_args_address, uint32_t vertex_count_per_warp,
+      WMT::Buffer dispatch_args, uint64_t dispatch_address, uint64_t max_object_threadgroups, uint32_t index_count
+  ) {
+    assert(encoder_current->type == EncoderType::Render);
+    auto data = static_cast<RenderEncoderData *>(encoder_current);
+    data->gs_bounded_arg_marshal_tasks.push_back(
+        {draw_args, draw_args_address, max_object_threadgroups, dispatch_args, dispatch_address,
+         vertex_count_per_warp, index_count});
+  }
+
+  void
   encodeTSDispatchArgumentsMarshal(
       WMT::Buffer draw_args, uint64_t draw_args_resource_id, uint32_t draw_args_offset, uint32_t control_point_count,
       uint32_t patch_per_group, WMT::Buffer dispatch_args, uint64_t dispatch_args_resource_id, uint32_t write_offset,
@@ -683,9 +718,11 @@ public:
     return encoder_id_++;
   };
 
-  void clearColor(Rc<Texture> &&texture, uint64_t viewId, unsigned arrayLength, WMTClearColor color);
+  void
+  clearColor(Rc<Texture> &&texture, uint64_t viewId, unsigned arrayLength, unsigned depthPlane, WMTClearColor color);
   void clearDepthStencil(
-      Rc<Texture> &&texture, uint64_t viewId, unsigned arrayLength, unsigned flag, float depth, uint8_t stencil
+      Rc<Texture> &&texture, uint64_t viewId, unsigned arrayLength, unsigned depthPlane, unsigned flag, float depth,
+      uint8_t stencil
   );
   void resolveTexture(Rc<Texture> &&src, TextureViewKey src_view, Rc<Texture> &&dst, TextureViewKey dst_view);
 
@@ -918,8 +955,6 @@ private:
 
   uint64_t intrapass_barrier_control_bits_ = 0;
 
-  WMT::Device device_;
-  CommandQueue& queue_;
 };
 
 template <>

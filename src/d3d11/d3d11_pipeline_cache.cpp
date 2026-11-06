@@ -352,6 +352,9 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
                         UINT NumStrides, const UINT *pStrides,
                         UINT RasterizedStream,
                         IMTLD3D11StreamOutputLayout **ppSOLayout) override {
+    if (!NumEntries || NumEntries > 128 || !pEntries || !NumStrides || NumStrides > 4 || !pStrides || !pStrides[0] ||
+        pStrides[0] > 2048 || (pStrides[0] & 3))
+      return E_INVALIDARG;
     std::lock_guard<dxmt::mutex> lock(mutex_so_);
     std::vector<MTL_SHADER_STREAM_OUTPUT_ELEMENT_DESC> buffer(NumEntries * 4);
     std::array<uint32_t, 4> strides = {{}};
@@ -361,6 +364,8 @@ class PipelineCache : public MTLD3D11PipelineCacheBase {
             &num_metal_so_elements))) {
       return E_FAIL;
     }
+    if (num_metal_so_elements > 128 || uint64_t(num_metal_so_elements) * 4 > pStrides[0])
+      return E_INVALIDARG;
     buffer.resize(num_metal_so_elements);
     for (unsigned i = 0; i < NumStrides; i++) {
       strides[i] = pStrides[i];

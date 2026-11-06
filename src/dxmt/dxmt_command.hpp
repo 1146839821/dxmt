@@ -7,6 +7,7 @@
 #include "rc/util_rc_ptr.hpp"
 #include <array>
 #include <unordered_map>
+#include <vector>
 
 namespace dxmt {
 struct TileBarrierPSOKey {
@@ -35,6 +36,133 @@ template <> struct equal_to<dxmt::TileBarrierPSOKey> {
 }; // namespace std
 
 namespace dxmt {
+
+// VS stream output assembles the same input occurrences as the IA, then drops
+// adjacency vertices and expands strips. Patch streams have no raster output.
+inline bool
+GetStreamOutputPrimitiveLayout(uint32_t topology, StreamOutputDraw &draw) {
+  draw.flags &= ~(kSOTriangleStrip | kSOOverlapping);
+  draw.core_first = 0;
+  draw.core_step = 1;
+  if (topology >= 33 && topology <= 64) {
+    draw.input_step = draw.input_window = draw.primitive_vertices = topology - 32;
+    return true;
+  }
+  switch (topology) {
+  case 1:
+    draw.input_step = draw.input_window = draw.primitive_vertices = 1;
+    break;
+  case 2:
+    draw.input_step = draw.input_window = draw.primitive_vertices = 2;
+    break;
+  case 3:
+    draw.input_step = 1;
+    draw.input_window = draw.primitive_vertices = 2;
+    draw.flags |= kSOOverlapping;
+    break;
+  case 4:
+    draw.input_step = draw.input_window = draw.primitive_vertices = 3;
+    break;
+  case 5:
+    draw.input_step = 1;
+    draw.input_window = draw.primitive_vertices = 3;
+    draw.flags |= kSOOverlapping | kSOTriangleStrip;
+    break;
+  case 10:
+    draw.input_step = draw.input_window = 4;
+    draw.primitive_vertices = 2;
+    draw.core_first = 1;
+    break;
+  case 12:
+    draw.input_step = draw.input_window = 6;
+    draw.primitive_vertices = 3;
+    draw.core_step = 2;
+    break;
+  case 11:
+    draw.input_step = 1;
+    draw.input_window = 4;
+    draw.primitive_vertices = 2;
+    draw.core_first = 1;
+    draw.flags |= kSOOverlapping;
+    break;
+  case 13:
+    draw.input_step = 2;
+    draw.input_window = 6;
+    draw.primitive_vertices = 3;
+    draw.core_step = 2;
+    draw.flags |= kSOOverlapping | kSOTriangleStrip;
+    break;
+  default:
+    return false;
+  }
+  return true;
+}
+
+struct StreamOutputScanLevel {
+  uint64_t offset;
+  uint32_t count;
+};
+struct StreamOutputScanLayout {
+  std::vector<StreamOutputScanLevel> levels;
+  uint64_t size = 0;
+  explicit StreamOutputScanLayout(uint32_t count) {
+    for (;;) {
+      levels.push_back({size, count});
+      size += uint64_t(count) * 8;
+      if (count <= 1)
+        break;
+      count = uint32_t((uint64_t(count) + kSOScanThreadgroupSize - 1) / kSOScanThreadgroupSize);
+    }
+  }
+};
+
+// One scan schedule serves both APIs; each caller keeps its existing buffer,
+// pipeline, encoder and allocation failure ownership.
+template <typename Binding, typename Bytes, typename Dispatch>
+bool
+EncodeStreamOutputIndexScan(
+    const StreamOutputDraw &arguments, const StreamOutputScanLayout &layout, Binding binding, Bytes bytes,
+    Dispatch dispatch
+) {
+  const auto &levels = layout.levels;
+  if ((arguments.flags & kSOGeometryRestart) && arguments.input_count && arguments.input_count <= kSOScanThreadgroupSize) {
+    binding(0, 0);
+    if (!bytes(&arguments, sizeof(arguments)))
+      return false;
+    dispatch(4, arguments.input_count);
+    return true;
+  }
+  auto scan = [&] {
+    for (size_t i = 0; i + 1 < levels.size(); ++i) {
+      binding(levels[i].offset, 0);
+      binding(levels[i + 1].offset, 1);
+      if (!bytes(&levels[i].count, 4))
+        return false;
+      dispatch(1, levels[i].count);
+    }
+    for (size_t i = levels.size() - 1; i; --i) {
+      if (levels[i - 1].count <= kSOScanThreadgroupSize)
+        continue;
+      binding(levels[i - 1].offset, 0);
+      binding(levels[i].offset, 1);
+      if (!bytes(&levels[i - 1].count, 4))
+        return false;
+      dispatch(2, levels[i - 1].count);
+    }
+    return true;
+  };
+  binding(0, 0);
+  if (!bytes(&arguments, sizeof(arguments)))
+    return false;
+  dispatch(0, arguments.input_count);
+  if (!scan())
+    return false;
+  binding(0, 0);
+  if (!bytes(&arguments, sizeof(arguments)))
+    return false;
+  dispatch(3, arguments.input_count);
+  return scan();
+}
 
 class ArgumentEncodingContext;
 
@@ -154,9 +282,21 @@ public:
     dispatchThreads({texture.width(), texture.height(), texture.depth()});
   }
 
+  WMT::RenderPipelineState GetStreamOutputPreparePSO();
+
+  bool StreamOutputIndexPrefix(const StreamOutputDraw &arguments, WMT::Buffer storage, uint64_t offset);
+
   void
   MarshalGSDispatchArguments(WMT::RenderCommandEncoder encoder, WMT::Buffer commands, uint32_t commands_offset) {
     encoder.setRenderPipelineState(gs_draw_arguments_marshal);
+    encoder.setVertexBuffer(commands, commands_offset, kCustomBufferArgumentIndex0);
+    encoder.drawPrimitives(WMTPrimitiveTypePoint, 0, 1);
+    encoder.setVertexBuffer({}, 0, kCustomBufferArgumentIndex0);
+  }
+
+  void
+  MarshalGSIndexedRestartArguments(WMT::RenderCommandEncoder encoder, WMT::Buffer commands, uint32_t commands_offset) {
+    encoder.setRenderPipelineState(gs_indexed_restart_marshal);
     encoder.setVertexBuffer(commands, commands_offset, kCustomBufferArgumentIndex0);
     encoder.drawPrimitives(WMTPrimitiveTypePoint, 0, 1);
     encoder.setVertexBuffer({}, 0, kCustomBufferArgumentIndex0);
@@ -182,6 +322,9 @@ private:
   void setComputeBytes(const void *buf, uint64_t length, uint8_t index);
 
   ArgumentEncodingContext &ctx;
+  WMT::Device device_;
+  WMT::Reference<WMT::RenderPipelineState> stream_output_prepare_;
+  WMT::Reference<WMT::ComputePipelineState> stream_output_scan_[5];
   WMT::Reference<WMT::ComputePipelineState> clear_texture_1d_uint_pipeline;
   WMT::Reference<WMT::ComputePipelineState> clear_texture_1d_array_uint_pipeline;
   WMT::Reference<WMT::ComputePipelineState> clear_texture_2d_uint_pipeline;
@@ -197,6 +340,7 @@ private:
   WMT::Reference<WMT::ComputePipelineState> clear_texture_buffer_float_pipeline;
 
   WMT::Reference<WMT::RenderPipelineState> gs_draw_arguments_marshal;
+  WMT::Reference<WMT::RenderPipelineState> gs_indexed_restart_marshal;
   WMT::Reference<WMT::RenderPipelineState> ts_draw_arguments_marshal;
 };
 

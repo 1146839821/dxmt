@@ -20,12 +20,58 @@
 #include "com/com_pointer.hpp"
 #include "d3d12_device.hpp"
 #include "d3d12_pageable.hpp"
+#include "dxmt_command_constants.hpp"
+#include "dxmt_format.hpp"
 #include "dxgi_interfaces.h"
 #include "log/log.hpp"
+#include "util_env.hpp"
+#include <algorithm>
+#include <array>
+#include <cassert>
+#include <chrono>
+#include <cstdio>
+#include <cstring>
+#include <limits>
+#include <string>
+#include <unordered_map>
+#include <variant>
 
 namespace dxmt {
 
 constexpr auto kCommandQueueSize = 32u;
+
+static void
+PauseLegacySignalForTesting() {
+  char enabled[2] = {};
+  if (!GetEnvironmentVariableA("DXMT_TEST_PAUSE_LEGACY_SIGNAL", enabled, sizeof(enabled)))
+    return;
+  char entered_name[80], resume_name[80];
+  std::snprintf(entered_name, sizeof(entered_name), "DXMT.Test.LegacySignalEntered.%lu", GetCurrentProcessId());
+  std::snprintf(resume_name, sizeof(resume_name), "DXMT.Test.LegacySignalResume.%lu", GetCurrentProcessId());
+  HANDLE entered = OpenEventA(EVENT_MODIFY_STATE, FALSE, entered_name);
+  HANDLE resume = OpenEventA(SYNCHRONIZE, FALSE, resume_name);
+  if (entered && resume) {
+    SetEvent(entered);
+    WaitForSingleObject(resume, 30000);
+  }
+  if (entered) CloseHandle(entered);
+  if (resume) CloseHandle(resume);
+}
+
+static bool
+FailLegacyDiagnosticAllocationForTesting(const char *phase) {
+  char selected[32] = {};
+  const DWORD length = GetEnvironmentVariableA("DXMT_TEST_LEGACY_DIAGNOSTIC_OOM", selected, sizeof(selected));
+  return length && length < sizeof(selected) && std::strcmp(selected, phase) == 0;
+}
+
+// Test only: simulate a missing prerequisite without changing device capabilities.
+static bool
+FailSparseQueueAllocationForTesting(const char *object) {
+  char selected[16] = {};
+  const DWORD length = GetEnvironmentVariableA("DXMT_TEST_SPARSE_QUEUE_INIT_FAILURE", selected, sizeof(selected));
+  return length && length < sizeof(selected) && (!std::strcmp(selected, object) || !std::strcmp(selected, "both"));
+}
 
 class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, IMTLSwapChainFactory> {
 
@@ -33,10 +79,806 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
 
   WMT::Reference<WMT::CommandQueue> queue_;
   WMT::Reference<WMT::Fence> fence_;
+  WMT::Reference<WMT::Buffer> timestamp_dummy_buffer_;
+  WMT::Reference<WMT::SparseMappingQueue> sparse_mapping_queue_;
+  // Public migration stays opt-in until sparse typed/counter consumers pass.
+  // Reuse the existing controlled submission seam; never spoof capability.
+  bool common_sparse_issue_for_testing_ = false;
+  WMT::Reference<WMT::SharedEvent> sparse_event_;
+  uint64_t sparse_event_value_ = 0;
+
+  // Transient intent owned by the existing bounded FIFO; no resolved tile map.
+  struct SparseIssue {
+    WMT::Reference<WMT::Event> gate;
+    uint64_t main_signal = 0;
+    UINT flags = 0;
+    UINT limit = UINT_MAX;
+    bool hold_signal = false;
+    HANDLE issued = nullptr;
+    HANDLE resume = nullptr;
+    ~SparseIssue() {
+      if (issued)
+        CloseHandle(issued);
+      if (resume)
+        CloseHandle(resume);
+    }
+  };
+
+  struct Submission {
+    uint64_t serial = 0;
+    WMT::Reference<WMT::CommandBuffer> command_buffer;
+    WMT::Reference<WMT::SparseBarrierCompletion> sparse_barrier;
+    std::variant<std::unique_ptr<D3D12SparseBufferMappingPlan>, std::unique_ptr<D3D12SparseTextureMappingPlan>>
+        sparse_plan;
+    std::unique_ptr<SparseIssue> sparse_issue;
+    std::shared_ptr<D3D12CommandListSubmission> recording_lifetime;
+    struct CommandList {
+      uint64_t recording_id = 0;
+      struct Encoder {
+        EncoderType type;
+        uint64_t id;
+      };
+      std::vector<Encoder> encoders;
+    };
+    std::vector<CommandList> command_lists;
+    std::vector<Com<MTLD3D12CommandAllocator, false>> allocators;
+    std::vector<Com<MTLD3D12SamplerDescriptorHeap, true>> sampler_heaps;
+    std::vector<Com<MTLD3D12RootSignature, false>> static_sampler_roots;
+    std::unordered_map<EncoderData *, std::vector<SubmissionResourceUse>> descriptor_resource_uses;
+    std::vector<WMT::Reference<WMT::Resource>> descriptor_resource_refs;
+    Com<MTLD3D12Fence> signal_fence;
+    UINT64 signal_value = 0;
+    std::shared_ptr<std::atomic<bool>> diagnostic_signal_complete;
+    Com<MTLD3D12Fence> wait_fence;
+    std::shared_ptr<D3D12FenceWait> fence_wait;
+    HANDLE latency_waitable = nullptr;
+  };
+
+  dxmt::mutex commit_mutex_;
+  inline static std::atomic<uint64_t> next_legacy_queue_id_{1};
+  const uint64_t legacy_queue_id_ = next_legacy_queue_id_.fetch_add(1, std::memory_order_relaxed);
+  bool legacy_diagnostics_uncertain_ = false;
+  // Non-owning scalar snapshots; protected by commit_mutex_.
+  std::vector<D3D12PendingLegacySplit> pending_legacy_diagnostics_;
+  struct DiagnosticSignal {
+    uint64_t fence_id;
+    UINT64 value;
+    std::weak_ptr<std::atomic<bool>> complete;
+  };
+  std::vector<DiagnosticSignal> diagnostic_signals_;
+  struct SubmissionState : D3D12DeviceRemovalListener {
+    dxmt::mutex mutex;
+    dxmt::condition_variable ready;
+    dxmt::condition_variable space;
+    WMT::Reference<WMT::SharedEvent> sparse_event;
+    std::vector<D3D12PendingEnhancedSplit> pending_splits;
+
+    void NotifyDeviceRemoved() final {
+      std::vector<D3D12PendingEnhancedSplit> expired;
+      {
+        std::lock_guard lock(mutex);
+        expired.swap(pending_splits);
+        if (sparse_event)
+          sparse_event.signalValue(UINT64_MAX);
+        ready.notify_all();
+        space.notify_all();
+      } // Release private resource references outside the submission mutex.
+    }
+  };
+  std::shared_ptr<SubmissionState> submission_state_ = std::make_shared<SubmissionState>();
+  std::array<Submission, kCommandQueueSize> submissions_;
+  size_t submission_head_ = 0;
+  size_t submission_tail_ = 0;
+  size_t submission_count_ = 0;
+  dxmt::thread completion_thread_;
+  bool stopping_ = false;
+  uint64_t next_submission_serial_ = 1;
+  uint64_t completed_submission_serial_ = 0;
+  bool encoder_execution_status_ = false;
+  bool sparse_completion_trace_ = false;
+  bool hold_sparse_signal_for_testing_ = false;
+  std::unordered_map<uint64_t, WMT::Reference<WMT::RenderPipelineState>> clear_psos_;
+  std::unordered_map<uint64_t, WMT::Reference<WMT::RenderPipelineState>> clear_rtv_psos_;
+  std::array<WMT::Reference<WMT::DepthStencilState>, 4> clear_dssos_;
+  dxmt::mutex residency_stats_mutex_;
+  AirconvResidencyCounters residency_stats_counters_;
+  uint64_t residency_stats_command_lists_ = 0;
+  std::chrono::steady_clock::time_point residency_stats_window_start_{};
+
+  static bool ResidencyStatsEnabled() {
+    static const bool enabled = dxmt::env::getEnvVar("DXMT_D3D12_RESIDENCY_STATS") == "1";
+    return enabled;
+  }
+
+  static void AddResidencyCounters(AirconvResidencyCounters &target, const AirconvResidencyCounters &source) {
+#define DXMT_ADD_RESIDENCY_COUNTER(field) target.field += source.field
+    DXMT_ADD_RESIDENCY_COUNTER(root_scan_requests);
+    DXMT_ADD_RESIDENCY_COUNTER(root_scans_executed);
+    DXMT_ADD_RESIDENCY_COUNTER(root_scan_skips);
+    DXMT_ADD_RESIDENCY_COUNTER(root_deserializer_creates);
+    DXMT_ADD_RESIDENCY_COUNTER(descriptor_requests);
+    DXMT_ADD_RESIDENCY_COUNTER(descriptor_scans_executed);
+    DXMT_ADD_RESIDENCY_COUNTER(descriptor_scan_skips);
+    DXMT_ADD_RESIDENCY_COUNTER(descriptor_slots_visited);
+    DXMT_ADD_RESIDENCY_COUNTER(conservative_descriptor_slots);
+    DXMT_ADD_RESIDENCY_COUNTER(shader_reachable_descriptor_slots);
+    DXMT_ADD_RESIDENCY_COUNTER(conservative_descriptor_ranges);
+    DXMT_ADD_RESIDENCY_COUNTER(shader_reachable_descriptor_ranges);
+
+    DXMT_ADD_RESIDENCY_COUNTER(descriptor_batch_locks);
+    DXMT_ADD_RESIDENCY_COUNTER(heap_generation_invalidations);
+    DXMT_ADD_RESIDENCY_COUNTER(heap_global_generation_changes_seen);
+    DXMT_ADD_RESIDENCY_COUNTER(table_handle_invalidations);
+    DXMT_ADD_RESIDENCY_COUNTER(table_invalidations);
+    DXMT_ADD_RESIDENCY_COUNTER(encoder_invalidations);
+    DXMT_ADD_RESIDENCY_COUNTER(root_va_lookups);
+    DXMT_ADD_RESIDENCY_COUNTER(descriptor_va_lookups);
+    DXMT_ADD_RESIDENCY_COUNTER(pending_descriptors_inserted);
+    DXMT_ADD_RESIDENCY_COUNTER(pending_descriptor_duplicates);
+    DXMT_ADD_RESIDENCY_COUNTER(submission_pending_uses);
+    DXMT_ADD_RESIDENCY_COUNTER(submission_unique_heaps);
+    DXMT_ADD_RESIDENCY_COUNTER(submission_unique_slots);
+    DXMT_ADD_RESIDENCY_COUNTER(submission_batch_locks);
+    DXMT_ADD_RESIDENCY_COUNTER(submission_live_slot_resolutions);
+    DXMT_ADD_RESIDENCY_COUNTER(submission_slot_reuse_hits);
+    DXMT_ADD_RESIDENCY_COUNTER(submission_fanout_uses);
+    DXMT_ADD_RESIDENCY_COUNTER(direct_indexed_root_requests);
+    DXMT_ADD_RESIDENCY_COUNTER(direct_indexed_scans);
+    DXMT_ADD_RESIDENCY_COUNTER(direct_indexed_descriptors);
+#undef DXMT_ADD_RESIDENCY_COUNTER
+  }
+
+  void AggregateResidencyCounters(const AirconvResidencyCounters &counters) {
+    AirconvResidencyCounters dump_counters;
+    uint64_t dump_command_lists = 0;
+    bool should_dump = false;
+    const auto now = std::chrono::steady_clock::now();
+    {
+      std::lock_guard lock(residency_stats_mutex_);
+      if (residency_stats_window_start_ == std::chrono::steady_clock::time_point{})
+        residency_stats_window_start_ = now;
+      AddResidencyCounters(residency_stats_counters_, counters);
+      residency_stats_command_lists_++;
+      if (now - residency_stats_window_start_ >= std::chrono::seconds(10)) {
+        dump_counters = residency_stats_counters_;
+        dump_command_lists = residency_stats_command_lists_;
+        residency_stats_counters_ = {};
+        residency_stats_command_lists_ = 0;
+        residency_stats_window_start_ = now;
+        should_dump = true;
+      }
+    }
+    if (!should_dump)
+      return;
+
+    const auto scan_requests = dump_counters.descriptor_requests;
+    const auto scan_skips = dump_counters.descriptor_scan_skips;
+    const auto executed_scans = dump_counters.descriptor_scans_executed;
+    const auto skip_rate = scan_requests ? double(scan_skips) / double(scan_requests) : 0.0;
+    const auto slots_per_scan = executed_scans ? double(dump_counters.descriptor_slots_visited) / double(executed_scans)
+                                                : 0.0;
+    const auto conservative_slots_per_scan = executed_scans
+        ? double(dump_counters.conservative_descriptor_slots) / double(executed_scans) : 0.0;
+    const auto prune_ratio = dump_counters.conservative_descriptor_slots
+        ? 1.0 - double(dump_counters.shader_reachable_descriptor_slots) /
+                    double(dump_counters.conservative_descriptor_slots) : 0.0;
+    const auto footprint_builds = GetAirconvFootprintBuildCounters();
+    const auto reuse_ratio = dump_counters.submission_pending_uses
+                                 ? 1.0 - double(dump_counters.submission_unique_slots) /
+                                             double(dump_counters.submission_pending_uses)
+                                 : 0.0;
+    if (Logger::logLevel() <= LogLevel::Info)
+      Logger::info(str::format(
+          "DXMT_D3D12_RESIDENCY_STATS conservative_slots=", dump_counters.conservative_descriptor_slots,
+          " reachable_slots=", dump_counters.shader_reachable_descriptor_slots,
+          " pruned_slots=", dump_counters.conservative_descriptor_slots - dump_counters.shader_reachable_descriptor_slots,
+          "\nDXMT_D3D12_RESIDENCY_STATS conservative_ranges=", dump_counters.conservative_descriptor_ranges,
+          " reachable_ranges=", dump_counters.shader_reachable_descriptor_ranges,
+          "\nDXMT_D3D12_RESIDENCY_STATS slot_prune_ratio=", prune_ratio,
+          " average_conservative_slots_per_scan=", conservative_slots_per_scan,
+          "\nDXMT_D3D12_RESIDENCY_STATS footprint_build_psos_total=", footprint_builds.psos,
+          " footprint_exact_psos_total=", footprint_builds.exact,
+          " footprint_fallback_psos_total=", footprint_builds.fallback,
+          " footprint_direct_indexed_fallbacks_total=", footprint_builds.direct_indexed,
+          "\nDXMT_D3D12_RESIDENCY_STATS window=10s command_lists=", dump_command_lists,
+          " root_scan_requests=", dump_counters.root_scan_requests, " root_scans=", dump_counters.root_scans_executed,
+          " root_scan_skips=", dump_counters.root_scan_skips, " root_va_lookups=", dump_counters.root_va_lookups,
+          "\nDXMT_D3D12_RESIDENCY_STATS descriptor_scan_requests=", scan_requests, " descriptor_scans=", executed_scans,
+          " descriptor_scan_skips=", scan_skips, " descriptor_scan_skip_rate=", skip_rate,
+          "\nDXMT_D3D12_RESIDENCY_STATS descriptor_slots_visited=", dump_counters.descriptor_slots_visited,
+          " average_slots_per_executed_scan=", slots_per_scan,
+          " recording_batch_locks=", dump_counters.descriptor_batch_locks,
+          " heap_global_generation_changes_seen=", dump_counters.heap_global_generation_changes_seen,
+          "\nDXMT_D3D12_RESIDENCY_STATS new_encoder_invalidations=", dump_counters.encoder_invalidations,
+          " table_handle_invalidations=", dump_counters.table_handle_invalidations,
+          " pending_descriptor_uses=", dump_counters.submission_pending_uses,
+          " pending_descriptor_duplicates=", dump_counters.pending_descriptor_duplicates,
+          "\nDXMT_D3D12_RESIDENCY_STATS submission_unique_heaps=", dump_counters.submission_unique_heaps,
+          " submission_unique_slots=", dump_counters.submission_unique_slots,
+          " submission_batch_locks=", dump_counters.submission_batch_locks,
+          " submission_live_slot_resolutions=", dump_counters.submission_live_slot_resolutions,
+          "\nDXMT_D3D12_RESIDENCY_STATS submission_slot_reuse_hits=", dump_counters.submission_slot_reuse_hits,
+          " submission_slot_reuse_ratio=", reuse_ratio, " submission_fanout_uses=", dump_counters.submission_fanout_uses
+      ));
+  }
+
+  static const char *EncoderTypeName(EncoderType type) {
+    switch (type) {
+    case EncoderType::Null:
+      return "Null";
+    case EncoderType::Clear:
+      return "Clear";
+    case EncoderType::Render:
+      return "Render";
+    case EncoderType::Blit:
+      return "Blit";
+    case EncoderType::CopyTiles:
+      return "CopyTiles";
+    case EncoderType::Compute:
+      return "Compute";
+    case EncoderType::Resolve:
+      return "Resolve";
+    case EncoderType::TemporalUpscale:
+      return "TemporalUpscale";
+    case EncoderType::SampleTimestamp:
+      return "SampleTimestamp";
+    case EncoderType::AccelerationStructure:
+      return "AccelerationStructure";
+    }
+    return "Unknown";
+  }
+
+  static std::string DescribeSubmission(const Submission &submission) {
+    std::string description = " command_lists=[";
+    for (size_t i = 0; i < submission.command_lists.size(); i++) {
+      if (i)
+        description += ",";
+      const auto &command_list = submission.command_lists[i];
+      description += "{id=" + std::to_string(command_list.recording_id) + ",encoders=[";
+      bool first_encoder = true;
+      for (const auto &encoder : command_list.encoders) {
+        if (encoder.type == EncoderType::Null)
+          continue;
+        if (!first_encoder)
+          description += ",";
+        description += EncoderTypeName(encoder.type);
+        description += "#" + std::to_string(encoder.id);
+        first_encoder = false;
+      }
+      if (first_encoder)
+        description += "None";
+      description += "]}";
+    }
+    description += "]";
+    return description;
+  }
+
+  template <typename Encoder>
+  void LabelEncoder(Encoder &encoder, uint64_t recording_id, uint64_t encoder_id, const char *phase = nullptr) {
+    if (!encoder_execution_status_)
+      return;
+    std::string label = "DXMT recording=" + std::to_string(recording_id) + " encoder=" + std::to_string(encoder_id);
+    if (phase) {
+      label += " ";
+      label += phase;
+    }
+    encoder.setLabel(WMT::String::string(label.c_str(), WMTUTF8StringEncoding));
+  }
+
+  HRESULT
+  CheckSubmissionObject(WMT::Object object) {
+    if (object) [[likely]]
+      return S_OK;
+    // Nullable native factories supply no failure reason. Losing ordered queue
+    // work is terminal, but does not establish a specific OOM cause.
+    device_->MarkDeviceRemoved(DXGI_ERROR_DEVICE_REMOVED);
+    return DXGI_ERROR_DEVICE_REMOVED;
+  }
+
+  HRESULT
+  NewCommandBuffer(WMT::CommandBuffer &buffer) {
+    buffer = encoder_execution_status_
+                 ? queue_.commandBufferWithErrorOptions(WMTCommandBufferErrorOptionEncoderExecutionStatus)
+                 : queue_.commandBuffer();
+    return CheckSubmissionObject(buffer);
+  }
+
+  WMT::RenderPipelineState
+  GetClearPSO(WMTPixelFormat format, uint8_t sample_count) {
+    if (format == WMTPixelFormatInvalid || !sample_count)
+      return {};
+
+    const uint64_t key = (uint64_t(format) << 8) | sample_count;
+    if (auto it = clear_psos_.find(key); it != clear_psos_.end())
+      return it->second;
+
+    auto library = device_->GetLib().getLibrary();
+    auto vertex_function = library.newFunction("vs_clear_rt");
+    auto fragment_function = library.newFunction("fs_clear_rt_depth");
+    if (!vertex_function || !fragment_function)
+      return {};
+
+    WMTRenderPipelineInfo info;
+    WMT::InitializeRenderPipelineInfo(info);
+    info.raster_sample_count = sample_count;
+    info.vertex_function = vertex_function;
+    info.fragment_function = fragment_function;
+    const auto dsv_flags = DepthStencilPlanarFlags(format);
+    if (dsv_flags & 1)
+      info.depth_pixel_format = format;
+    if (dsv_flags & 2)
+      info.stencil_pixel_format = format;
+    info.input_primitive_topology = WMTPrimitiveTopologyClassTriangle;
+
+    WMT::Reference<WMT::Error> error;
+    auto pso = device_->GetMTLDevice().newRenderPipelineState(info, error);
+    if (!pso) {
+      ERR("Failed to create D3D12 partial depth clear PSO: ",
+          error ? error.description().getUTF8String() : "unknown error");
+      return {};
+    }
+    return clear_psos_.emplace(key, std::move(pso)).first->second;
+  }
+
+  WMT::RenderPipelineState
+  GetClearRTVPSO(WMTPixelFormat format, uint8_t sample_count) {
+    if (format == WMTPixelFormatInvalid || !sample_count)
+      return {};
+
+    const uint64_t key = (uint64_t(format) << 8) | sample_count;
+    if (auto it = clear_rtv_psos_.find(key); it != clear_rtv_psos_.end())
+      return it->second;
+
+    auto library = device_->GetLib().getLibrary();
+    auto vertex_function = library.newFunction("vs_clear_rt");
+    const char *fragment_name = IsIntegerFormat(format)
+                                    ? (MTLGetUnsignedIntegerFormat(format) == format ? "fs_clear_rt_uint"
+                                                                                       : "fs_clear_rt_sint")
+                                    : "fs_clear_rt_float";
+    auto fragment_function = library.newFunction(fragment_name);
+    if (!vertex_function || !fragment_function)
+      return {};
+
+    WMTRenderPipelineInfo info;
+    WMT::InitializeRenderPipelineInfo(info);
+    info.raster_sample_count = sample_count;
+    info.vertex_function = vertex_function;
+    info.fragment_function = fragment_function;
+    info.colors[0].pixel_format = format;
+    info.input_primitive_topology = WMTPrimitiveTopologyClassTriangle;
+
+    WMT::Reference<WMT::Error> error;
+    auto pso = device_->GetMTLDevice().newRenderPipelineState(info, error);
+    if (!pso) {
+      ERR("Failed to create D3D12 partial RTV clear PSO: ",
+          error ? error.description().getUTF8String() : "unknown error");
+      return {};
+    }
+    return clear_rtv_psos_.emplace(key, std::move(pso)).first->second;
+  }
+
+  WMT::DepthStencilState
+  GetClearDSSO(unsigned clear_flags) {
+    if (!clear_flags || clear_flags >= clear_dssos_.size())
+      return {};
+    if (clear_dssos_[clear_flags])
+      return clear_dssos_[clear_flags];
+
+    WMTDepthStencilInfo info = {};
+    info.depth_compare_function = WMTCompareFunctionAlways;
+    info.depth_write_enabled = clear_flags & 1;
+    for (auto *stencil : {&info.front_stencil, &info.back_stencil}) {
+      stencil->enabled = clear_flags & 2;
+      stencil->depth_stencil_pass_op = (clear_flags & 2) ? WMTStencilOperationReplace : WMTStencilOperationKeep;
+      stencil->stencil_fail_op = WMTStencilOperationKeep;
+      stencil->depth_fail_op = WMTStencilOperationKeep;
+      stencil->stencil_compare_function = WMTCompareFunctionAlways;
+      stencil->write_mask = (clear_flags & 2) ? 0xff : 0;
+      stencil->read_mask = 0xff;
+    }
+    clear_dssos_[clear_flags] = device_->GetMTLDevice().newDepthStencilState(info);
+    return clear_dssos_[clear_flags];
+  }
+
+  void
+  IssueDeferredSparse(Submission &submission) {
+    if (!submission.sparse_issue)
+      return;
+    auto &issue = *submission.sparse_issue;
+    // The pre-handoff and every preceding FIFO record have completed. Resolve
+    // live source mappings here, never at CPU admission ahead of a queue Wait.
+    if (FAILED(device_->GetDeviceRemovedReason())) {
+      submission.sparse_plan = std::unique_ptr<D3D12SparseBufferMappingPlan>{};
+      submission.sparse_barrier = {};
+      return;
+    }
+    const HRESULT hr =
+        std::visit([&](auto &plan) { return plan->PrepareNative(sparse_mapping_queue_); }, submission.sparse_plan);
+    if (FAILED(hr) ||
+        !std::visit([&](auto &plan) { return plan->PrepareTerminal(issue.flags); }, submission.sparse_plan)) {
+      device_->MarkDeviceRemoved(FAILED(hr) ? hr : E_OUTOFMEMORY);
+      ERR("SPARSE_PLAN_FIFO prepare_failed serial=", submission.serial, " hr=", hr);
+      submission.sparse_plan =
+          std::unique_ptr<D3D12SparseBufferMappingPlan>{}; // No native operations have been issued.
+      submission.sparse_barrier = {};
+      return;
+    }
+    sparse_mapping_queue_.waitForEvent(sparse_event_, issue.main_signal);
+    if (issue.gate)
+      sparse_mapping_queue_.waitForEvent(issue.gate, 1);
+    const bool pre_submitted = submission.sparse_barrier.submit();
+    size_t issued_count = 0;
+    const auto count = std::visit([](auto &plan) { return plan->OperationCount(); }, submission.sparse_plan);
+    if (pre_submitted && SUCCEEDED(device_->GetDeviceRemovedReason())) {
+      while (issued_count < count && issued_count < issue.limit &&
+             std::visit([](auto &plan) { return plan->IssueNext(); }, submission.sparse_plan))
+        ++issued_count;
+    }
+    bool resumed = true;
+    if (issue.issued) {
+      SetEvent(issue.issued);
+      resumed = WaitForSingleObject(issue.resume, 30000) == WAIT_OBJECT_0;
+    }
+    const bool accepted =
+        resumed && pre_submitted && issued_count == count && SUCCEEDED(device_->GetDeviceRemovedReason());
+    const auto outcome = accepted       ? WMTSparseMappingHostAccepted
+                         : issued_count ? WMTSparseMappingHostFailedAfterIssue
+                                        : WMTSparseMappingHostRejected;
+    const bool sealed = std::visit([&](auto &plan) { return plan->Finish(outcome); }, submission.sparse_plan);
+    if (!accepted || !sealed)
+      device_->MarkDeviceRemoved(DXGI_ERROR_DEVICE_REMOVED);
+    // Admission already reserved this even value for following classic work.
+    // Removal signals MAX instead; never enqueue a lower value after removal.
+    if (SUCCEEDED(device_->GetDeviceRemovedReason())) {
+      if (issue.hold_signal)
+        ERR("DXMT_TEST_SPARSE_HOLD_MAPPING_SIGNAL value=", issue.main_signal + 1);
+      else
+        sparse_mapping_queue_.signalEvent(sparse_event_, issue.main_signal + 1);
+    }
+    if (sparse_completion_trace_)
+      ERR("SPARSE_PLAN_FIFO issue serial=", submission.serial, " issued=", issued_count, " sealed=", sealed,
+          " host=", outcome);
+  }
+
+  void
+  CompletionThread() {
+    for (;;) {
+      Submission submission;
+      size_t submission_slot = 0;
+      {
+        std::unique_lock<dxmt::mutex> lock(submission_state_->mutex);
+        submission_state_->ready.wait(lock, [this] { return stopping_ || submission_count_ != 0; });
+        if (!submission_count_) {
+          if (stopping_)
+            return;
+          continue;
+        }
+        submission_slot = submission_head_;
+        submission = std::move(submissions_[submission_slot]);
+      }
+
+      auto pool = WMT::MakeAutoreleasePool();
+      submission.command_buffer.waitUntilCompleted();
+      if (submission.command_buffer.status() == WMTCommandBufferStatusError) {
+        auto error = submission.command_buffer.error();
+        device_->MarkDeviceRemoved(DXGI_ERROR_DEVICE_REMOVED);
+        ERR("D3D12 command buffer submission ", submission.serial, " failed: ",
+            error ? error.description().getUTF8String() : "unknown error", DescribeSubmission(submission));
+        if (encoder_execution_status_) {
+          for (auto &log : submission.command_buffer.logs().elements())
+            ERR("[DEBUG-METAL-ENCODER] submission ", submission.serial, ": ",
+                log.description().getUTF8String());
+        }
+      }
+
+      IssueDeferredSparse(submission);
+
+      if (submission.sparse_barrier) {
+        if (sparse_completion_trace_) {
+          ERR("SPARSE_FIFO main_done serial=", submission.serial);
+          char name[80];
+          std::snprintf(name, sizeof(name), "DXMT.Test.SparseMainComplete.%lu", GetCurrentProcessId());
+          HANDLE observed = OpenEventA(EVENT_MODIFY_STATE, FALSE, name);
+          if (observed) {
+            SetEvent(observed);
+            CloseHandle(observed);
+          }
+        }
+        WMTSparseBarrierResult result = {};
+        // No queue locks: the native callback owns only its payload. This exact
+        // handoff must settle before later FIFO records publish success, even
+        // when their GPU events completed before CPU feedback was delivered.
+        const bool received = submission.sparse_barrier.wait(UINT64_MAX, result);
+        if (sparse_completion_trace_)
+          ERR("SPARSE_FIFO report serial=", submission.serial, " state=", result.state,
+              " actual=", result.native_feedback_received, " synthetic=", result.synthetic_error);
+        if (!received || result.state != WMTSparseBarrierCompleted) {
+          device_->MarkDeviceRemoved(DXGI_ERROR_DEVICE_REMOVED);
+          ERR("D3D12 sparse barrier submission ", submission.serial, " failed: state=", result.state,
+              " native_error=", result.native_error_code, " synthetic=", result.synthetic_error);
+        }
+      }
+
+      if (std::visit([](auto &plan) { return bool(plan); }, submission.sparse_plan)) {
+        WMTSparseMappingResult result = {};
+        // One sealed owner, outside all queue locks. Cancellation is not proof.
+        const bool complete =
+            std::visit([&](auto &plan) { return plan->Wait(UINT64_MAX, result); }, submission.sparse_plan);
+        if (!complete || (result.state != WMTSparseMappingGPUComplete && result.state != WMTSparseMappingNotIssued)) {
+          device_->MarkDeviceRemoved(DXGI_ERROR_DEVICE_REMOVED);
+          // Final native release still drains; never free a possibly-issued prefix.
+        } else if (!std::visit([&](auto &plan) { return plan->Retire(result); }, submission.sparse_plan)) {
+          device_->MarkDeviceRemoved(DXGI_ERROR_DEVICE_REMOVED);
+        }
+        if (sparse_completion_trace_)
+          ERR("SPARSE_PLAN_FIFO complete serial=", submission.serial, " state=", result.state,
+              " host=", result.host_outcome, " event=", result.event_value);
+        submission.sparse_plan = std::unique_ptr<D3D12SparseBufferMappingPlan>{};
+      }
+
+      // Publish before retiring the next submission on this queue. A wait on
+      // another queue latches this value even if a later signal rewinds it.
+      if (submission.diagnostic_signal_complete)
+        PauseLegacySignalForTesting();
+      if (submission.signal_fence && SUCCEEDED(device_->GetDeviceRemovedReason()) &&
+          submission.command_buffer.status() == WMTCommandBufferStatusCompleted)
+        submission.signal_fence->Signal(submission.signal_value);
+      if (submission.diagnostic_signal_complete)
+        submission.diagnostic_signal_complete->store(true, std::memory_order_release);
+      if (submission.wait_fence)
+        submission.wait_fence->CancelWait(submission.fence_wait);
+
+      if (sparse_completion_trace_)
+        ERR("SPARSE_FIFO retire serial=", submission.serial, " main_status=", submission.command_buffer.status());
+      for (auto &allocator : submission.allocators)
+        allocator->MarkSubmissionCompleted();
+
+      if (submission.latency_waitable)
+        ReleaseSemaphore(submission.latency_waitable, 1, nullptr);
+
+      if (submission.serial != completed_submission_serial_ + 1)
+        WARN("D3D12 command buffer completion serial gap: expected ", completed_submission_serial_ + 1,
+             ", got ", submission.serial);
+      completed_submission_serial_ = submission.serial;
+
+      {
+        std::lock_guard<dxmt::mutex> lock(submission_state_->mutex);
+        assert(submission_slot == submission_head_);
+        submission_head_ = (submission_head_ + 1) % kCommandQueueSize;
+        submission_count_--;
+      }
+      submission_state_->space.notify_all();
+    }
+  }
+
+  bool
+  WaitForSubmissionSpaceLocked() {
+    std::unique_lock<dxmt::mutex> submission_lock(submission_state_->mutex);
+    submission_state_->space.wait(submission_lock, [this] {
+      return stopping_ || FAILED(device_->GetDeviceRemovedReason()) || submission_count_ < kCommandQueueSize;
+    });
+    return !stopping_ && SUCCEEDED(device_->GetDeviceRemovedReason());
+  }
+
+  // Caller holds commit_mutex_ and submission mutex, and reserved count < K.
+  // Once native work is possible, publication must survive device removal.
+  void
+  PublishSubmissionLocked(Submission &submission, std::vector<D3D12PendingEnhancedSplit> *pending_splits = nullptr) {
+    assert(submission_count_ < kCommandQueueSize);
+    if (pending_splits)
+      submission_state_->pending_splits.swap(*pending_splits);
+    submissions_[submission_tail_] = std::move(submission);
+    submission_tail_ = (submission_tail_ + 1) % kCommandQueueSize;
+    submission_count_++;
+  }
+
+  bool
+  CommitSubmissionLocked(Submission &submission, std::vector<D3D12PendingEnhancedSplit> *pending_splits = nullptr) {
+    std::unique_lock<dxmt::mutex> submission_lock(submission_state_->mutex);
+    if (stopping_ || FAILED(device_->GetDeviceRemovedReason()) || submission_count_ >= kCommandQueueSize)
+      return false;
+    assert(submission_count_ < kCommandQueueSize);
+
+    submission.serial = next_submission_serial_++;
+    submission.command_buffer.commit();
+    // Ordinary handoffs submit before publication. Mapping records defer every
+    // native operation to the FIFO completion owner, after earlier records settle.
+    // Native feedback never calls back into PE queue state.
+    const bool sparse_submitted =
+        submission.sparse_issue || !submission.sparse_barrier || submission.sparse_barrier.submit();
+    PublishSubmissionLocked(submission, pending_splits);
+    submission_lock.unlock();
+    submission_state_->ready.notify_one();
+    if (!sparse_submitted) {
+      // The main record is already committed/published. Preserve its native
+      // credential even for a test-reported host failure after a real commit.
+      ERR("D3D12 sparse ResourceState barrier submission failed");
+      device_->MarkDeviceRemoved(DXGI_ERROR_DEVICE_REMOVED);
+    }
+    return true;
+  }
+
+  void
+  PauseTranslationForTesting() {
+    char enabled[2] = {};
+    if (!GetEnvironmentVariableA("DXMT_TEST_PAUSE_QUEUE_TRANSLATION", enabled, sizeof(enabled)))
+      return;
+
+    static LONG pause_claimed = 0;
+    HANDLE entered = OpenEventA(EVENT_MODIFY_STATE, FALSE, "DXMT.Test.QueueTranslationEntered");
+    HANDLE resume = OpenEventA(SYNCHRONIZE, FALSE, "DXMT.Test.QueueTranslationResume");
+    if (!entered || !resume) {
+      if (entered)
+        CloseHandle(entered);
+      if (resume)
+        CloseHandle(resume);
+      return;
+    }
+    if (InterlockedCompareExchange(&pause_claimed, 1, 0) != 0) {
+      CloseHandle(entered);
+      CloseHandle(resume);
+      return;
+    }
+
+    SetEvent(entered);
+    WaitForSingleObject(resume, INFINITE);
+    CloseHandle(entered);
+    CloseHandle(resume);
+  }
+
+  void
+  StopCompletionThread() {
+    {
+      std::lock_guard<dxmt::mutex> lock(submission_state_->mutex);
+      stopping_ = true;
+    }
+    submission_state_->ready.notify_all();
+    submission_state_->space.notify_all();
+  }
+
+  bool
+  BeginSparseMapping(uint64_t &main_queue_signal) {
+    if (!sparse_mapping_queue_)
+      return true;
+    if (!WaitForSubmissionSpaceLocked())
+      return false;
+
+    auto pool = WMT::MakeAutoreleasePool();
+    auto barrier = sparse_mapping_queue_.prepareBarrierBeforeResourceState();
+    if (!barrier) {
+      ERR("D3D12 sparse ResourceState barrier preparation failed");
+      device_->MarkDeviceRemoved(DXGI_ERROR_DEVICE_REMOVED);
+      return false;
+    }
+    WMT::CommandBuffer cmdbuf;
+    if (FAILED(NewCommandBuffer(cmdbuf)))
+      return false;
+    if (sparse_event_value_)
+      cmdbuf.encodeWaitForEvent(sparse_event_, sparse_event_value_);
+    main_queue_signal = sparse_event_value_ + 1;
+    cmdbuf.encodeSignalEvent(sparse_event_, main_queue_signal);
+
+    Submission submission;
+    submission.command_buffer = cmdbuf;
+    submission.sparse_barrier = std::move(barrier);
+    // Queue the native dependency before committing the classic handoff; the
+    // same admission owner submits the barrier before publishing its record.
+    sparse_mapping_queue_.waitForEvent(sparse_event_, main_queue_signal);
+    if (!CommitSubmissionLocked(submission)) {
+      // The native wait is queued but neither command buffer was admitted.
+      // Terminal cancellation releases it, without claiming successful work.
+      device_->MarkDeviceRemoved(DXGI_ERROR_DEVICE_REMOVED);
+      return false;
+    }
+    sparse_event_value_ = main_queue_signal;
+    if (FAILED(device_->GetDeviceRemovedReason())) {
+      // The main signal/mapping wait are already submitted. Close that pair
+      // before terminal cancellation, and never publish resource mappings.
+      EndSparseMapping(main_queue_signal);
+      return false;
+    }
+    return true;
+  }
+
+  void
+  EndSparseMapping(uint64_t main_queue_signal) {
+    const uint64_t mapping_signal = main_queue_signal + 1;
+    if (hold_sparse_signal_for_testing_) {
+      // Opt-in cancellation oracle only: keep the mapping event unsignaled so
+      // terminal feedback must remove the device and release dependent work.
+      hold_sparse_signal_for_testing_ = false;
+      ERR("DXMT_TEST_SPARSE_HOLD_MAPPING_SIGNAL value=", mapping_signal);
+    } else {
+      sparse_mapping_queue_.signalEvent(sparse_event_, mapping_signal);
+    }
+    sparse_event_value_ = mapping_signal;
+  }
+
+  // Caller owns commit serialization. Both public resource types and the
+  // controlled seam use this same bounded admission and native issue owner.
+  template <typename Plan>
+  HRESULT
+  EnqueueSparsePlanLocked(std::unique_ptr<Plan> &plan, std::unique_ptr<SparseIssue> issue) {
+    auto pool = WMT::MakeAutoreleasePool();
+    auto barrier = sparse_mapping_queue_.prepareBarrierBeforeResourceState();
+    if (!barrier)
+      return E_OUTOFMEMORY;
+    WMT::CommandBuffer cmdbuf;
+    if (FAILED(NewCommandBuffer(cmdbuf)))
+      return DXGI_ERROR_DEVICE_REMOVED;
+    if (sparse_event_value_)
+      cmdbuf.encodeWaitForEvent(sparse_event_, sparse_event_value_);
+    const uint64_t main_signal = sparse_event_value_ + 1;
+    cmdbuf.encodeSignalEvent(sparse_event_, main_signal);
+    {
+      std::lock_guard lock(submission_state_->mutex);
+      if (stopping_ || FAILED(device_->GetDeviceRemovedReason()))
+        return DXGI_ERROR_DEVICE_REMOVED;
+      // All admissions hold commit_mutex_; completion can only reduce count.
+      assert(submission_count_ < kCommandQueueSize);
+    }
+    Submission submission;
+    submission.command_buffer = cmdbuf;
+    submission.sparse_barrier = std::move(barrier);
+    submission.sparse_plan = std::move(plan);
+    issue->main_signal = main_signal;
+    issue->hold_signal = hold_sparse_signal_for_testing_;
+    hold_sparse_signal_for_testing_ = false;
+    submission.sparse_issue = std::move(issue);
+    // Reserve the completion value before later command buffers are committed.
+    // The completion owner issues the native mapping without taking commit_mutex_.
+    sparse_event_value_ = main_signal + 1;
+    if (!CommitSubmissionLocked(submission)) {
+      plan = std::move(std::get<std::unique_ptr<Plan>>(submission.sparse_plan));
+      return DXGI_ERROR_DEVICE_REMOVED;
+    }
+    return S_OK;
+  }
 
 public:
   MTLD3D12CommandQueueImpl(MTLD3D12Device *pDevice) :
-      MTLD3D12Pageable<MTLD3D12CommandQueue, IMTLSwapChainFactory>(pDevice) {}
+      MTLD3D12Pageable<MTLD3D12CommandQueue, IMTLSwapChainFactory>(pDevice),
+      completion_thread_([this] { CompletionThread(); }) {}
+
+  ~MTLD3D12CommandQueueImpl() {
+    StopCompletionThread();
+    if (completion_thread_.joinable())
+      completion_thread_.join();
+  }
+
+  HRESULT
+  SubmitSparsePlanForTesting(
+      std::unique_ptr<D3D12SparseBufferMappingPlan> &plan, WMT::Event gate, UINT flags, UINT issue_limit, HANDLE issued,
+      HANDLE resume
+  ) override {
+    char enabled[2] = {};
+    if (!GetEnvironmentVariableA("DXMT_TEST_SPARSE_SUBMISSION", enabled, sizeof(enabled)) || enabled[0] != '1')
+      return E_ACCESSDENIED;
+    if (!plan || flags > 3 || !sparse_mapping_queue_ || (!!issued != !!resume))
+      return E_INVALIDARG;
+    std::unique_lock<dxmt::mutex> commit_lock(commit_mutex_);
+    auto pool = WMT::MakeAutoreleasePool();
+    if (!WaitForSubmissionSpaceLocked())
+      return DXGI_ERROR_DEVICE_REMOVED;
+    std::unique_ptr<SparseIssue> issue;
+    try {
+      issue = std::make_unique<SparseIssue>();
+    } catch (const std::bad_alloc &) {
+      return E_OUTOFMEMORY;
+    }
+    issue->gate = gate;
+    issue->flags = flags;
+    issue->limit = issue_limit;
+    // The caller may close its handles as soon as asynchronous admission returns.
+    if (issued &&
+        (!DuplicateHandle(
+             GetCurrentProcess(), issued, GetCurrentProcess(), &issue->issued, EVENT_MODIFY_STATE, FALSE, 0
+         ) ||
+         !DuplicateHandle(GetCurrentProcess(), resume, GetCurrentProcess(), &issue->resume, SYNCHRONIZE, FALSE, 0)))
+      return E_INVALIDARG;
+    common_sparse_issue_for_testing_ = true;
+    return EnqueueSparsePlanLocked(plan, std::move(issue));
+  }
 
   HRESULT
   Initialize(const D3D12_COMMAND_QUEUE_DESC *pDesc) {
@@ -44,15 +886,59 @@ public:
     desc_ = *pDesc;
     desc_.NodeMask = 1; // typically 1 GPU only
 
+    char encoder_status[2] = {};
+    encoder_execution_status_ =
+        GetEnvironmentVariableA("DXMT_METAL_ENCODER_EXECUTION_STATUS", encoder_status, sizeof(encoder_status)) &&
+        encoder_status[0] != '0';
+
+    char sparse_trace[2] = {};
+    sparse_completion_trace_ =
+        GetEnvironmentVariableA("DXMT_TEST_SPARSE_COMPLETION_TRACE", sparse_trace, sizeof(sparse_trace)) &&
+        sparse_trace[0] != '0';
+
+    char hold_signal[2] = {}, synthetic_error[2] = {};
+    hold_sparse_signal_for_testing_ =
+        GetEnvironmentVariableA("DXMT_TEST_SPARSE_HOLD_MAPPING_SIGNAL", hold_signal, sizeof(hold_signal)) &&
+        hold_signal[0] == '1' &&
+        GetEnvironmentVariableA(
+            "DXMT_TEST_SPARSE_FEEDBACK_SYNTHETIC_ERROR", synthetic_error, sizeof(synthetic_error)
+        ) &&
+        synthetic_error[0] == '1';
+
+    char controlled[2] = {};
+    common_sparse_issue_for_testing_ =
+        GetEnvironmentVariableA("DXMT_TEST_SPARSE_SUBMISSION", controlled, sizeof(controlled)) && controlled[0] == '1';
     auto metal_device = device_->GetMTLDevice();
     queue_ = metal_device.newCommandQueue(kCommandQueueSize);
     if (!queue_)
       return E_FAIL;
     queue_.addResidencySet(device_->GetGlobalResidencySet());
 
+    if (metal_device.supportsPlacementSparse()) {
+      if (!FailSparseQueueAllocationForTesting("queue"))
+        sparse_mapping_queue_ = metal_device.newSparseMappingQueue();
+      if (!FailSparseQueueAllocationForTesting("event"))
+        sparse_event_ = metal_device.newSharedEvent();
+      // Reserved resources independently select native sparse backing from the
+      // device capability. Publishing a queue without its mapping prerequisites
+      // would silently update only their CPU mapping tables.
+      if (!sparse_mapping_queue_ || !sparse_event_)
+        return E_OUTOFMEMORY;
+      sparse_mapping_queue_.addResidencySet(device_->GetGlobalResidencySet());
+    }
+
     fence_ = metal_device.newFence();
 
-    return S_OK;
+    WMTBufferInfo timestamp_dummy_info = {};
+    timestamp_dummy_info.length = sizeof(uint32_t);
+    timestamp_dummy_info.options = WMTResourceHazardTrackingModeUntracked;
+    timestamp_dummy_info.memory.set(nullptr);
+    timestamp_dummy_buffer_ = metal_device.newBuffer(timestamp_dummy_info);
+    if (!timestamp_dummy_buffer_)
+      return E_OUTOFMEMORY;
+
+    submission_state_->sparse_event = sparse_event_;
+    return device_->RegisterRemovalListener(submission_state_);
   }
 
   HRESULT
@@ -62,6 +948,11 @@ public:
       return E_POINTER;
 
     *ppvObject = nullptr;
+
+    if (riid == DXMT_STREAMLINE_RETRIEVE_BASE_INTERFACE) {
+      *ppvObject = ref(static_cast<ID3D12CommandQueue *>(this));
+      return S_OK;
+    }
 
     if (riid == __uuidof(IUnknown) || riid == __uuidof(ID3D12Object) || riid == __uuidof(ID3D12DeviceChild) ||
         riid == __uuidof(ID3D12Pageable) || riid == __uuidof(ID3D12CommandQueue)) {
@@ -73,6 +964,9 @@ public:
       *ppvObject = ref_and_cast<IMTLSwapChainFactory>(this);
       return S_OK;
     }
+
+    if (riid == DXMT_STREAMLINE_D3D12_COMMAND_QUEUE_GUID || riid == DXMT_ID3D11_DEVICE_GUID)
+      return E_NOINTERFACE;
 
     if (logQueryInterfaceError(__uuidof(ID3D12CommandQueue), riid)) {
       WARN("D3D12CommandQueue: Unknown interface query ", str::format(riid));
@@ -87,7 +981,63 @@ public:
       const D3D12_TILE_RANGE_FLAGS *range_flags, const UINT *heap_range_offsets, const UINT *range_tile_counts,
       D3D12_TILE_MAPPING_FLAGS flags
   ) {
-    IMPLEMENT_ME
+    if (!resource || !IsSameDevice(device_, resource)) {
+      WARN("D3D12 UpdateTileMappings received a resource from another device");
+      return;
+    }
+
+    auto target = static_cast<MTLD3D12Resource *>(resource);
+    std::unique_ptr<D3D12SparseBufferMappingPlan> buffer_plan;
+    std::unique_ptr<D3D12SparseTextureMappingPlan> texture_plan;
+    std::unique_lock<dxmt::mutex> commit_lock(commit_mutex_);
+    HRESULT hr;
+    if (!sparse_mapping_queue_) {
+      hr = target->UpdateTileMappings(
+          region_count, region_start_coordinates, region_sizes, heap, range_count, range_flags, heap_range_offsets,
+          range_tile_counts, flags, {}
+      );
+    } else if (!common_sparse_issue_for_testing_) {
+      uint64_t main_queue_signal = 0;
+      if (!BeginSparseMapping(main_queue_signal))
+        return;
+      hr = static_cast<MTLD3D12Resource *>(resource)->UpdateTileMappings(
+          region_count, region_start_coordinates, region_sizes, heap, range_count, range_flags, heap_range_offsets,
+          range_tile_counts, flags, sparse_mapping_queue_
+      );
+      // BeginSparseMapping has already queued the main-queue handoff and the
+      // mapping queue wait. Always close that event pair, including when the
+      // resource-side validation rejects the update, so a failed API call cannot
+      // leave an unsignaled sparse-queue wait behind.
+      if (sparse_mapping_queue_)
+        EndSparseMapping(main_queue_signal);
+    } else {
+      try {
+        auto issue = std::make_unique<SparseIssue>();
+        if (target->IsReservedBuffer()) {
+          hr = target->PrepareBufferTileUpdate(
+              region_count, region_start_coordinates, region_sizes, heap, range_count, range_flags, heap_range_offsets,
+              range_tile_counts, flags, buffer_plan
+          );
+          if (SUCCEEDED(hr))
+            hr = WaitForSubmissionSpaceLocked() ? EnqueueSparsePlanLocked(buffer_plan, std::move(issue))
+                                                : DXGI_ERROR_DEVICE_REMOVED;
+        } else {
+          hr = target->PrepareTextureTileUpdate(
+              region_count, region_start_coordinates, region_sizes, heap, range_count, range_flags, heap_range_offsets,
+              range_tile_counts, flags, texture_plan
+          );
+          if (SUCCEEDED(hr))
+            hr = WaitForSubmissionSpaceLocked() ? EnqueueSparsePlanLocked(texture_plan, std::move(issue))
+                                                : DXGI_ERROR_DEVICE_REMOVED;
+        }
+      } catch (const std::bad_alloc &) {
+        hr = E_OUTOFMEMORY;
+      }
+    }
+    if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == E_OUTOFMEMORY)
+      device_->MarkDeviceRemoved(hr);
+    if (FAILED(hr))
+      WARN("D3D12 UpdateTileMappings failed with HRESULT 0x", std::hex, hr, std::dec);
   };
 
   void STDMETHODCALLTYPE CopyTileMappings(
@@ -95,23 +1045,599 @@ public:
       ID3D12Resource *src_resource, const D3D12_TILED_RESOURCE_COORDINATE *src_region_start_coordinate,
       const D3D12_TILE_REGION_SIZE *region_size, D3D12_TILE_MAPPING_FLAGS flags
   ) {
-    IMPLEMENT_ME
+    if (!dst_resource || !src_resource || !IsSameDevice(device_, dst_resource) || !IsSameDevice(device_, src_resource)) {
+      WARN("D3D12 CopyTileMappings received a resource from another device");
+      return;
+    }
+    if (!dst_region_start_coordinate || !src_region_start_coordinate || !region_size) {
+      WARN("D3D12 CopyTileMappings received a null required tile-region parameter");
+      return;
+    }
+
+    auto target = static_cast<MTLD3D12Resource *>(dst_resource);
+    auto source = static_cast<MTLD3D12Resource *>(src_resource);
+    std::unique_ptr<D3D12SparseBufferMappingPlan> buffer_plan;
+    std::unique_ptr<D3D12SparseTextureMappingPlan> texture_plan;
+    std::unique_lock<dxmt::mutex> commit_lock(commit_mutex_);
+    HRESULT hr;
+    if (!sparse_mapping_queue_) {
+      hr = target->CopyTileMappingsFrom(
+          source, dst_region_start_coordinate, src_region_start_coordinate, region_size, flags, {}
+      );
+    } else if (!common_sparse_issue_for_testing_) {
+      uint64_t main_queue_signal = 0;
+      if (!BeginSparseMapping(main_queue_signal))
+        return;
+      hr = static_cast<MTLD3D12Resource *>(dst_resource)
+               ->CopyTileMappingsFrom(
+                   static_cast<MTLD3D12Resource *>(src_resource), dst_region_start_coordinate,
+                   src_region_start_coordinate, region_size, flags, sparse_mapping_queue_
+               );
+      // See UpdateTileMappings above: a rejected copy must still release the
+      // sparse queue handoff established by BeginSparseMapping.
+      if (sparse_mapping_queue_)
+        EndSparseMapping(main_queue_signal);
+    } else {
+      try {
+        auto issue = std::make_unique<SparseIssue>();
+        if (target->IsReservedBuffer()) {
+          hr = target->PrepareBufferTileCopy(
+              source, dst_region_start_coordinate, src_region_start_coordinate, region_size, flags, buffer_plan
+          );
+          if (SUCCEEDED(hr))
+            hr = WaitForSubmissionSpaceLocked() ? EnqueueSparsePlanLocked(buffer_plan, std::move(issue))
+                                                : DXGI_ERROR_DEVICE_REMOVED;
+        } else {
+          hr = target->PrepareTextureTileCopy(
+              source, dst_region_start_coordinate, src_region_start_coordinate, region_size, flags, texture_plan
+          );
+          if (SUCCEEDED(hr))
+            hr = WaitForSubmissionSpaceLocked() ? EnqueueSparsePlanLocked(texture_plan, std::move(issue))
+                                                : DXGI_ERROR_DEVICE_REMOVED;
+        }
+      } catch (const std::bad_alloc &) {
+        hr = E_OUTOFMEMORY;
+      }
+    }
+    if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == E_OUTOFMEMORY)
+      device_->MarkDeviceRemoved(hr);
+    if (FAILED(hr))
+      WARN("D3D12 CopyTileMappings failed with HRESULT 0x", std::hex, hr, std::dec);
   };
 
   void STDMETHODCALLTYPE
-  ExecuteCommandLists(UINT Count, ID3D12CommandList *const *ppCommandLists) {
+  ExecuteCommandLists(UINT Count, ID3D12CommandList *const *ppCommandLists) try {
+    if (!Count || FAILED(device_->GetDeviceRemovedReason()))
+      return;
+    if (!ppCommandLists) {
+      WARN("D3D12 ExecuteCommandLists received a null command list array");
+      return;
+    }
+    for (UINT i = 0; i < Count; i++) {
+      auto command_list = ppCommandLists[i];
+      if (!command_list) {
+        WARN("D3D12 ExecuteCommandLists received a null command list");
+        return;
+      }
+      if (!IsSameDevice(device_, command_list)) {
+        WARN("D3D12 ExecuteCommandLists received a command list from another device");
+        return;
+      }
+      switch (command_list->GetType()) {
+      case D3D12_COMMAND_LIST_TYPE_DIRECT:
+      case D3D12_COMMAND_LIST_TYPE_COMPUTE:
+      case D3D12_COMMAND_LIST_TYPE_COPY:
+        break;
+      default:
+        WARN("D3D12 ExecuteCommandLists received an unsupported command list type");
+        return;
+      }
+      auto pCommandList = static_cast<MTLD3D12GraphicsCommandList *>(command_list);
+      if (!pCommandList->IsAllocatorRecordingValid()) {
+        WARN("D3D12 ExecuteCommandLists received a command list whose allocator was reset");
+        device_->MarkDeviceRemoved(DXGI_ERROR_INVALID_CALL);
+        return;
+      }
+      if (pCommandList->encoder_count == std::numeric_limits<size_t>::max()) {
+        WARN("D3D12 ExecuteCommandLists received an open command list");
+        return;
+      }
+      if (FAILED(pCommandList->GetCloseResult())) {
+        WARN("D3D12 ExecuteCommandLists received a command list whose recording failed");
+        return;
+      }
+      if (auto recording = pCommandList->GetRecordingState(); recording && recording->IsInFlight()) {
+        WARN("D3D12 ExecuteCommandLists received an in-flight command list recording");
+        device_->MarkDeviceRemoved(DXGI_ERROR_INVALID_CALL);
+        return;
+      }
+    }
+
+    std::unique_lock<dxmt::mutex> commit_lock(commit_mutex_);
+    if (!WaitForSubmissionSpaceLocked())
+      return;
+
+    // Keep admission alive both during CPU translation and until GPU completion.
+    // A fresh Reset owns a different recording, even on the same COM object.
+    auto recording_lifetime = std::make_shared<D3D12CommandListSubmission>();
+    Submission submission;
+    submission.recording_lifetime = recording_lifetime;
+    struct TranslationLifetime {
+      const std::shared_ptr<D3D12CommandListSubmission> &state;
+      Submission &submission;
+      bool allocator_marks_pending = false;
+
+      ~TranslationLifetime() {
+        // Until commit transfers completion to the queue, every exit (including
+        // allocation failure during translation) must undo allocator admission.
+        if (allocator_marks_pending)
+          for (auto &allocator : submission.allocators)
+            allocator->MarkSubmissionCompleted();
+        state->cpu_active.store(false, std::memory_order_release);
+      }
+    } translation_lifetime{recording_lifetime, submission};
+    for (UINT i = 0; i < Count; i++) {
+      auto recording = static_cast<MTLD3D12GraphicsCommandList *>(ppCommandLists[i])->GetRecordingState();
+      if (!recording || !recording->TryAcquire(recording_lifetime)) {
+        WARN("D3D12 ExecuteCommandLists raced another submission of the same recording");
+        device_->MarkDeviceRemoved(DXGI_ERROR_INVALID_CALL);
+        return;
+      }
+    }
+
+    D3D12RecordedStateValidation recorded_states;
+    recorded_states.diagnostic_queue_id = legacy_queue_id_;
+    try {
+      if (!legacy_diagnostics_uncertain_) {
+        if (!pending_legacy_diagnostics_.empty() && FailLegacyDiagnosticAllocationForTesting("snapshot"))
+          throw std::bad_alloc();
+        recorded_states.legacy_splits = pending_legacy_diagnostics_;
+      }
+    } catch (const std::bad_alloc &) {
+      // Optional cross-batch diagnostics must never prevent valid GPU work.
+      WARN("D3D12 legacy split diagnostics disabled: snapshot allocation failed");
+      legacy_diagnostics_uncertain_ = true;
+      pending_legacy_diagnostics_.clear();
+      recorded_states.legacy_splits.clear();
+    }
+    for (auto &split : recorded_states.legacy_splits)
+      split.inherited = true;
+    {
+      std::lock_guard lock(submission_state_->mutex);
+      recorded_states.splits = submission_state_->pending_splits;
+    }
+    for (auto &split : recorded_states.splits)
+      split.inherited = true;
+    for (UINT i = 0; i < Count; i++) {
+      const HRESULT hr = static_cast<MTLD3D12GraphicsCommandList *>(ppCommandLists[i])
+                             ->ValidateRecordedResourceStates(recorded_states);
+      if (FAILED(hr)) {
+        WARN("D3D12 ExecuteCommandLists rejected an inconsistent recorded resource transition chain");
+        device_->MarkDeviceRemoved(hr == E_OUTOFMEMORY ? hr : DXGI_ERROR_INVALID_CALL);
+        return;
+      }
+    }
+
+    // Only non-simultaneous texture layouts persist across Execute boundaries.
+    // Memory-only texture halves have no layout to carry across the full flush.
+    std::erase_if(recorded_states.splits, [](const auto &split) {
+      return split.barrier.type == EnhancedSplitBarrierType::Buffer ||
+             IsTextureAccessOnly(split.barrier.layout_before, split.barrier.layout_after) ||
+             (split.barrier.resource->GetDesc().Flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS);
+    });
+
+    for (auto &split : recorded_states.splits)
+      if (!split.retained_resource)
+        split.retained_resource = split.barrier.resource;
+
+    std::vector<SubmissionResourceUse> descriptor_resource_uses;
+    std::vector<WMT::Reference<WMT::Resource>> descriptor_resource_refs;
+    const bool residency_stats_enabled = ResidencyStatsEnabled();
+    for (UINT i = 0; i < Count; i++) {
+      auto pCommandList = static_cast<MTLD3D12GraphicsCommandList *>(ppCommandLists[i]);
+      const auto sidecar_hr = pCommandList->ValidateSamplerLODSidecarsForSubmission();
+      if (FAILED(sidecar_hr)) {
+        WARN("D3D12 ExecuteCommandLists rejected an invalid sampler LOD sidecar");
+        device_->MarkDeviceRemoved(sidecar_hr);
+        return;
+      }
+      const auto hr = pCommandList->CollectResourceUsesForSubmission(
+          descriptor_resource_uses, descriptor_resource_refs
+      );
+      if (FAILED(hr)) {
+        WARN("D3D12 ExecuteCommandLists failed to resolve live descriptor resources: 0x", std::hex, hr, std::dec);
+        device_->MarkDeviceRemoved(hr);
+        return;
+      }
+      if (residency_stats_enabled)
+        AggregateResidencyCounters(pCommandList->GetAirconvResidencyCounters());
+    }
+
     auto pool = WMT::MakeAutoreleasePool();
 
-    auto cmdbuf = queue_.commandBuffer();
+    WMT::CommandBuffer cmdbuf;
+    if (FAILED(NewCommandBuffer(cmdbuf)))
+      return;
+    if (sparse_event_value_)
+      cmdbuf.encodeWaitForEvent(sparse_event_, sparse_event_value_);
+    submission.command_buffer = cmdbuf;
+    recording_lifetime->command_buffer = cmdbuf;
+    for (auto &use : descriptor_resource_uses)
+      submission.descriptor_resource_uses[use.encoder].push_back(std::move(use));
+    submission.descriptor_resource_refs = std::move(descriptor_resource_refs);
+    submission.allocators.reserve(Count);
+    submission.command_lists.reserve(Count);
+    for (unsigned i = 0; i < Count; i++) {
+      auto pCommandList = static_cast<MTLD3D12GraphicsCommandList *>(ppCommandLists[i]);
+      auto &command_list = submission.command_lists.emplace_back();
+      command_list.recording_id = pCommandList->GetRecordingId();
+      for (auto *encoder = pCommandList->entry; encoder; encoder = encoder->next)
+        command_list.encoders.push_back({encoder->type, encoder->id});
+      pCommandList->CollectAllocatorsForSubmission(submission.allocators);
+      pCommandList->CollectSamplerHeapsForSubmission(submission.sampler_heaps);
+      pCommandList->CollectStaticSamplerRootsForSubmission(submission.static_sampler_roots);
+    }
+    for (auto &allocator : submission.allocators)
+      allocator->MarkSubmissionSubmitted();
+    translation_lifetime.allocator_marks_pending = true;
+
+    PauseTranslationForTesting();
+
+    bool translation_failed = false;
     for (unsigned i = 0; i < Count; i++) {
       auto pCommandList = static_cast<MTLD3D12GraphicsCommandList *>(ppCommandLists[i]);
       EncoderData *current = pCommandList->entry;
       while (current) {
+        const auto recording_id = pCommandList->GetRecordingId();
         switch (current->type) {
         case EncoderType::Null:
           break;
+        case EncoderType::CopyTiles: {
+          auto data = static_cast<CopyTilesEncoderData *>(current);
+          auto *tiled = data->tiled_resource.ptr();
+          auto *linear = data->linear_resource.ptr();
+          if (!tiled || !linear || !linear->buffer || !linear->buffer->current()) {
+            WARN("D3D12 CopyTiles translation received an invalid resource");
+            translation_failed = true;
+            break;
+          }
+
+          std::vector<UINT> tile_indices;
+          const auto *coordinate = data->has_region_start_coordinate ? &data->region_start_coordinate : nullptr;
+          if (FAILED(tiled->GetTileIndices(coordinate, &data->region_size, tile_indices)) || tile_indices.empty()) {
+            WARN("D3D12 CopyTiles translation failed to resolve resource tiles");
+            translation_failed = true;
+            break;
+          }
+          for (UINT tile_index : tile_indices) {
+            if (tiled->IsPackedTile(tile_index)) {
+              WARN("D3D12 CopyTiles translation cannot access packed mip tiles");
+              translation_failed = true;
+              break;
+            }
+          }
+          if (translation_failed)
+            break;
+
+          constexpr UINT64 tile_size = 64ull * 1024;
+          if (tile_indices.size() > std::numeric_limits<UINT64>::max() / tile_size) {
+            WARN("D3D12 CopyTiles translation overflowed its tile range");
+            translation_failed = true;
+            break;
+          }
+          const UINT64 copy_size = uint64_t(tile_indices.size()) * tile_size;
+          const auto linear_desc = linear->GetDesc();
+          if (data->buffer_offset > linear_desc.Width || copy_size > linear_desc.Width - data->buffer_offset) {
+            WARN("D3D12 CopyTiles translation received an out-of-bounds buffer range");
+            translation_failed = true;
+            break;
+          }
+
+          const auto sparse_buffer = tiled->GetMetalBuffer();
+          if (sparse_mapping_queue_ && sparse_buffer) {
+            const auto linear_buffer = linear->buffer->current()->buffer();
+            auto encoder = cmdbuf.blitCommandEncoder();
+            if (FAILED(CheckSubmissionObject(encoder)))
+              return;
+            encoder.waitForFence(fence_);
+            for (size_t index = 0; index < tile_indices.size(); index++) {
+              const UINT tile_index = tile_indices[index];
+              const UINT64 linear_offset = data->buffer_offset + index * tile_size;
+              const UINT64 sparse_offset = uint64_t(tile_index) * tile_size;
+              // Placement-sparse buffers have Metal sparse tier 1 semantics:
+              // unbacked reads return zero and writes are discarded. Resolve
+              // mappings on the GPU after queue waits rather than snapshotting
+              // CPU mapping state before an upstream queue has run.
+              if (data->buffer_to_tiled) {
+                wmtcmd_blit_copy_from_buffer_to_buffer copy = {};
+                copy.type = WMTBlitCommandCopyFromBufferToBuffer;
+                copy.src = linear_buffer;
+                copy.src_offset = linear_offset;
+                copy.dst = sparse_buffer;
+                copy.dst_offset = sparse_offset;
+                copy.copy_length = tile_size;
+                MTLBlitCommandEncoder_encodeCommands(encoder, (const wmtcmd_base *)&copy);
+                continue;
+              }
+
+              if (!data->tiled_to_buffer)
+                continue;
+              wmtcmd_blit_copy_from_buffer_to_buffer copy = {};
+              copy.type = WMTBlitCommandCopyFromBufferToBuffer;
+              copy.src = sparse_buffer;
+              copy.src_offset = sparse_offset;
+              copy.dst = linear_buffer;
+              copy.dst_offset = linear_offset;
+              copy.copy_length = tile_size;
+              MTLBlitCommandEncoder_encodeCommands(encoder, (const wmtcmd_base *)&copy);
+            }
+            encoder.updateFence(fence_);
+            encoder.endEncoding();
+            break;
+          }
+
+          const auto sparse_texture = tiled->GetMetalTexture();
+          if (sparse_mapping_queue_ && sparse_texture) {
+            struct TextureTileCopyInfo {
+              WMTOrigin origin;
+              WMTSize size;
+              uint64_t level;
+              uint64_t slice;
+              uint32_t bytes_per_row;
+              uint32_t bytes_per_image;
+            };
+            std::vector<TextureTileCopyInfo> copy_infos;
+            copy_infos.reserve(tile_indices.size());
+            for (UINT tile_index : tile_indices) {
+              auto &copy_info = copy_infos.emplace_back();
+              if (FAILED(tiled->GetTileTextureCopyInfo(
+                      tile_index, copy_info.origin, copy_info.level, copy_info.slice, copy_info.size,
+                      copy_info.bytes_per_row, copy_info.bytes_per_image
+                  ))) {
+                WARN("D3D12 CopyTiles translation failed to resolve a sparse texture tile");
+                translation_failed = true;
+                break;
+              }
+            }
+            if (translation_failed)
+              break;
+
+            const auto linear_buffer = linear->buffer->current()->buffer();
+            auto encoder = cmdbuf.blitCommandEncoder();
+            if (FAILED(CheckSubmissionObject(encoder)))
+              return;
+            encoder.waitForFence(fence_);
+            for (size_t index = 0; index < tile_indices.size(); index++) {
+              const UINT64 linear_offset = data->buffer_offset + index * tile_size;
+              const auto &copy_info = copy_infos[index];
+              if (data->buffer_to_tiled) {
+                wmtcmd_blit_copy_from_buffer_to_texture copy = {};
+                copy.type = WMTBlitCommandCopyFromBufferToTexture;
+                copy.src = linear_buffer;
+                copy.src_offset = linear_offset;
+                copy.bytes_per_row = copy_info.bytes_per_row;
+                copy.bytes_per_image = copy_info.bytes_per_image;
+                copy.size = copy_info.size;
+                copy.dst = sparse_texture;
+                copy.slice = static_cast<uint32_t>(copy_info.slice);
+                copy.level = static_cast<uint32_t>(copy_info.level);
+                copy.origin = copy_info.origin;
+                MTLBlitCommandEncoder_encodeCommands(encoder, (const wmtcmd_base *)&copy);
+                continue;
+              }
+
+              // The texture may cover only part of a D3D tile at its edges.
+              // Initialize the whole output tile before the sparse blit so
+              // unbacked texels and out-of-resource padding are deterministic.
+              wmtcmd_blit_fillbuffer fill = {};
+              fill.type = WMTBlitCommandFillBuffer;
+              fill.buffer = linear_buffer;
+              fill.offset = linear_offset;
+              fill.length = tile_size;
+              fill.value = 0;
+              MTLBlitCommandEncoder_encodeCommands(encoder, (const wmtcmd_base *)&fill);
+              wmtcmd_blit_copy_from_texture_to_buffer copy = {};
+              copy.type = WMTBlitCommandCopyFromTextureToBuffer;
+              copy.src = sparse_texture;
+              copy.slice = static_cast<uint32_t>(copy_info.slice);
+              copy.level = static_cast<uint32_t>(copy_info.level);
+              copy.origin = copy_info.origin;
+              copy.size = copy_info.size;
+              copy.dst = linear_buffer;
+              copy.offset = linear_offset;
+              copy.bytes_per_row = copy_info.bytes_per_row;
+              copy.bytes_per_image = copy_info.bytes_per_image;
+              MTLBlitCommandEncoder_encodeCommands(encoder, (const wmtcmd_base *)&copy);
+            }
+            encoder.updateFence(fence_);
+            encoder.endEncoding();
+            break;
+          }
+
+          struct ResolvedTile {
+            WMT::Buffer buffer;
+            UINT64 offset;
+          };
+          std::vector<ResolvedTile> resolved_tiles;
+          resolved_tiles.reserve(tile_indices.size());
+          bool mapping_failed = false;
+          for (auto tile_index : tile_indices) {
+            ResolvedTile tile = {};
+            if (FAILED(tiled->GetTileMapping(tile_index, tile.buffer, tile.offset))) {
+              WARN("D3D12 CopyTiles translation failed to resolve a tile mapping");
+              mapping_failed = true;
+              break;
+            }
+            resolved_tiles.push_back(tile);
+          }
+          if (mapping_failed) {
+            translation_failed = true;
+            break;
+          }
+
+          const auto linear_buffer = linear->buffer->current()->buffer();
+          auto encoder = cmdbuf.blitCommandEncoder();
+          if (FAILED(CheckSubmissionObject(encoder)))
+            return;
+          encoder.waitForFence(fence_);
+          for (size_t index = 0; index < resolved_tiles.size(); index++) {
+            const auto &tile = resolved_tiles[index];
+            const UINT64 linear_offset = data->buffer_offset + index * tile_size;
+            if (data->buffer_to_tiled) {
+              if (!tile.buffer)
+                continue;
+              wmtcmd_blit_copy_from_buffer_to_buffer copy = {};
+              copy.type = WMTBlitCommandCopyFromBufferToBuffer;
+              copy.src = linear_buffer;
+              copy.src_offset = linear_offset;
+              copy.dst = tile.buffer;
+              copy.dst_offset = tile.offset;
+              copy.copy_length = tile_size;
+              MTLBlitCommandEncoder_encodeCommands(encoder, (const wmtcmd_base *)&copy);
+              continue;
+            }
+
+            if (!data->tiled_to_buffer)
+              continue;
+            if (!tile.buffer) {
+              wmtcmd_blit_fillbuffer fill = {};
+              fill.type = WMTBlitCommandFillBuffer;
+              fill.buffer = linear_buffer;
+              fill.offset = linear_offset;
+              fill.length = tile_size;
+              MTLBlitCommandEncoder_encodeCommands(encoder, (const wmtcmd_base *)&fill);
+              continue;
+            }
+
+            wmtcmd_blit_copy_from_buffer_to_buffer copy = {};
+            copy.type = WMTBlitCommandCopyFromBufferToBuffer;
+            copy.src = tile.buffer;
+            copy.src_offset = tile.offset;
+            copy.dst = linear_buffer;
+            copy.dst_offset = linear_offset;
+            copy.copy_length = tile_size;
+            MTLBlitCommandEncoder_encodeCommands(encoder, (const wmtcmd_base *)&copy);
+          }
+          encoder.updateFence(fence_);
+          encoder.endEncoding();
+          break;
+        }
         case EncoderType::Clear: {
           auto data = static_cast<ClearEncoderData *>(current);
+          if (data->rect_count) {
+            if (!data->attachment || !data->rects) {
+              translation_failed = true;
+              break;
+            }
+            auto pso = data->clear_dsv ? GetClearPSO(data->format, data->raster_sample_count)
+                                       : GetClearRTVPSO(data->format, data->raster_sample_count);
+            auto dsso = data->clear_dsv ? GetClearDSSO(data->clear_dsv) : WMT::DepthStencilState{};
+            if (!pso || (data->clear_dsv && !dsso)) {
+              translation_failed = true;
+              break;
+            }
+
+            WMTRenderPassInfo info;
+            WMT::InitializeRenderPassInfo(info);
+            const auto dsv_planar_flags = DepthStencilPlanarFlags(data->format);
+            if (data->clear_dsv) {
+              if (dsv_planar_flags & 1) {
+                info.depth.texture = data->attachment.texture();
+                info.depth.level = 0;
+                info.depth.slice = 0;
+                info.depth.depth_plane = data->depth_plane;
+                info.depth.load_action = WMTLoadActionLoad;
+                info.depth.store_action = WMTStoreActionStore;
+              }
+              if (dsv_planar_flags & 2) {
+                info.stencil.texture = data->attachment.texture();
+                info.stencil.level = 0;
+                info.stencil.slice = 0;
+                info.stencil.depth_plane = data->depth_plane;
+                info.stencil.load_action = WMTLoadActionLoad;
+                info.stencil.store_action = WMTStoreActionStore;
+              }
+            } else {
+              info.colors[0].texture = data->attachment.texture();
+              info.colors[0].level = 0;
+              info.colors[0].slice = 0;
+              info.colors[0].depth_plane = data->depth_plane;
+              info.colors[0].load_action = WMTLoadActionLoad;
+              info.colors[0].store_action = WMTStoreActionStore;
+            }
+            info.default_raster_sample_count = data->raster_sample_count;
+            const auto array_length = std::max(data->array_length, 1u);
+            info.render_target_array_length = array_length;
+            info.render_target_width = data->width;
+            info.render_target_height = data->height;
+
+            auto encoder = cmdbuf.renderCommandEncoder(info);
+            if (FAILED(CheckSubmissionObject(encoder)))
+              return;
+            LabelEncoder(encoder, recording_id, data->id, "ClearPartial");
+            encoder.waitForFence(fence_, WMTRenderStageFragment);
+
+            wmtcmd_render_setpso set_pso = {};
+            set_pso.type = WMTRenderCommandSetPSO;
+            set_pso.pso = pso;
+            encoder.encodeCommands(reinterpret_cast<const wmtcmd_render_nop *>(&set_pso));
+
+            wmtcmd_render_setviewport set_viewport = {};
+            set_viewport.type = WMTRenderCommandSetViewport;
+            set_viewport.viewport = {0.0, 0.0, (double)data->width, (double)data->height, 0.0, 1.0};
+            encoder.encodeCommands(reinterpret_cast<const wmtcmd_render_nop *>(&set_viewport));
+
+            if (data->clear_dsv) {
+              wmtcmd_render_setdsso set_dsso = {};
+              set_dsso.type = WMTRenderCommandSetDSSO;
+              set_dsso.dsso = dsso;
+              set_dsso.stencil_ref = data->depth_stencil.second;
+              encoder.encodeCommands(reinterpret_cast<const wmtcmd_render_nop *>(&set_dsso));
+            }
+
+            float clear_value[4] = {};
+            if (data->clear_dsv) {
+              clear_value[0] = data->depth_stencil.first;
+            } else {
+              clear_value[0] = static_cast<float>(data->color.r);
+              clear_value[1] = static_cast<float>(data->color.g);
+              clear_value[2] = static_cast<float>(data->color.b);
+              clear_value[3] = static_cast<float>(data->color.a);
+            }
+            wmtcmd_render_setbytes set_value = {};
+            set_value.type = WMTRenderCommandSetFragmentBytes;
+            set_value.bytes.set(clear_value);
+            set_value.length = sizeof(clear_value);
+            set_value.index = kCustomBufferArgumentIndex0;
+            encoder.encodeCommands(reinterpret_cast<const wmtcmd_render_nop *>(&set_value));
+
+            for (UINT i = 0; i < data->rect_count; i++) {
+              const auto &rect = data->rects[i];
+              const LONG left = std::max<LONG>(0, rect.left);
+              const LONG top = std::max<LONG>(0, rect.top);
+              const LONG right = std::min<LONG>((LONG)data->width, rect.right);
+              const LONG bottom = std::min<LONG>((LONG)data->height, rect.bottom);
+              if (left >= right || top >= bottom)
+                continue;
+
+              wmtcmd_render_setscissorrect set_scissor = {};
+              set_scissor.type = WMTRenderCommandSetScissorRect;
+              set_scissor.scissor_rect = {
+                  (uint64_t)left, (uint64_t)top, (uint64_t)(right - left), (uint64_t)(bottom - top)
+              };
+              encoder.encodeCommands(reinterpret_cast<const wmtcmd_render_nop *>(&set_scissor));
+
+              wmtcmd_render_draw draw = {};
+              draw.type = WMTRenderCommandDraw;
+              draw.primitive_type = WMTPrimitiveTypeTriangle;
+              draw.vertex_count = 3;
+              draw.instance_count = array_length;
+              encoder.encodeCommands(reinterpret_cast<const wmtcmd_render_nop *>(&draw));
+            }
+            encoder.updateFence(fence_, WMTRenderStageFragment);
+            encoder.endEncoding();
+            break;
+          }
           {
             WMTRenderPassInfo info;
             WMT::InitializeRenderPassInfo(info);
@@ -119,12 +1645,14 @@ public:
               if (data->clear_dsv & 1) {
                 info.depth.clear_depth = data->depth_stencil.first;
                 info.depth.texture = data->attachment.texture();
+                info.depth.depth_plane = data->depth_plane;
                 info.depth.load_action = WMTLoadActionClear;
                 info.depth.store_action = WMTStoreActionStore;
               }
               if (data->clear_dsv & 2) {
                 info.stencil.clear_stencil = data->depth_stencil.second;
                 info.stencil.texture = data->attachment.texture();
+                info.stencil.depth_plane = data->depth_plane;
                 info.stencil.load_action = WMTLoadActionClear;
                 info.stencil.store_action = WMTStoreActionStore;
               }
@@ -133,12 +1661,15 @@ public:
             } else {
               info.colors[0].clear_color = data->color;
               info.colors[0].texture = data->attachment.texture();
+              info.colors[0].depth_plane = data->depth_plane;
               info.colors[0].load_action = WMTLoadActionClear;
               info.colors[0].store_action = WMTStoreActionStore;
             }
             info.render_target_array_length = data->array_length;
             auto encoder = cmdbuf.renderCommandEncoder(info);
-            encoder.setLabel(WMT::String::string("ClearPass", WMTUTF8StringEncoding));
+            if (FAILED(CheckSubmissionObject(encoder)))
+              return;
+            LabelEncoder(encoder, recording_id, data->id, "Clear");
             encoder.waitForFence(fence_, WMTRenderStageFragment);
             encoder.updateFence(fence_, WMTRenderStageFragment);
             encoder.endEncoding();
@@ -193,18 +1724,30 @@ public:
             render_pass_info.render_target_array_length = data->render_target_array_length;
             render_pass_info.render_target_width = data->render_target_width;
             render_pass_info.render_target_height = data->render_target_height;
-          }
+            if (data->use_visibility_result)
+              render_pass_info.visibility_buffer = data->visibility_buffer.handle;
+           }
           auto encoder = cmdbuf.renderCommandEncoder(render_pass_info);
-          encoder.waitForFence(fence_, WMTRenderStageVertex);
+          if (FAILED(CheckSubmissionObject(encoder)))
+            return;
+          LabelEncoder(encoder, recording_id, data->id, "Render");
+          encoder.waitForFence(fence_, data->use_geometry ? WMTRenderStagePreRaster : WMTRenderStageVertex);
+          if (auto uses = submission.descriptor_resource_uses.find(current);
+              uses != submission.descriptor_resource_uses.end())
+            for (const auto &use : uses->second)
+              encoder.useResource(use.resource, use.usage, use.stages);
           encoder.encodeCommands(&data->cmd_head);
           encoder.updateFence(fence_, WMTRenderStageFragment);
           encoder.endEncoding();
           break;
         }
-        case EncoderType::Blit: {
-          auto data = static_cast<BlitEncoderData *>(current);
-          auto encoder = cmdbuf.blitCommandEncoder();
-          encoder.waitForFence(fence_);
+         case EncoderType::Blit: {
+           auto data = static_cast<BlitEncoderData *>(current);
+           auto encoder = cmdbuf.blitCommandEncoder();
+           if (FAILED(CheckSubmissionObject(encoder)))
+             return;
+           LabelEncoder(encoder, recording_id, data->id, "Blit");
+           encoder.waitForFence(fence_);
           encoder.encodeCommands(&data->cmd_head);
           encoder.updateFence(fence_);
           encoder.endEncoding();
@@ -212,10 +1755,107 @@ public:
         }
         case EncoderType::Compute: {
           auto data = static_cast<ComputeEncoderData *>(current);
-          auto encoder = cmdbuf.computeCommandEncoder(false);
-          encoder.waitForFence(fence_);
+           auto encoder = cmdbuf.computeCommandEncoder(false);
+           if (FAILED(CheckSubmissionObject(encoder)))
+             return;
+           LabelEncoder(encoder, recording_id, data->id, "Compute");
+           encoder.waitForFence(fence_);
+          if (auto uses = submission.descriptor_resource_uses.find(current);
+              uses != submission.descriptor_resource_uses.end())
+            for (const auto &use : uses->second)
+              encoder.useResource(use.resource, use.usage);
           encoder.encodeCommands(&data->cmd_head);
           encoder.updateFence(fence_);
+          encoder.endEncoding();
+          break;
+        }
+        case EncoderType::AccelerationStructure: {
+          auto data = static_cast<AccelerationStructureEncoderData *>(current);
+          auto encoder = cmdbuf.accelerationStructureCommandEncoder();
+          if (FAILED(CheckSubmissionObject(encoder)))
+            return;
+          LabelEncoder(encoder, recording_id, data->id, "AccelerationStructure");
+
+          const auto read_write = static_cast<WMTResourceUsage>(WMTResourceUsageRead | WMTResourceUsageWrite);
+          auto use_resource = [&](obj_handle_t resource, WMTResourceUsage usage) {
+            if (!resource)
+              return true;
+            WMT::Resource resource_object;
+            resource_object.handle = resource;
+            return encoder.useResource(resource_object, usage);
+          };
+          auto use_descriptor_resources = [&](const WMTAccelerationStructureDescriptorInfo &descriptor) {
+            if (descriptor.type == WMTAccelerationStructureDescriptorPrimitive) {
+              for (uint32_t i = 0; i < descriptor.data.primitive.geometry_count; i++) {
+                const auto &geometry = descriptor.data.primitive.geometries[i];
+                if (!use_resource(geometry.vertex_buffer, WMTResourceUsageRead) ||
+                    !use_resource(geometry.index_buffer, WMTResourceUsageRead) ||
+                    !use_resource(geometry.bounding_box_buffer, WMTResourceUsageRead))
+                  return false;
+              }
+            } else if (descriptor.type == WMTAccelerationStructureDescriptorInstance) {
+              if (!use_resource(
+                      descriptor.data.instance.instance_descriptor_buffer, WMTResourceUsageRead
+                  ))
+                return false;
+              for (uint32_t i = 0; i < descriptor.data.instance.instanced_acceleration_structure_count; i++) {
+                if (!use_resource(
+                        descriptor.data.instance.instanced_acceleration_structures[i], WMTResourceUsageRead
+                    ))
+                  return false;
+              }
+            } else {
+              return false;
+            }
+            return true;
+          };
+
+          for (const auto &command : data->commands) {
+            bool command_ok = false;
+            switch (command.type) {
+            case AccelerationStructureCommandType::Build:
+              command_ok = use_descriptor_resources(command.descriptor) &&
+                           use_resource(command.scratch.handle, read_write) &&
+                           use_resource(command.destination.handle, read_write) &&
+                           encoder.build(
+                               command.destination, command.descriptor, command.scratch, command.scratch_offset
+                           );
+              break;
+            case AccelerationStructureCommandType::Refit:
+              command_ok = use_descriptor_resources(command.descriptor) &&
+                           use_resource(command.scratch.handle, read_write) &&
+                           use_resource(command.source.handle, read_write) &&
+                           use_resource(command.destination.handle, read_write) &&
+                           encoder.refit(
+                               command.source, command.destination, command.descriptor, command.scratch,
+                               command.scratch_offset
+                           );
+              break;
+            case AccelerationStructureCommandType::Copy:
+              command_ok = use_resource(command.source.handle, WMTResourceUsageRead) &&
+                           use_resource(command.destination.handle, WMTResourceUsageWrite) &&
+                           encoder.copy(command.source, command.destination);
+              break;
+            case AccelerationStructureCommandType::CopyAndCompact:
+              command_ok = use_resource(command.source.handle, WMTResourceUsageRead) &&
+                           use_resource(command.destination.handle, WMTResourceUsageWrite) &&
+                           encoder.copyAndCompact(command.source, command.destination);
+              break;
+            case AccelerationStructureCommandType::WriteCompactedSize:
+              command_ok = use_resource(command.acceleration_structure.handle, WMTResourceUsageRead) &&
+                           use_resource(command.buffer.handle, WMTResourceUsageWrite) &&
+                           encoder.writeCompactedSize(
+                               command.acceleration_structure, command.buffer, command.buffer_offset,
+                               command.size_data_type
+                           );
+              break;
+            }
+            if (!command_ok) {
+              WARN("D3D12 acceleration-structure translation failed to encode a command");
+              translation_failed = true;
+              break;
+            }
+          }
           encoder.endEncoding();
           break;
         }
@@ -229,21 +1869,95 @@ public:
           info.colors[0].store_action = WMTStoreActionStoreAndMultisampleResolve;
           info.colors[0].resolve_texture = data->dst.texture();
 
-          auto encoder = cmdbuf.renderCommandEncoder(info);
-          encoder.waitForFence(fence_, WMTRenderStageFragment);
-          encoder.setLabel(WMT::String::string("ResolvePass", WMTUTF8StringEncoding));
+           auto encoder = cmdbuf.renderCommandEncoder(info);
+           if (FAILED(CheckSubmissionObject(encoder)))
+             return;
+           LabelEncoder(encoder, recording_id, data->id, "Resolve");
+           encoder.waitForFence(fence_, WMTRenderStageFragment);
           encoder.updateFence(fence_, WMTRenderStageFragment);
           encoder.endEncoding();
 
           break;
         }
+        case EncoderType::TemporalUpscale: {
+           auto data = static_cast<TemporalUpscaleData *>(current);
+
+           auto begin_scaler = cmdbuf.blitCommandEncoder();
+           if (FAILED(CheckSubmissionObject(begin_scaler)))
+             return;
+           LabelEncoder(begin_scaler, recording_id, data->id, "TemporalBegin");
+          begin_scaler.waitForFence(fence_);
+          begin_scaler.updateFence(data->scaler->fence());
+          begin_scaler.endEncoding();
+
+          cmdbuf.encodeTemporalScale(
+              data->scaler->scaler(), data->input, data->output, data->depth, data->motion_vector, data->exposure,
+              data->scaler->fence(), data->props
+          );
+
+           auto end_scaler = cmdbuf.blitCommandEncoder();
+           if (FAILED(CheckSubmissionObject(end_scaler)))
+             return;
+           end_scaler.waitForFence(data->scaler->fence());
+           LabelEncoder(end_scaler, recording_id, data->id, "TemporalEnd");
+          end_scaler.updateFence(fence_);
+          end_scaler.endEncoding();
+          break;
+        }
+        case EncoderType::SampleTimestamp: {
+          auto data = static_cast<SampleTimestampData *>(current);
+          if (!data->sample_buffer || !timestamp_dummy_buffer_)
+            break;
+
+          WMTSampleBufferAttachmentInfo attachment = {};
+          attachment.sample_buffer = data->sample_buffer.handle;
+          attachment.start_of_encoder_sample_index = data->sample_index;
+           attachment.end_of_encoder_sample_index = ~0ull;
+           auto encoder = cmdbuf.blitCommandEncoderWithSampleBuffers(&attachment, 1);
+           if (FAILED(CheckSubmissionObject(encoder)))
+             return;
+           LabelEncoder(encoder, recording_id, data->id, "SampleTimestamp");
+           encoder.waitForFence(fence_);
+
+          wmtcmd_blit_fillbuffer fill = {};
+          fill.type = WMTBlitCommandFillBuffer;
+          fill.next.set(nullptr);
+          fill.buffer = timestamp_dummy_buffer_;
+          fill.offset = 0;
+          fill.length = sizeof(uint32_t);
+          fill.value = 0;
+          MTLBlitCommandEncoder_encodeCommands(encoder, (const wmtcmd_base *)&fill);
+
+          encoder.updateFence(fence_);
+          encoder.endEncoding();
+          break;
+        }
         }
         current = current->next;
       }
+      if (translation_failed)
+        return;
     }
-    cmdbuf.commit();
-    // temporary workaround
-    cmdbuf.waitUntilCompleted();
+    if (!CommitSubmissionLocked(submission, &recorded_states.splits))
+      return;
+    if (!legacy_diagnostics_uncertain_) {
+      constexpr size_t max_legacy_diagnostics = 4096;
+      if (recorded_states.legacy_splits.size() > max_legacy_diagnostics) {
+        legacy_diagnostics_uncertain_ = true;
+        pending_legacy_diagnostics_.clear();
+      } else {
+        pending_legacy_diagnostics_.swap(recorded_states.legacy_splits);
+      }
+    }
+    translation_lifetime.allocator_marks_pending = false;
+    for (unsigned i = 0; i < Count; i++) {
+      static_cast<MTLD3D12GraphicsCommandList *>(ppCommandLists[i])->CommitResourceStates();
+    }
+  } catch (const std::bad_alloc &) {
+    // ExecuteCommandLists has no HRESULT result. Preserve the existing OOM
+    // device-removal policy for every submission allocation, without allocating
+    // a diagnostic string while handling memory exhaustion.
+    device_->MarkDeviceRemoved(E_OUTOFMEMORY);
   };
 
   void STDMETHODCALLTYPE SetMarker(UINT metadata, const void *data, UINT size) {};
@@ -254,33 +1968,166 @@ public:
 
   HRESULT STDMETHODCALLTYPE
   Signal(ID3D12Fence *pFence, UINT64 Value) {
+    if (!IsSameDevice(device_, pFence))
+      return E_INVALIDARG;
+    std::unique_lock<dxmt::mutex> commit_lock(commit_mutex_);
+    if (!WaitForSubmissionSpaceLocked())
+      return FAILED(device_->GetDeviceRemovedReason()) ? DXGI_ERROR_DEVICE_REMOVED : E_FAIL;
+
     auto pool = WMT::MakeAutoreleasePool();
-    auto cmdbuf = queue_.commandBuffer();
-    static_cast<MTLD3D12Fence *>(pFence)->fence->signal(cmdbuf, Value);
-    cmdbuf.commit();
+    WMT::CommandBuffer cmdbuf;
+    if (FAILED(NewCommandBuffer(cmdbuf)))
+      return DXGI_ERROR_DEVICE_REMOVED;
+    if (sparse_event_value_)
+      cmdbuf.encodeWaitForEvent(sparse_event_, sparse_event_value_);
+    Submission submission;
+    submission.command_buffer = cmdbuf;
+    submission.signal_fence = static_cast<MTLD3D12Fence *>(pFence);
+    submission.signal_value = Value;
+    bool recorded_probe = false;
+    if (!legacy_diagnostics_uncertain_ && !pending_legacy_diagnostics_.empty()) {
+      try {
+        std::erase_if(diagnostic_signals_, [](const auto &entry) { return entry.complete.expired(); });
+        if (FailLegacyDiagnosticAllocationForTesting("signal"))
+          throw std::bad_alloc();
+        submission.diagnostic_signal_complete = std::make_shared<std::atomic<bool>>(false);
+        diagnostic_signals_.push_back({submission.signal_fence->diagnostic_fence_id, Value,
+                                       submission.diagnostic_signal_complete});
+        recorded_probe = true;
+      } catch (const std::bad_alloc &) {
+        // A best-effort diagnostic probe must not make Signal fail.
+        WARN("D3D12 legacy split diagnostics disabled: signal probe allocation failed");
+        legacy_diagnostics_uncertain_ = true;
+        pending_legacy_diagnostics_.clear();
+        diagnostic_signals_.clear();
+        submission.diagnostic_signal_complete.reset();
+      }
+    }
+    if (!CommitSubmissionLocked(submission)) {
+      if (recorded_probe)
+        diagnostic_signals_.pop_back();
+      return FAILED(device_->GetDeviceRemovedReason()) ? DXGI_ERROR_DEVICE_REMOVED : E_FAIL;
+    }
     return S_OK;
   };
 
   HRESULT STDMETHODCALLTYPE
   Wait(ID3D12Fence *pFence, UINT64 Value) {
+    if (!IsSameDevice(device_, pFence))
+      return E_INVALIDARG;
+    std::unique_lock<dxmt::mutex> commit_lock(commit_mutex_);
+    if (!WaitForSubmissionSpaceLocked())
+      return FAILED(device_->GetDeviceRemovedReason()) ? DXGI_ERROR_DEVICE_REMOVED : E_FAIL;
+
     auto pool = WMT::MakeAutoreleasePool();
-    auto cmdbuf = queue_.commandBuffer();
-    static_cast<MTLD3D12Fence *>(pFence)->fence->wait(cmdbuf, Value);
-    cmdbuf.commit();
+    WMT::CommandBuffer cmdbuf;
+    if (FAILED(NewCommandBuffer(cmdbuf)))
+      return DXGI_ERROR_DEVICE_REMOVED;
+    if (sparse_event_value_)
+      cmdbuf.encodeWaitForEvent(sparse_event_, sparse_event_value_);
+    Submission submission;
+    submission.wait_fence = static_cast<MTLD3D12Fence *>(pFence);
+    const HRESULT wait_hr = submission.wait_fence->RegisterWait(Value, nullptr, submission.fence_wait);
+    if (FAILED(wait_hr))
+      return wait_hr;
+    bool known_order = submission.fence_wait->satisfied_at_registration;
+    for (const auto &probe : diagnostic_signals_) {
+      if (probe.fence_id != submission.wait_fence->diagnostic_fence_id || probe.value < Value)
+        continue;
+      if (auto complete = probe.complete.lock(); complete && !complete->load(std::memory_order_acquire)) {
+        known_order = true;
+        break;
+      }
+    }
+    cmdbuf.encodeWaitForEvent(submission.fence_wait->event, 1);
+    submission.command_buffer = cmdbuf;
+    if (!CommitSubmissionLocked(submission)) {
+      submission.wait_fence->CancelWait(submission.fence_wait);
+      return FAILED(device_->GetDeviceRemovedReason()) ? DXGI_ERROR_DEVICE_REMOVED : E_FAIL;
+    }
+    // Only infer order for a latched wait or an earlier, still-pending signal
+    // from this queue. An external dependency can be submitted later.
+    if (!known_order) {
+      legacy_diagnostics_uncertain_ = true;
+      pending_legacy_diagnostics_.clear();
+    }
     return S_OK;
   };
 
   HRESULT STDMETHODCALLTYPE
   GetTimestampFrequency(UINT64 *pFrequency) {
-    // FIXME: stub
-    if (pFrequency)
-      *pFrequency = 1;
+    if (!pFrequency)
+      return E_INVALIDARG;
+    *pFrequency = 1000000000ull;
     return S_OK;
   };
 
   HRESULT STDMETHODCALLTYPE
   GetClockCalibration(UINT64 *gpu_timestamp, UINT64 *cpu_timestamp) {
-    return E_NOTIMPL;
+    if (!gpu_timestamp || !cpu_timestamp)
+      return E_INVALIDARG;
+
+    std::unique_lock<dxmt::mutex> commit_lock(commit_mutex_);
+    if (!WaitForSubmissionSpaceLocked())
+      return FAILED(device_->GetDeviceRemovedReason()) ? DXGI_ERROR_DEVICE_REMOVED : E_FAIL;
+
+    auto pool = WMT::MakeAutoreleasePool();
+    auto sample_buffer = device_->GetMTLDevice().newCounterSampleBuffer(1, true);
+    if (!sample_buffer)
+      return E_FAIL;
+
+    LARGE_INTEGER cpu_before = {};
+    LARGE_INTEGER cpu_after = {};
+    if (!QueryPerformanceCounter(&cpu_before))
+      return E_FAIL;
+
+    WMTSampleBufferAttachmentInfo attachment = {};
+    attachment.sample_buffer = sample_buffer.handle;
+    attachment.start_of_encoder_sample_index = 0;
+    attachment.end_of_encoder_sample_index = ~0ull;
+
+    WMT::CommandBuffer cmdbuf;
+    if (FAILED(NewCommandBuffer(cmdbuf)))
+      return DXGI_ERROR_DEVICE_REMOVED;
+    if (sparse_event_value_)
+      cmdbuf.encodeWaitForEvent(sparse_event_, sparse_event_value_);
+    auto encoder = cmdbuf.blitCommandEncoderWithSampleBuffers(&attachment, 1);
+    if (FAILED(CheckSubmissionObject(encoder)))
+      return DXGI_ERROR_DEVICE_REMOVED;
+    encoder.waitForFence(fence_);
+
+    wmtcmd_blit_fillbuffer fill = {};
+    fill.type = WMTBlitCommandFillBuffer;
+    fill.next.set(nullptr);
+    fill.buffer = timestamp_dummy_buffer_;
+    fill.offset = 0;
+    fill.length = sizeof(uint32_t);
+    fill.value = 0;
+    MTLBlitCommandEncoder_encodeCommands(encoder, (const wmtcmd_base *)&fill);
+
+    encoder.updateFence(fence_);
+    encoder.endEncoding();
+    Submission submission;
+    submission.command_buffer = cmdbuf;
+    if (!CommitSubmissionLocked(submission))
+      return FAILED(device_->GetDeviceRemovedReason()) ? DXGI_ERROR_DEVICE_REMOVED : E_FAIL;
+
+    commit_lock.unlock();
+    cmdbuf.waitUntilCompleted();
+
+    if (!QueryPerformanceCounter(&cpu_after))
+      return E_FAIL;
+
+    UINT64 gpu_value = 0;
+    sample_buffer.resolveCounterRange(0, 1, &gpu_value, sizeof(gpu_value));
+    if (!gpu_value)
+      return E_FAIL;
+
+    const auto cpu_start = static_cast<UINT64>(cpu_before.QuadPart);
+    const auto cpu_end = static_cast<UINT64>(cpu_after.QuadPart);
+    *gpu_timestamp = gpu_value;
+    *cpu_timestamp = cpu_start + (cpu_end - cpu_start) / 2;
+    return S_OK;
   };
 
   D3D12_COMMAND_QUEUE_DESC *STDMETHODCALLTYPE
@@ -298,9 +2145,18 @@ public:
   }
 
   HRESULT
-  Present(Presenter *presenter, ID3D12Resource *backbuffer, HANDLE hLantecyWaitable) {
+  Present(Presenter *presenter, ID3D12Resource *backbuffer, HANDLE hLantecyWaitable, double after) {
+    static uint32_t trace_present_count = 0;
+    std::unique_lock<dxmt::mutex> commit_lock(commit_mutex_);
+    if (!WaitForSubmissionSpaceLocked())
+      return FAILED(device_->GetDeviceRemovedReason()) ? DXGI_ERROR_DEVICE_REMOVED : E_FAIL;
+
     auto pool = WMT::MakeAutoreleasePool();
-    auto cmdbuf = queue_.commandBuffer();
+    WMT::CommandBuffer cmdbuf;
+    if (FAILED(NewCommandBuffer(cmdbuf)))
+      return DXGI_ERROR_DEVICE_REMOVED;
+    if (sparse_event_value_)
+      cmdbuf.encodeWaitForEvent(sparse_event_, sparse_event_value_);
 
     auto g = reinterpret_cast<MTLD3D12Resource *>(backbuffer);
     auto &view = g->texture->view(g->texture->fullView);
@@ -312,14 +2168,21 @@ public:
         [&](auto encoder) { encoder.updateFence(fence_, WMTRenderStageFragment); }
     );
 
-    cmdbuf.presentDrawable(drawable);
-    cmdbuf.commit();
-
-    {
-      // temporary workaround
-      cmdbuf.waitUntilCompleted();
-      ReleaseSemaphore(hLantecyWaitable, 1, nullptr);
+    if (trace_present_count++ < 32) {
+      auto drawable_texture = drawable.texture();
+      DEBUG("D3D12 queue Present: backbuffer=", view.texture.handle, " drawable=", drawable.handle,
+            " drawable_texture=", drawable_texture.handle);
     }
+
+    if (after > 0)
+      cmdbuf.presentDrawableAfterMinimumDuration(drawable, after);
+    else
+      cmdbuf.presentDrawable(drawable);
+    Submission submission;
+    submission.command_buffer = cmdbuf;
+    submission.latency_waitable = hLantecyWaitable;
+    if (!CommitSubmissionLocked(submission))
+      return FAILED(device_->GetDeviceRemovedReason()) ? DXGI_ERROR_DEVICE_REMOVED : E_FAIL;
 
     return S_OK;
   }
@@ -327,11 +2190,15 @@ public:
 
 HRESULT
 CreateCommandQueue(MTLD3D12Device *pDevice, const D3D12_COMMAND_QUEUE_DESC *pDesc, REFIID riid, void **ppCommandQueue) {
-  auto command_queue = Com(new MTLD3D12CommandQueueImpl(pDevice));
-  HRESULT hr = command_queue->Initialize(pDesc);
-  if (FAILED(hr))
-    return hr;
-  return command_queue->QueryInterface(riid, ppCommandQueue);
+  try {
+    auto command_queue = Com(new MTLD3D12CommandQueueImpl(pDevice));
+    HRESULT hr = command_queue->Initialize(pDesc);
+    if (FAILED(hr))
+      return hr;
+    return command_queue->QueryInterface(riid, ppCommandQueue);
+  } catch (const std::bad_alloc &) {
+    return E_OUTOFMEMORY;
+  }
 };
 
 } // namespace dxmt

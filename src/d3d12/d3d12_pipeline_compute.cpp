@@ -20,15 +20,31 @@
 #include "com/com_pointer.hpp"
 #include "d3d12_device.hpp"
 #include "d3d12_pageable.hpp"
+#include "d3d12_shader_converter.hpp"
 #include "log/log.hpp"
 #include "airconv_public.h"
 
+#include <utility>
+
 namespace dxmt {
+
+namespace {
+bool
+IsMSCTypedBufferSidecarEnabled() {
+  char enabled[2] = {};
+  if (GetEnvironmentVariableA("DXMT_MSC_TYPED_BUFFER_EXECUTION", enabled, sizeof(enabled)) == 1 && enabled[0] == '1')
+    return true;
+  // Preserve the existing isolated regression switch while the production gate
+  // remains opt-in and off by default.
+  return GetEnvironmentVariableA("DXMT_TEST_MSC_TYPED_BUFFER_PATCH", enabled, sizeof(enabled)) == 1 &&
+         enabled[0] == '1';
+}
+} // namespace
 
 class MTLD3D12ComputePipelineStateImpl : public MTLD3D12Pageable<MTLD3D12ComputePipelineState> {
 
-  sm50_shader_t shader_cs;
-  MTL_SHADER_REFLECTION ref_cs;
+  D3D12AirconvShader shader_cs;
+  MTL_SHADER_REFLECTION ref_cs = {};
 
 public:
   MTLD3D12ComputePipelineStateImpl(MTLD3D12Device *pDevice) : MTLD3D12Pageable<MTLD3D12ComputePipelineState>(pDevice) {
@@ -37,67 +53,231 @@ public:
 
   HRESULT
   Initialize(const D3D12_COMPUTE_PIPELINE_STATE_DESC *pDesc) {
+    auto metal = device_->GetMTLDevice();
+    WMT::Reference<WMT::Error> err;
 
-    sm50_error_t sm50_err;
+    auto create_compute_pso = [&](const WMT::Function &function) -> HRESULT {
+      WMTComputePipelineInfo info;
+      WMT::InitializeComputePipelineInfo(info);
+      info.compute_function = function;
+      info.support_indirect_command_buffers = true;
 
-    SM50_SHADER_ROOT_SIGNATURE_DATA rootsig;
-    rootsig.type = SM50_SHADER_ROOT_SIGNATURE;
+      pso = metal.newComputePipelineState(info, err);
+      if (!pso) {
+        ERR("Failed to create compute PSO: ", err ? err.description().getUTF8String() : "unknown error");
+        return E_FAIL;
+      }
+      return S_OK;
+    };
+
+    const auto classification = ClassifyD3D12Shader(pDesc->CS);
+    if (FAILED(classification.validation_hr)) {
+      ERR("Invalid D3D12 shader container, HRESULT=", classification.validation_hr);
+      return classification.validation_hr;
+    }
+    const HRESULT stage_hr = ValidateD3D12ShaderKind(classification, D3D12ShaderKind::Compute);
+    if (FAILED(stage_hr)) {
+      ERR("CreateComputePipelineState: CS bytecode has an invalid or mismatched shader kind");
+      return stage_hr;
+    }
+
+    auto shader_backend = classification.backend;
+
+    if (shader_backend == D3D12ShaderBackend::MetalShaderConverter) {
+      if (!device_->GetMSCCapabilities().CoreShaderPathUsable())
+        return E_FAIL;
+      msc_uses_texture_load = classification.uses_texture_load;
+      D3D12ConvertedShader converted;
+      const void *root_signature = nullptr;
+      size_t root_signature_size = 0;
+      if (pDesc->pRootSignature) {
+        auto rootsig = static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature);
+        HRESULT hr = rootsig->InitializeMSCLayout();
+        if (FAILED(hr)) {
+          ERR("Failed to initialize MSC root signature layout");
+          return hr;
+        }
+        root_signature_size = rootsig->GetBlob(&root_signature);
+      } else {
+        HRESULT hr = GetD3D12EmbeddedRootSignature(
+            pDesc->CS, classification, &root_signature, &root_signature_size
+        );
+        if (FAILED(hr))
+          return hr;
+      }
+
+      HRESULT hr = ConvertD3D12ComputeShader(
+          classification, pDesc->CS, converted, root_signature, root_signature_size,
+          &device_->GetMSCCapabilities()
+      );
+      if (FAILED(hr))
+        return hr;
+
+      if (IsMSCTypedBufferSidecarEnabled()) {
+        auto *root = static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature);
+        const HRESULT layout_hr = root ? root->InitializeMSCCombinedSidecarLayout() : E_INVALIDARG;
+        if (!root || FAILED(layout_hr) || root->MSCArgumentBufferSize > UINT32_MAX || !root->MSCCombinedSidecarLayout) {
+          ERR("MSC typed-buffer test layout rejected: hr=", std::hex, layout_hr, std::dec);
+          return E_NOTIMPL;
+        }
+        try {
+          std::vector<dxmt_msc_typed_buffer_table> tables;
+          for (const auto &table : root->MSCCombinedSidecarLayout->resources)
+            tables.push_back({table.resource_table_offset, table.sidecar_offset});
+          dxmt_msc_patch_typed_buffer_params params{};
+          params.metallib = converted.metallib.data();
+          params.metallib_size = converted.metallib.size();
+          params.tables = tables.data();
+          params.table_count = static_cast<uint32_t>(tables.size());
+          params.original_root_size = static_cast<uint32_t>(root->MSCArgumentBufferSize);
+          params.extended_root_size = root->MSCCombinedSidecarLayout->buffer_size;
+          const auto patch_result = DXMTMSCPatchTypedBuffer(&params);
+          if (patch_result != DXMT_MSC_SUCCESS ||
+              params.patch_status != DXMT_MSC_TYPED_BUFFER_PATCHED || !params.output_size) {
+            ERR("MSC typed-buffer test patch rejected: result=", patch_result, " status=", params.patch_status,
+                " tables=", params.table_count, " root=", params.original_root_size,
+                " extended=", params.extended_root_size);
+            return E_NOTIMPL;
+          }
+          std::vector<uint8_t> patched(params.output_size);
+          params.output = patched.data();
+          params.output_capacity = patched.size();
+          if (DXMTMSCPatchTypedBuffer(&params) != DXMT_MSC_SUCCESS ||
+              params.patch_status != DXMT_MSC_TYPED_BUFFER_PATCHED || params.output_size != patched.size())
+            return E_FAIL;
+          converted.metallib = std::move(patched);
+          const auto *root_bytes = static_cast<const uint8_t *>(root_signature);
+          msc_test_lod_root_signature.assign(root_bytes, root_bytes + root_signature_size);
+          msc_typed_buffer_sidecar = true;
+        } catch (const std::bad_alloc &) {
+          return E_OUTOFMEMORY;
+        }
+      }
+      // Test-only end-to-end validation. Patch the private conversion result
+      // after cache lookup so the shared conversion cache remains unmodified.
+      char patch_test[2] = {};
+      if (GetEnvironmentVariableA("DXMT_TEST_MSC_LOD_PATCH", patch_test, sizeof(patch_test)) == 1 &&
+          patch_test[0] == '1') {
+        if (msc_typed_buffer_sidecar)
+          return E_NOTIMPL;
+        auto *root = static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature);
+        if (!root || FAILED(root->InitializeMSCLodSidecarLayout()) || root->MSCArgumentBufferSize > UINT32_MAX)
+          return E_NOTIMPL;
+        try {
+          std::vector<dxmt_msc_lod_table> tables;
+          for (unsigned i = 0; i < root->MSCLODSidecarTableCount; ++i) {
+            const auto &table = root->MSCLODSidecarTables[i];
+            tables.push_back({table.sampler_table_offset, table.sidecar_offset});
+          }
+          dxmt_msc_patch_lod_params params = {};
+          params.metallib = converted.metallib.data();
+          params.metallib_size = converted.metallib.size();
+          params.tables = tables.data();
+          params.table_count = static_cast<uint32_t>(tables.size());
+          params.root_argument_index = UINT32_MAX;
+          params.original_root_size = static_cast<uint32_t>(root->MSCArgumentBufferSize);
+          if (DXMTMSCPatchSamplerLOD(&params) != DXMT_MSC_SUCCESS ||
+              params.patch_status != DXMT_MSC_LOD_PATCHED || !params.output_size)
+            return E_NOTIMPL;
+          std::vector<uint8_t> patched(params.output_size);
+          params.output = patched.data();
+          params.output_capacity = patched.size();
+          if (DXMTMSCPatchSamplerLOD(&params) != DXMT_MSC_SUCCESS ||
+              params.patch_status != DXMT_MSC_LOD_PATCHED || params.output_size != patched.size())
+            return E_FAIL;
+          converted.metallib = std::move(patched);
+          const auto *root_bytes = static_cast<const uint8_t *>(root_signature);
+          msc_test_lod_root_signature.assign(root_bytes, root_bytes + root_signature_size);
+          msc_test_lod_patch = true;
+        } catch (const std::bad_alloc &) {
+          return E_OUTOFMEMORY;
+        }
+      }
+
+      threadgroup_size = {
+          converted.threadgroup_size[0], converted.threadgroup_size[1], converted.threadgroup_size[2]
+      };
+
+      auto cs_lib = metal.newLibrary(converted.metallib.data(), converted.metallib.size(), err);
+      if (!cs_lib) {
+        ERR("Failed to load MSC metallib: ", err ? err.description().getUTF8String() : "unknown error");
+        return E_FAIL;
+      }
+
+      auto cs_func = cs_lib.newFunction(converted.entry_point.c_str());
+      if (!cs_func) {
+        ERR("Failed to find MSC compute entry point: ", converted.entry_point);
+        return E_FAIL;
+      }
+
+      hr = create_compute_pso(cs_func);
+      if (FAILED(hr))
+        return hr;
+      this->shader_backend = D3D12ShaderBackend::MetalShaderConverter;
+      return S_OK;
+    }
+
+    D3D12AirconvError sm50_err;
+
+    SM50_SHADER_ROOT_SIGNATURE_DATA rootsig = {};
+    const void *explicit_root_signature = nullptr;
+    size_t explicit_root_signature_size = 0;
     if (pDesc->pRootSignature) {
-      rootsig.bytecode_length = static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature)->GetBlob(&rootsig.bytecode);
-    } else {
-      rootsig.bytecode = pDesc->CS.pShaderBytecode;
-      rootsig.bytecode_length = pDesc->CS.BytecodeLength;
+      explicit_root_signature_size =
+          static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature)->GetBlob(&explicit_root_signature);
+    }
+    HRESULT hr = InitializeD3D12AirconvRootSignature(
+        pDesc->CS, classification, explicit_root_signature, explicit_root_signature_size, rootsig
+    );
+    if (FAILED(hr)) {
+      ERR("Failed to initialize AIRCONV compute root signature, HRESULT=", hr);
+      return hr;
     }
     rootsig.next = nullptr;
 
-    SM50_SHADER_COMMON_DATA common;
+    SM50_SHADER_COMMON_DATA common = {};
     common.flags = {};
     common.type = SM50_SHADER_COMMON;
     common.metal_version = SM50_SHADER_METAL_310;
     common.next = &rootsig;
 
-    if (SM50Initialize(pDesc->CS.pShaderBytecode, pDesc->CS.BytecodeLength, &shader_cs, &ref_cs, &sm50_err)) {
-      ERR("Failed to parse cs shader");
-      return E_FAIL;
-    }
+    hr = shader_cs.Initialize(pDesc->CS, classification, D3D12ShaderKind::Compute, &ref_cs, "cs");
+    if (FAILED(hr))
+      return hr;
 
     threadgroup_size = {ref_cs.ThreadgroupSize[0], ref_cs.ThreadgroupSize[1], ref_cs.ThreadgroupSize[2]};
 
-    sm50_bitcode_t cs_bitcode;
+    D3D12AirconvBitcode cs_bitcode;
 
-    if (SM50Compile(shader_cs, (SM50_SHADER_COMPILATION_ARGUMENT_DATA *)&common, "cs_main", &cs_bitcode, &sm50_err)) {
-      ERR("Failed to compile cs shader");
+    if (SM50Compile(
+            shader_cs.get(), reinterpret_cast<SM50_SHADER_COMPILATION_ARGUMENT_DATA *>(&common), "cs_main",
+            cs_bitcode.out(), sm50_err.out()
+        )) {
+      const auto message = sm50_err.message();
+      ERR("Failed to compile cs shader: ", message.empty() ? "unknown error" : message);
       return E_FAIL;
     }
 
     SM50_COMPILED_BITCODE cs_bitcode_compiled;
 
-    SM50GetCompiledBitcode(cs_bitcode, &cs_bitcode_compiled);
+    SM50GetCompiledBitcode(cs_bitcode.get(), &cs_bitcode_compiled);
 
     auto cs_data = WMT::MakeDispatchData(cs_bitcode_compiled.Data, cs_bitcode_compiled.Size);
 
-    auto metal = device_->GetMTLDevice();
-
-    WMT::Reference<WMT::Error> err;
-
     auto cs_lib = metal.newLibrary(cs_data, err);
 
-    auto cs_func = cs_lib.newFunction("cs_main");
-
-    // PSO
-    {
-      WMTComputePipelineInfo info;
-      WMT::InitializeComputePipelineInfo(info);
-      info.compute_function = cs_func;
-      info.support_indirect_command_buffers = true;
-
-      pso = metal.newComputePipelineState(info, err);
-      if (!pso) {
-        ERR("Failed to create compute PSO: ", err.description().getUTF8String());
-        return E_FAIL;
-      }
+    auto cs_func = cs_lib ? cs_lib.newFunction("cs_main") : WMT::Reference<WMT::Function>();
+    if (!cs_lib || !cs_func) {
+      ERR("Failed to create airconv compute function");
+      return E_FAIL;
     }
 
+    hr = create_compute_pso(cs_func);
+    if (FAILED(hr))
+      return hr;
+    BuildDescriptorFootprint(static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature), {
+        {shader_cs.get(), D3D12_SHADER_VISIBILITY_ALL, static_cast<WMTRenderStages>(0)}});
+    this->shader_backend = D3D12ShaderBackend::Airconv;
     return S_OK;
   }
 
@@ -124,8 +304,13 @@ public:
 
   virtual HRESULT STDMETHODCALLTYPE
   GetCachedBlob(ID3DBlob **blob) {
-    IMPLEMENT_ME
-    return E_NOTIMPL;
+    if (msc_test_lod_patch || msc_typed_buffer_sidecar) {
+      if (!blob)
+        return E_POINTER;
+      *blob = nullptr;
+      return E_NOTIMPL;
+    }
+    return CreateD3D12CachedBlob(pipeline_cache, blob);
   }
 };
 
@@ -133,10 +318,22 @@ HRESULT
 CreateComputePipelineState(
     MTLD3D12Device *pDevice, const D3D12_COMPUTE_PIPELINE_STATE_DESC *pDesc, REFIID riid, void **ppPipelineState
 ) {
-  auto pso = Com(new MTLD3D12ComputePipelineStateImpl(pDevice));
-  HRESULT hr = pso->Initialize(pDesc);
+  if (!pDevice || !pDesc)
+    return E_INVALIDARG;
+  if (!ppPipelineState)
+    return E_POINTER;
+  InitReturnPtr(ppPipelineState);
+
+  D3D12PipelineCacheData pipeline_cache;
+  HRESULT hr = BuildD3D12PipelineCacheData(pDevice, *pDesc, pipeline_cache);
   if (FAILED(hr))
     return hr;
+
+  auto pso = Com(new MTLD3D12ComputePipelineStateImpl(pDevice));
+  hr = pso->Initialize(pDesc);
+  if (FAILED(hr))
+    return hr;
+  pso->pipeline_cache = std::move(pipeline_cache);
   return pso->QueryInterface(riid, ppPipelineState);
 };
 

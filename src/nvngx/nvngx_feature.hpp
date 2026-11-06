@@ -5,7 +5,7 @@
 namespace dxmt {
 
 struct CommonFeature {
-  unsigned int handle;
+  NVSDK_NGX_Handle handle;
   NVNGX_FEATURE feature;
 };
 

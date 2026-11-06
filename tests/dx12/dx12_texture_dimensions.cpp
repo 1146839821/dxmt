@@ -1,0 +1,918 @@
+#define WIN32_LEAN_AND_MEAN
+
+#include <windows.h>
+#include <d3d12.h>
+
+#include <cstdint>
+#include <cstring>
+#include <fstream>
+#include <iostream>
+#include <vector>
+
+namespace {
+
+template <typename T> struct Owned {
+  T *ptr = nullptr;
+  ~Owned() {
+    if (ptr)
+      ptr->Release();
+  }
+  Owned() = default;
+  Owned(const Owned &) = delete;
+  Owned &operator=(const Owned &) = delete;
+};
+
+bool CheckHR(const char *name, HRESULT hr) {
+  if (FAILED(hr)) {
+    std::cerr << name << " failed: 0x" << std::hex << static_cast<unsigned long>(hr) << std::dec << "\n";
+    return false;
+  }
+  return true;
+}
+
+bool ReadFile(const char *path, std::vector<char> &data) {
+  std::ifstream file(path, std::ios::binary | std::ios::ate);
+  if (!file)
+    return false;
+  const auto size = file.tellg();
+  if (size <= 0)
+    return false;
+  file.seekg(0);
+  data.resize(static_cast<size_t>(size));
+  return file.read(data.data(), data.size()).good();
+}
+
+bool WaitForQueue(ID3D12CommandQueue *queue, ID3D12Device *device, ID3D12CommandList *list) {
+  ID3D12Fence *fence = nullptr;
+  HANDLE event = nullptr;
+  bool result = false;
+  ID3D12CommandList *lists[] = {list};
+  queue->ExecuteCommandLists(1, lists);
+  if (!CheckHR("CreateFence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence))) ||
+      !CheckHR("Signal", queue->Signal(fence, 1)))
+    goto cleanup;
+  event = CreateEventA(nullptr, FALSE, FALSE, nullptr);
+  if (!event || !CheckHR("SetEventOnCompletion", fence->SetEventOnCompletion(1, event)))
+    goto cleanup;
+  if (WaitForSingleObject(event, 30000) != WAIT_OBJECT_0)
+    goto cleanup;
+  result = CheckHR("GetDeviceRemovedReason", device->GetDeviceRemovedReason());
+
+cleanup:
+  if (event)
+    CloseHandle(event);
+  if (fence)
+    fence->Release();
+  return result;
+}
+
+D3D12_HEAP_PROPERTIES DefaultHeap() {
+  D3D12_HEAP_PROPERTIES properties = {};
+  properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+  properties.CreationNodeMask = 1;
+  properties.VisibleNodeMask = 1;
+  return properties;
+}
+
+D3D12_HEAP_PROPERTIES UploadHeap() {
+  D3D12_HEAP_PROPERTIES properties = {};
+  properties.Type = D3D12_HEAP_TYPE_UPLOAD;
+  properties.CreationNodeMask = 1;
+  properties.VisibleNodeMask = 1;
+  return properties;
+}
+
+D3D12_HEAP_PROPERTIES ReadbackHeap() {
+  D3D12_HEAP_PROPERTIES properties = {};
+  properties.Type = D3D12_HEAP_TYPE_READBACK;
+  properties.CreationNodeMask = 1;
+  properties.VisibleNodeMask = 1;
+  return properties;
+}
+
+D3D12_RESOURCE_DESC BufferDesc(UINT64 width, D3D12_RESOURCE_FLAGS flags) {
+  D3D12_RESOURCE_DESC desc = {};
+  desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  desc.Width = width;
+  desc.Height = 1;
+  desc.DepthOrArraySize = 1;
+  desc.MipLevels = 1;
+  desc.SampleDesc.Count = 1;
+  desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  desc.Flags = flags;
+  return desc;
+}
+
+bool CreateUploadedTexture(
+    ID3D12Device *device, const D3D12_RESOURCE_DESC &desc, UINT value, Owned<ID3D12Resource> &texture,
+    Owned<ID3D12Resource> &upload, std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> &footprints
+) {
+  const UINT subresource_count =
+      desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D
+          ? desc.MipLevels
+          : static_cast<UINT>(desc.DepthOrArraySize) * desc.MipLevels;
+  std::vector<UINT> row_counts(subresource_count);
+  std::vector<UINT64> row_sizes(subresource_count);
+  UINT64 total_size = 0;
+  footprints.resize(subresource_count);
+  device->GetCopyableFootprints(
+      &desc, 0, subresource_count, 0, footprints.data(), row_counts.data(), row_sizes.data(), &total_size
+  );
+
+  const D3D12_HEAP_PROPERTIES default_heap = DefaultHeap();
+  const D3D12_HEAP_PROPERTIES upload_heap = UploadHeap();
+  if (!CheckHR("CreateTexture", device->CreateCommittedResource(
+                                    &default_heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                    D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&texture.ptr))))
+    return false;
+
+  const D3D12_RESOURCE_DESC upload_desc = BufferDesc(total_size ? total_size : 256, D3D12_RESOURCE_FLAG_NONE);
+  if (!CheckHR("CreateTextureUpload", device->CreateCommittedResource(
+                                         &upload_heap, D3D12_HEAP_FLAG_NONE, &upload_desc,
+                                         D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                         IID_PPV_ARGS(&upload.ptr))))
+    return false;
+
+  void *mapped = nullptr;
+  if (!CheckHR("MapTextureUpload", upload.ptr->Map(0, nullptr, &mapped)))
+    return false;
+  std::memset(mapped, 0, static_cast<size_t>(upload_desc.Width));
+  const UINT pixel = value | 0xff000000u;
+  const bool bc1 = desc.Format == DXGI_FORMAT_BC1_UNORM ||
+                   desc.Format == DXGI_FORMAT_BC1_UNORM_SRGB ||
+                   desc.Format == DXGI_FORMAT_BC1_TYPELESS;
+  const bool bc3 = desc.Format == DXGI_FORMAT_BC3_UNORM ||
+                   desc.Format == DXGI_FORMAT_BC3_UNORM_SRGB ||
+                   desc.Format == DXGI_FORMAT_BC3_TYPELESS;
+  for (UINT subresource = 0; subresource < subresource_count; subresource++) {
+    const auto &footprint = footprints[subresource].Footprint;
+    BYTE *destination = static_cast<BYTE *>(mapped) + footprints[subresource].Offset;
+    for (UINT depth = 0; depth < footprint.Depth; depth++) {
+      BYTE *slice = destination + static_cast<size_t>(depth) * footprint.RowPitch * row_counts[subresource];
+      for (UINT row = 0; row < row_counts[subresource]; row++)
+        if (bc1 || bc3) {
+          // Uniform blocks with distinct endpoints across blocks, mips and
+          // layers. The existing fixture value is 11 * (descriptor slot + 1).
+          // BC1 indices select RGB565 endpoint0; BC3 also selects alpha
+          // endpoint0.
+          const UINT block_bytes = bc3 ? 16 : 8;
+          for (UINT column = 0; column < (footprint.Width + 3) / 4; column++) {
+            BYTE *block = slice +
+                          static_cast<size_t>(row) * footprint.RowPitch +
+                          column * block_bytes;
+            const UINT layer = subresource / desc.MipLevels;
+            const UINT mip = subresource % desc.MipLevels;
+            const UINT red = 4 + (value / 11 - 1 + layer + depth + 3 * mip +
+                                  5 * column + 7 * row) %
+                                     24;
+            const uint16_t endpoint =
+                static_cast<uint16_t>((red << 11) | (17 << 5) | 23);
+            if (bc3) {
+              block[0] = static_cast<BYTE>(96 + 7 * (layer + depth) + mip);
+              block[1] = 17;
+              block += 8;
+            }
+            std::memcpy(block, &endpoint, sizeof(endpoint));
+          }
+        } else if (desc.Format == DXGI_FORMAT_R32G32B32_FLOAT ||
+                   desc.Format == DXGI_FORMAT_R32G32B32_TYPELESS) {
+          const float rgb[] = {value / 255.0f, 0.25f, 0.75f};
+          std::memcpy(slice + static_cast<size_t>(row) * footprint.RowPitch,
+                      rgb, sizeof(rgb));
+        } else {
+          std::memcpy(slice + static_cast<size_t>(row) * footprint.RowPitch,
+                      &pixel, sizeof(pixel));
+        }
+    }
+  }
+  upload.ptr->Unmap(0, nullptr);
+  return true;
+}
+
+void SetSrvDesc(D3D12_SHADER_RESOURCE_VIEW_DESC &desc, UINT index) {
+  desc = {};
+  desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+  switch (index) {
+  case 0:
+    desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE1D;
+    desc.Texture1D.MipLevels = 1;
+    break;
+  case 1:
+    desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE1DARRAY;
+    desc.Texture1DArray.MipLevels = 1;
+    desc.Texture1DArray.ArraySize = 2;
+    break;
+  case 2:
+    desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    desc.Texture2D.MipLevels = 1;
+    break;
+  case 3:
+    desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+    desc.Texture2DArray.MipLevels = 1;
+    desc.Texture2DArray.ArraySize = 2;
+    break;
+  case 4:
+    desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+    desc.TextureCube.MipLevels = 1;
+    break;
+  case 5:
+    desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBEARRAY;
+    desc.TextureCubeArray.MipLevels = 1;
+    desc.TextureCubeArray.NumCubes = 2;
+    break;
+  case 6:
+    desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DMS;
+    break;
+  case 7:
+    desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DMSARRAY;
+    desc.Texture2DMSArray.ArraySize = 2;
+    break;
+  default:
+    desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
+    desc.Texture3D.MipLevels = 1;
+    break;
+  }
+}
+
+} // namespace
+
+int main(int argc, char **argv) {
+  const bool pixel_read =
+      argc > 2 && !std::strcmp(argv[argc - 1], "--pixel-read");
+  if (pixel_read)
+    --argc;
+  UINT sample_count = 4;
+  const bool explicit_samples =
+      argc > 2 && !std::strncmp(argv[argc - 1], "--samples=", 10);
+  if (explicit_samples) {
+    const char *value = argv[argc - 1] + 10;
+    if (!std::strcmp(value, "2"))
+      sample_count = 2;
+    else if (!std::strcmp(value, "4"))
+      sample_count = 4;
+    else if (!std::strcmp(value, "8"))
+      sample_count = 8;
+    else {
+      std::cerr << "samples must be 2, 4 or 8\n";
+      return 2;
+    }
+  }
+  if (explicit_samples)
+    --argc;
+  const bool stencil_ms = (argc == 3 || argc == 5 || argc == 6) &&
+                          (!std::strcmp(argv[2], "--stencil-ms") ||
+                           !std::strcmp(argv[2], "--stencil-ms-reversed"));
+  const bool depth_ms = (argc == 3 || argc == 5 || argc == 6) &&
+                        (!std::strcmp(argv[2], "--depth-ms") ||
+                         !std::strcmp(argv[2], "--depth-ms-reversed"));
+  const bool reversed = (argc == 3 || argc == 5 || argc == 6) &&
+                        (!std::strcmp(argv[2], "--depth-ms-reversed") ||
+                         !std::strcmp(argv[2], "--stencil-ms-reversed"));
+  const bool depth_stencil_ms = stencil_ms || depth_ms;
+  const bool distinct_ms = depth_stencil_ms && argc >= 5;
+  const bool mask_all = argc == 6 && !std::strcmp(argv[5], "--mask-all");
+  const bool mask_zero = argc == 6 && !std::strcmp(argv[5], "--mask-zero");
+  const bool rgb96 = argc == 3 && (!std::strcmp(argv[2], "--rgb96") ||
+                                   !std::strcmp(argv[2], "--rgb96-typeless"));
+  const bool bc1 = argc == 3 && (!std::strcmp(argv[2], "--bc1") ||
+                                 !std::strcmp(argv[2], "--bc1-srgb") ||
+                                 !std::strcmp(argv[2], "--bc1-srgb-typeless") ||
+                                 !std::strcmp(argv[2], "--bc1-typeless"));
+  const bool bc3 = argc == 3 && (!std::strcmp(argv[2], "--bc3") ||
+                                 !std::strcmp(argv[2], "--bc3-srgb") ||
+                                 !std::strcmp(argv[2], "--bc3-srgb-typeless") ||
+                                 !std::strcmp(argv[2], "--bc3-typeless"));
+  const bool bc = bc1 || bc3;
+  const bool srgb = bc && (!std::strcmp(argv[2], "--bc1-srgb") ||
+                           !std::strcmp(argv[2], "--bc3-srgb") ||
+                           !std::strcmp(argv[2], "--bc1-srgb-typeless") ||
+                           !std::strcmp(argv[2], "--bc3-srgb-typeless"));
+  const bool typeless =
+      argc == 3 && (!std::strcmp(argv[2], "--typeless") ||
+                    !std::strcmp(argv[2], "--rgb96-typeless") ||
+                    !std::strcmp(argv[2], "--bc1-typeless") ||
+                    !std::strcmp(argv[2], "--bc3-typeless") ||
+                    !std::strcmp(argv[2], "--bc1-srgb-typeless") ||
+                    !std::strcmp(argv[2], "--bc3-srgb-typeless"));
+  if (((explicit_samples || pixel_read) && !distinct_ms) ||
+      (argc == 6 && !mask_all && !mask_zero) ||
+      (argc != 2 && !typeless && !rgb96 && !depth_stencil_ms && !bc)) {
+    std::cerr
+        << "usage: dx12_texture_dimensions <shader.cso> "
+           "[--typeless|--rgb96|--rgb96-typeless|--stencil-ms|"
+           "--stencil-ms-reversed|--depth-ms|--depth-ms-reversed|"
+           "--bc1|--bc1-srgb|--bc1-typeless|--bc1-srgb-typeless|"
+           "--bc3|--bc3-srgb|--bc3-typeless|--bc3-srgb-typeless]\n"
+           "Depth/stencil modes optionally take <write.vs.cso> "
+           "<write.ps.cso> [--mask-all|--mask-zero] for distinct "
+           "sample/layer values, then [--samples=2|4|8] (default 4)\n"
+           "and [--pixel-read] for a pixel reader. Match the reader fixture\n"
+           "to the stage, mask and sample count.\n";
+    return 2;
+  }
+
+  std::vector<char> shader;
+  if (!ReadFile(argv[1], shader)) {
+    std::cerr << "failed to read shader fixture\n";
+    return 3;
+  }
+
+  std::vector<char> vertex_shader, pixel_shader;
+  if (distinct_ms &&
+      (!ReadFile(argv[3], vertex_shader) || !ReadFile(argv[4], pixel_shader))) {
+    std::cerr << "failed to read MS write shader fixtures\n";
+    return 3;
+  }
+
+  Owned<ID3D12Device> device;
+  Owned<ID3D12CommandQueue> queue;
+  Owned<ID3D12CommandAllocator> allocator;
+  Owned<ID3D12RootSignature> root_signature;
+  Owned<ID3DBlob> root_blob;
+  Owned<ID3DBlob> root_error;
+  Owned<ID3D12DescriptorHeap> resource_heap;
+  Owned<ID3D12DescriptorHeap> sampler_heap;
+  Owned<ID3D12DescriptorHeap> attachment_heap;
+  Owned<ID3D12Resource> textures[9];
+  Owned<ID3D12Resource> uploads[9];
+  Owned<ID3D12Resource> output;
+  Owned<ID3D12Resource> output_seed;
+  Owned<ID3D12Resource> pixel_target;
+  Owned<ID3D12DescriptorHeap> pixel_heap;
+  Owned<ID3D12Resource> readback;
+  Owned<ID3D12PipelineState> pso;
+  Owned<ID3D12PipelineState> sample_psos[2][8];
+  Owned<ID3D12GraphicsCommandList> list;
+  std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> footprints[9];
+  D3D12_RESOURCE_DESC texture_descs[9] = {};
+  D3D12_COMMAND_QUEUE_DESC queue_desc = {};
+  D3D12_DESCRIPTOR_RANGE ranges[3] = {};
+  D3D12_ROOT_PARAMETER root_parameters[4] = {};
+  D3D12_ROOT_SIGNATURE_DESC root_desc = {};
+  D3D12_DESCRIPTOR_HEAP_DESC resource_heap_desc = {};
+  D3D12_DESCRIPTOR_HEAP_DESC sampler_heap_desc = {};
+  D3D12_DESCRIPTOR_HEAP_DESC attachment_heap_desc = {};
+  D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
+  D3D12_UNORDERED_ACCESS_VIEW_DESC uav_desc = {};
+  D3D12_SAMPLER_DESC sampler_desc = {};
+  D3D12_CLEAR_VALUE clear_value = {};
+  D3D12_RESOURCE_BARRIER barrier = {};
+  D3D12_COMPUTE_PIPELINE_STATE_DESC pso_desc = {};
+  D3D12_CPU_DESCRIPTOR_HANDLE resource_cpu = {};
+  D3D12_CPU_DESCRIPTOR_HANDLE attachment_cpu = {};
+  UINT descriptor_increment = 0;
+  UINT attachment_increment = 0;
+  BYTE *mapped = nullptr;
+  bool result = false;
+
+  if (!CheckHR("D3D12CreateDevice", D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device.ptr))))
+    return 1;
+
+  if (depth_stencil_ms) {
+    bool supported_samples = true;
+    for (const auto format :
+         {DXGI_FORMAT_D24_UNORM_S8_UINT, DXGI_FORMAT_D32_FLOAT_S8X24_UINT}) {
+      D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS quality = {
+          format, sample_count, D3D12_MULTISAMPLE_QUALITY_LEVELS_FLAG_NONE, 0};
+      if (!CheckHR("DepthStencilSampleCount",
+                   device.ptr->CheckFeatureSupport(
+                       D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS, &quality,
+                       sizeof(quality))))
+        return 1;
+      std::cout << "MSAA format=" << format << " samples=" << sample_count
+                << " quality_levels=" << quality.NumQualityLevels << "\n";
+      supported_samples &= quality.NumQualityLevels != 0;
+    }
+    if (!supported_samples) {
+      std::cerr << "requested depth/stencil sample count is unsupported\n";
+      return 4;
+    }
+  }
+
+  queue_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+  if (!CheckHR("CreateCommandQueue", device.ptr->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&queue.ptr))) ||
+      !CheckHR("CreateCommandAllocator", device.ptr->CreateCommandAllocator(
+                                                D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator.ptr))))
+    return 1;
+
+  ranges[0] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 9, 0, 0, 0};
+  ranges[1] = {D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, 1, 0, 0, 0};
+  ranges[2] = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, pixel_read ? 1u : 0u, 0, 0};
+  for (UINT i = 0; i < 3; i++) {
+    root_parameters[i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    root_parameters[i].DescriptorTable.NumDescriptorRanges = 1;
+    root_parameters[i].DescriptorTable.pDescriptorRanges = &ranges[i];
+    root_parameters[i].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+  }
+  if (distinct_ms) {
+    root_parameters[3].ParameterType =
+        D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    root_parameters[3].Constants.Num32BitValues = 2;
+    root_parameters[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+  }
+  root_desc.NumParameters = distinct_ms ? 4 : 3;
+  root_desc.pParameters = root_parameters;
+  if (!CheckHR("D3D12SerializeRootSignature", D3D12SerializeRootSignature(
+                                                       &root_desc, D3D_ROOT_SIGNATURE_VERSION_1,
+                                                       &root_blob.ptr, &root_error.ptr)) ||
+      !CheckHR("CreateRootSignature", device.ptr->CreateRootSignature(
+                                          0, root_blob.ptr->GetBufferPointer(), root_blob.ptr->GetBufferSize(),
+                                          IID_PPV_ARGS(&root_signature.ptr))))
+    return 1;
+
+  resource_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+  resource_heap_desc.NumDescriptors = 10;
+  resource_heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+  sampler_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
+  sampler_heap_desc.NumDescriptors = 1;
+  sampler_heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+  attachment_heap_desc.Type = depth_stencil_ms ? D3D12_DESCRIPTOR_HEAP_TYPE_DSV
+                                               : D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+  attachment_heap_desc.NumDescriptors = distinct_ms ? 4 : 2;
+  if (!CheckHR("CreateResourceHeap",
+               device.ptr->CreateDescriptorHeap(
+                   &resource_heap_desc, IID_PPV_ARGS(&resource_heap.ptr))) ||
+      !CheckHR("CreateSamplerHeap",
+               device.ptr->CreateDescriptorHeap(
+                   &sampler_heap_desc, IID_PPV_ARGS(&sampler_heap.ptr))) ||
+      !CheckHR("CreateAttachmentHeap",
+               device.ptr->CreateDescriptorHeap(
+                   &attachment_heap_desc, IID_PPV_ARGS(&attachment_heap.ptr))))
+    return 1;
+  descriptor_increment = device.ptr->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+  attachment_increment =
+      device.ptr->GetDescriptorHandleIncrementSize(attachment_heap_desc.Type);
+
+  const DXGI_FORMAT format =
+      rgb96 ? DXGI_FORMAT_R32G32B32_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM;
+  const D3D12_HEAP_PROPERTIES default_heap = DefaultHeap();
+  const D3D12_HEAP_PROPERTIES readback_heap = ReadbackHeap();
+  for (UINT i = 0; i < 9; i++) {
+    texture_descs[i].Width = 1;
+    texture_descs[i].Height = 1;
+    texture_descs[i].DepthOrArraySize = 1;
+    texture_descs[i].MipLevels = 1;
+    texture_descs[i].Format =
+        rgb96 ? (typeless ? DXGI_FORMAT_R32G32B32_TYPELESS
+                          : DXGI_FORMAT_R32G32B32_FLOAT)
+              : (typeless ? DXGI_FORMAT_R8G8B8A8_TYPELESS : format);
+    texture_descs[i].SampleDesc.Count = 1;
+    texture_descs[i].Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+  }
+  texture_descs[0].Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE1D;
+  texture_descs[1].Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE1D;
+  texture_descs[1].DepthOrArraySize = 2;
+  texture_descs[2].Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+  texture_descs[3].Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+  texture_descs[3].DepthOrArraySize = 2;
+  texture_descs[4].Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+  texture_descs[4].DepthOrArraySize = 6;
+  texture_descs[5].Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+  texture_descs[5].DepthOrArraySize = 12;
+  texture_descs[6].Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+  texture_descs[6].SampleDesc.Count = sample_count;
+  texture_descs[6].Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+  texture_descs[7].Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+  texture_descs[7].DepthOrArraySize = 2;
+  texture_descs[7].SampleDesc.Count = sample_count;
+  texture_descs[7].Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+  texture_descs[8].Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+  texture_descs[8].DepthOrArraySize = 2;
+
+  const DXGI_FORMAT bc_view =
+      bc3 ? (srgb ? DXGI_FORMAT_BC3_UNORM_SRGB : DXGI_FORMAT_BC3_UNORM)
+          : (srgb ? DXGI_FORMAT_BC1_UNORM_SRGB : DXGI_FORMAT_BC1_UNORM);
+  if (bc) {
+    D3D12_FEATURE_DATA_FORMAT_SUPPORT support = {bc_view};
+    const UINT required =
+        D3D12_FORMAT_SUPPORT1_TEXTURE2D | D3D12_FORMAT_SUPPORT1_TEXTURE3D |
+        D3D12_FORMAT_SUPPORT1_TEXTURECUBE | D3D12_FORMAT_SUPPORT1_MIP |
+        D3D12_FORMAT_SUPPORT1_SHADER_LOAD | D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE;
+    if (!CheckHR("BCFormatSupport",
+                 device.ptr->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT,
+                                                 &support, sizeof(support))) ||
+        (support.Support1 & required) != required) {
+      std::cerr << "BC sampling capabilities missing for format " << bc_view
+                << "\n";
+      return 1;
+    }
+    for (UINT i : {2u, 3u, 4u, 5u, 8u}) {
+      texture_descs[i].Width = texture_descs[i].Height = 8;
+      texture_descs[i].MipLevels = 4;
+      if (i == 8)
+        texture_descs[i].DepthOrArraySize = 4;
+      texture_descs[i].Format =
+          typeless ? (bc3 ? DXGI_FORMAT_BC3_TYPELESS : DXGI_FORMAT_BC1_TYPELESS)
+                   : bc_view;
+    }
+  }
+
+  for (UINT i = 0; i < 9; i++) {
+    if (i == 6 || i == 7) {
+      clear_value = {};
+      clear_value.Format = format;
+      clear_value.Color[3] = 1.0f;
+      if (depth_stencil_ms) {
+        texture_descs[i].Format = (i == 6) != reversed
+                                      ? DXGI_FORMAT_R24G8_TYPELESS
+                                      : DXGI_FORMAT_R32G8X24_TYPELESS;
+        texture_descs[i].Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+        clear_value = {};
+        clear_value.Format = (i == 6) != reversed
+                                 ? DXGI_FORMAT_D24_UNORM_S8_UINT
+                                 : DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
+        clear_value.DepthStencil.Depth = distinct_ms ? 0.0f
+                                         : depth_ms
+                                             ? (i == 6 ? 77.0f : 88.0f) / 255.0f
+                                             : 0.25f;
+      }
+      if (!CheckHR(i == 6 ? "CreateTextureMS" : "CreateTextureMSArray",
+                   device.ptr->CreateCommittedResource(
+                       &default_heap, D3D12_HEAP_FLAG_NONE, &texture_descs[i],
+                       depth_stencil_ms ? D3D12_RESOURCE_STATE_DEPTH_WRITE
+                                        : D3D12_RESOURCE_STATE_RENDER_TARGET,
+                       &clear_value, IID_PPV_ARGS(&textures[i].ptr))))
+        return 1;
+    } else if (!CreateUploadedTexture(device.ptr, texture_descs[i], 11 + i * 11, textures[i], uploads[i], footprints[i])) {
+      return 1;
+    }
+  }
+
+  resource_cpu = resource_heap.ptr->GetCPUDescriptorHandleForHeapStart();
+  for (UINT i = 0; i < 9; i++) {
+    SetSrvDesc(srv_desc, i);
+    if (depth_stencil_ms && (i == 6 || i == 7)) {
+      const bool d24 = (i == 6) != reversed;
+      srv_desc.Format = depth_ms ? (d24 ? DXGI_FORMAT_R24_UNORM_X8_TYPELESS
+                                        : DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS)
+                                 : (d24 ? DXGI_FORMAT_X24_TYPELESS_G8_UINT
+                                        : DXGI_FORMAT_X32_TYPELESS_G8X24_UINT);
+    }
+    if (bc && ((i >= 2 && i <= 5) || i == 8)) {
+      srv_desc.Format = bc_view;
+      if (i == 2)
+        srv_desc.Texture2D.MipLevels = 4;
+      else if (i == 3)
+        srv_desc.Texture2DArray.MipLevels = 4;
+      else if (i == 4)
+        srv_desc.TextureCube.MipLevels = 4;
+      else if (i == 5)
+        srv_desc.TextureCubeArray.MipLevels = 4;
+      else
+        srv_desc.Texture3D.MipLevels = 4;
+    }
+    if (rgb96) {
+      srv_desc.Format = DXGI_FORMAT_R32G32B32_FLOAT;
+      if (i == 2)
+        srv_desc.Shader4ComponentMapping =
+            D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(0, 3, 2, 3);
+    }
+    auto descriptor = resource_cpu;
+    descriptor.ptr += descriptor_increment * i;
+    device.ptr->CreateShaderResourceView(textures[i].ptr, &srv_desc, descriptor);
+  }
+  uav_desc.Format = DXGI_FORMAT_UNKNOWN;
+  uav_desc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+  uav_desc.Buffer.NumElements = 9;
+  uav_desc.Buffer.StructureByteStride = sizeof(UINT);
+  auto output_cpu = resource_cpu;
+  output_cpu.ptr += descriptor_increment * 9;
+  const D3D12_RESOURCE_DESC output_desc = BufferDesc(256, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+  if (!CheckHR("CreateOutput",
+               device.ptr->CreateCommittedResource(
+                   &default_heap, D3D12_HEAP_FLAG_NONE, &output_desc,
+                   pixel_read ? D3D12_RESOURCE_STATE_COPY_DEST
+                              : D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                   nullptr, IID_PPV_ARGS(&output.ptr))))
+    return 1;
+  device.ptr->CreateUnorderedAccessView(output.ptr, nullptr, &uav_desc, output_cpu);
+
+  sampler_desc.Filter = (typeless || bc) ? D3D12_FILTER_MIN_MAG_MIP_LINEAR
+                                         : D3D12_FILTER_MIN_MAG_MIP_POINT;
+  sampler_desc.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+  sampler_desc.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+  sampler_desc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+  sampler_desc.MaxAnisotropy = 1;
+  sampler_desc.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+  sampler_desc.MinLOD = 0;
+  sampler_desc.MaxLOD = D3D12_FLOAT32_MAX;
+  device.ptr->CreateSampler(&sampler_desc, sampler_heap.ptr->GetCPUDescriptorHandleForHeapStart());
+
+  attachment_cpu = attachment_heap.ptr->GetCPUDescriptorHandleForHeapStart();
+  D3D12_RENDER_TARGET_VIEW_DESC rtv_desc = {};
+  rtv_desc.Format = format;
+  rtv_desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DMS;
+  if (!depth_stencil_ms)
+    device.ptr->CreateRenderTargetView(textures[6].ptr, &rtv_desc,
+                                       attachment_cpu);
+  rtv_desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DMSARRAY;
+  rtv_desc.Texture2DMSArray.ArraySize = 2;
+  auto attachment_array = attachment_cpu;
+  attachment_array.ptr += attachment_increment;
+  if (depth_stencil_ms) {
+    D3D12_DEPTH_STENCIL_VIEW_DESC dsv = {};
+    dsv.Format = reversed ? DXGI_FORMAT_D32_FLOAT_S8X24_UINT
+                          : DXGI_FORMAT_D24_UNORM_S8_UINT;
+    dsv.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DMS;
+    device.ptr->CreateDepthStencilView(textures[6].ptr, &dsv, attachment_cpu);
+    dsv.Format = reversed ? DXGI_FORMAT_D24_UNORM_S8_UINT
+                          : DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
+    dsv.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DMSARRAY;
+    dsv.Texture2DMSArray.ArraySize = 2;
+    device.ptr->CreateDepthStencilView(textures[7].ptr, &dsv, attachment_array);
+    if (distinct_ms) {
+      dsv.Texture2DMSArray.ArraySize = 1;
+      for (UINT layer = 0; layer < 2; layer++) {
+        dsv.Texture2DMSArray.FirstArraySlice = layer;
+        auto slice = attachment_cpu;
+        slice.ptr += attachment_increment * (2 + layer);
+        device.ptr->CreateDepthStencilView(textures[7].ptr, &dsv, slice);
+      }
+    }
+  } else {
+    device.ptr->CreateRenderTargetView(textures[7].ptr, &rtv_desc,
+                                       attachment_array);
+  }
+
+  const D3D12_RESOURCE_DESC readback_desc = BufferDesc(256, D3D12_RESOURCE_FLAG_NONE);
+  if (!CheckHR("CreateReadback", device.ptr->CreateCommittedResource(
+                                   &readback_heap, D3D12_HEAP_FLAG_NONE, &readback_desc,
+                                   D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&readback.ptr))))
+    return 1;
+
+  if (distinct_ms) {
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC draw = {};
+    draw.pRootSignature = root_signature.ptr;
+    draw.VS = {vertex_shader.data(), vertex_shader.size()};
+    draw.PS = {pixel_shader.data(), pixel_shader.size()};
+    draw.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    draw.SampleDesc.Count = sample_count;
+    draw.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    draw.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    draw.RasterizerState.DepthClipEnable = TRUE;
+    draw.RasterizerState.MultisampleEnable = TRUE;
+    draw.DepthStencilState.DepthEnable = TRUE;
+    draw.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    draw.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    draw.DepthStencilState.StencilEnable = TRUE;
+    draw.DepthStencilState.StencilReadMask = D3D12_DEFAULT_STENCIL_READ_MASK;
+    draw.DepthStencilState.StencilWriteMask = D3D12_DEFAULT_STENCIL_WRITE_MASK;
+    draw.DepthStencilState.FrontFace = {
+        D3D12_STENCIL_OP_KEEP, D3D12_STENCIL_OP_KEEP, D3D12_STENCIL_OP_REPLACE,
+        D3D12_COMPARISON_FUNC_ALWAYS};
+    draw.DepthStencilState.BackFace = draw.DepthStencilState.FrontFace;
+    for (UINT index = 0; index < 2; index++) {
+      draw.DSVFormat = (index == 0) != reversed
+                           ? DXGI_FORMAT_D24_UNORM_S8_UINT
+                           : DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
+      for (UINT sample = 0; sample < sample_count; sample++) {
+        draw.SampleMask = mask_all ? UINT_MAX : mask_zero ? 0 : 1u << sample;
+        if (!CheckHR("CreateSampleWritePipeline",
+                     device.ptr->CreateGraphicsPipelineState(
+                         &draw, IID_PPV_ARGS(&sample_psos[index][sample].ptr))))
+          return 1;
+      }
+    }
+  }
+
+  if (pixel_read) {
+    auto target_desc = texture_descs[2];
+    target_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    D3D12_DESCRIPTOR_HEAP_DESC heap = {};
+    heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    heap.NumDescriptors = 1;
+    const auto seed_desc = BufferDesc(256, D3D12_RESOURCE_FLAG_NONE);
+    const auto upload_heap = UploadHeap();
+    if (!CheckHR("CreatePixelTarget",
+                 device.ptr->CreateCommittedResource(
+                     &default_heap, D3D12_HEAP_FLAG_NONE, &target_desc,
+                     D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr,
+                     IID_PPV_ARGS(&pixel_target.ptr))) ||
+        !CheckHR("CreatePixelHeap",
+                 device.ptr->CreateDescriptorHeap(
+                     &heap, IID_PPV_ARGS(&pixel_heap.ptr))) ||
+        !CheckHR("CreateOutputSeed",
+                 device.ptr->CreateCommittedResource(
+                     &upload_heap, D3D12_HEAP_FLAG_NONE, &seed_desc,
+                     D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                     IID_PPV_ARGS(&output_seed.ptr))))
+      return 1;
+    void *seed = nullptr;
+    if (!CheckHR("MapOutputSeed", output_seed.ptr->Map(0, nullptr, &seed)))
+      return 1;
+    std::memset(seed, 0, 256);
+    output_seed.ptr->Unmap(0, nullptr);
+    device.ptr->CreateRenderTargetView(
+        pixel_target.ptr, nullptr,
+        pixel_heap.ptr->GetCPUDescriptorHandleForHeapStart());
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC draw = {};
+    draw.pRootSignature = root_signature.ptr;
+    draw.VS = {vertex_shader.data(), vertex_shader.size()};
+    draw.PS = {shader.data(), shader.size()};
+    draw.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    draw.SampleDesc.Count = 1;
+    draw.SampleMask = UINT_MAX;
+    draw.NumRenderTargets = 1;
+    draw.RTVFormats[0] = target_desc.Format;
+    draw.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    draw.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    draw.RasterizerState.DepthClipEnable = TRUE;
+    draw.BlendState.RenderTarget[0].RenderTargetWriteMask =
+        D3D12_COLOR_WRITE_ENABLE_ALL;
+    if (!CheckHR("CreatePixelReadPipeline",
+                 device.ptr->CreateGraphicsPipelineState(
+                     &draw, IID_PPV_ARGS(&pso.ptr))))
+      return 1;
+  } else {
+    pso_desc.pRootSignature = root_signature.ptr;
+    pso_desc.CS.pShaderBytecode = shader.data();
+    pso_desc.CS.BytecodeLength = shader.size();
+    if (!CheckHR("CreateComputePipelineState",
+                 device.ptr->CreateComputePipelineState(
+                     &pso_desc, IID_PPV_ARGS(&pso.ptr))))
+      return 1;
+  }
+  if (!CheckHR("CreateCommandList",
+               device.ptr->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                             allocator.ptr, pso.ptr,
+                                             IID_PPV_ARGS(&list.ptr))))
+    return 1;
+
+  if (pixel_read) {
+    // A missing raster invocation must leave a failing value, never stale
+    // output.
+    list.ptr->CopyBufferRegion(output.ptr, 0, output_seed.ptr, 0, 256);
+    barrier = {};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource = output.ptr;
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    list.ptr->ResourceBarrier(1, &barrier);
+  }
+
+  ID3D12DescriptorHeap *heaps[] = {resource_heap.ptr, sampler_heap.ptr};
+  list.ptr->SetDescriptorHeaps(2, heaps);
+
+  for (UINT i = 0; i < 9; i++) {
+    if (i == 6 || i == 7) {
+      const float clear_color[] = {(i == 6 ? 77.0f : 88.0f) / 255.0f, 0.0f, 0.0f, 1.0f};
+      auto attachment = attachment_cpu;
+      attachment.ptr += attachment_increment * (i - 6);
+      if (depth_stencil_ms)
+        list.ptr->ClearDepthStencilView(
+            attachment, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
+            distinct_ms ? 0.0f
+            : depth_ms  ? clear_color[0]
+                        : 0.25f,
+            distinct_ms ? 0
+            : i == 6    ? 77
+                        : 88,
+            0, nullptr);
+      else
+        list.ptr->ClearRenderTargetView(attachment, clear_color, 0, nullptr);
+      if (distinct_ms) {
+        const D3D12_VIEWPORT viewport = {0, 0, 1, 1, 0, 1};
+        const D3D12_RECT scissor = {0, 0, 1, 1};
+        list.ptr->RSSetViewports(1, &viewport);
+        list.ptr->RSSetScissorRects(1, &scissor);
+        list.ptr->SetGraphicsRootSignature(root_signature.ptr);
+        list.ptr->SetGraphicsRootDescriptorTable(
+            0, resource_heap.ptr->GetGPUDescriptorHandleForHeapStart());
+        list.ptr->SetGraphicsRootDescriptorTable(
+            1, sampler_heap.ptr->GetGPUDescriptorHandleForHeapStart());
+        auto output_table =
+            resource_heap.ptr->GetGPUDescriptorHandleForHeapStart();
+        output_table.ptr += descriptor_increment * 9;
+        list.ptr->SetGraphicsRootDescriptorTable(2, output_table);
+        list.ptr->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        for (UINT layer = 0; layer < (i == 6 ? 1u : 2u); layer++) {
+          auto slice = attachment_cpu;
+          if (i == 7)
+            slice.ptr += attachment_increment * (2 + layer);
+          list.ptr->OMSetRenderTargets(0, nullptr, FALSE, &slice);
+          for (UINT sample = 0; sample < sample_count; sample++) {
+            // Distinct values detect sample-index and array-layer aliasing.
+            const UINT value = (i == 6 ? 77 : 88) + 7 * sample + 31 * layer;
+            const struct {
+              float depth;
+              UINT coverage;
+            } write_value = {value / 255.0f, 1u << sample};
+            static_assert(sizeof(write_value) == 2 * sizeof(UINT));
+            list.ptr->SetPipelineState(sample_psos[i - 6][sample].ptr);
+            list.ptr->SetGraphicsRoot32BitConstants(3, 2, &write_value, 0);
+            list.ptr->OMSetStencilRef(value);
+            list.ptr->DrawInstanced(3, 1, 0, 0);
+          }
+        }
+        list.ptr->OMSetRenderTargets(0, nullptr, FALSE, nullptr);
+      }
+      barrier = {};
+      barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+      barrier.Transition.pResource = textures[i].ptr;
+      barrier.Transition.StateBefore = depth_stencil_ms
+                                           ? D3D12_RESOURCE_STATE_DEPTH_WRITE
+                                           : D3D12_RESOURCE_STATE_RENDER_TARGET;
+      barrier.Transition.StateAfter =
+          pixel_read ? D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE
+                     : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+      barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+      list.ptr->ResourceBarrier(1, &barrier);
+      continue;
+    }
+    const UINT subresource_count =
+        texture_descs[i].Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D
+            ? texture_descs[i].MipLevels
+            : static_cast<UINT>(texture_descs[i].DepthOrArraySize) *
+                  texture_descs[i].MipLevels;
+    for (UINT subresource = 0; subresource < subresource_count; subresource++) {
+      D3D12_TEXTURE_COPY_LOCATION destination = {};
+      destination.pResource = textures[i].ptr;
+      destination.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+      destination.SubresourceIndex = subresource;
+      D3D12_TEXTURE_COPY_LOCATION source = {};
+      source.pResource = uploads[i].ptr;
+      source.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+      source.PlacedFootprint = footprints[i][subresource];
+      list.ptr->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+    }
+    barrier = {};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource = textures[i].ptr;
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+    barrier.Transition.StateAfter =
+        pixel_read ? D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE
+                   : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    list.ptr->ResourceBarrier(1, &barrier);
+  }
+
+  list.ptr->SetPipelineState(pso.ptr);
+  auto output_gpu = resource_heap.ptr->GetGPUDescriptorHandleForHeapStart();
+  output_gpu.ptr += descriptor_increment * 9;
+  if (pixel_read) {
+    const D3D12_VIEWPORT viewport = {0, 0, 1, 1, 0, 1};
+    const D3D12_RECT scissor = {0, 0, 1, 1};
+    const auto target = pixel_heap.ptr->GetCPUDescriptorHandleForHeapStart();
+    list.ptr->RSSetViewports(1, &viewport);
+    list.ptr->RSSetScissorRects(1, &scissor);
+    list.ptr->OMSetRenderTargets(1, &target, FALSE, nullptr);
+    list.ptr->SetGraphicsRootSignature(root_signature.ptr);
+    list.ptr->SetGraphicsRootDescriptorTable(
+        0, resource_heap.ptr->GetGPUDescriptorHandleForHeapStart());
+    list.ptr->SetGraphicsRootDescriptorTable(
+        1, sampler_heap.ptr->GetGPUDescriptorHandleForHeapStart());
+    list.ptr->SetGraphicsRootDescriptorTable(2, output_gpu);
+    list.ptr->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    list.ptr->DrawInstanced(3, 1, 0, 0);
+    list.ptr->OMSetRenderTargets(0, nullptr, FALSE, nullptr);
+  } else {
+    list.ptr->SetComputeRootSignature(root_signature.ptr);
+    list.ptr->SetComputeRootDescriptorTable(
+        0, resource_heap.ptr->GetGPUDescriptorHandleForHeapStart());
+    list.ptr->SetComputeRootDescriptorTable(
+        1, sampler_heap.ptr->GetGPUDescriptorHandleForHeapStart());
+    list.ptr->SetComputeRootDescriptorTable(2, output_gpu);
+    list.ptr->Dispatch(1, 1, 1);
+  }
+  barrier = {};
+  barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+  barrier.Transition.pResource = output.ptr;
+  barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+  barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+  barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+  list.ptr->ResourceBarrier(1, &barrier);
+  list.ptr->CopyBufferRegion(readback.ptr, 0, output.ptr, 0, sizeof(UINT) * 9);
+  if (!CheckHR("Close", list.ptr->Close()) || !WaitForQueue(queue.ptr, device.ptr, list.ptr))
+    return 1;
+
+  if (!CheckHR("MapReadback", readback.ptr->Map(0, nullptr, reinterpret_cast<void **>(&mapped))))
+    return 1;
+  static const UINT expected[] = {11, 22, 33, 44, 55, 66, 77, 88, 99};
+  for (UINT i = 0; i < 9; i++) {
+    if (reinterpret_cast<UINT *>(mapped)[i] != expected[i]) {
+      std::cerr << "texture dimension " << i << " readback mismatch: " << reinterpret_cast<UINT *>(mapped)[i]
+                << " expected " << expected[i] << "\n";
+      readback.ptr->Unmap(0, nullptr);
+      return 1;
+    }
+  }
+  readback.ptr->Unmap(0, nullptr);
+  std::cout << "bc=" << bc << " bc3=" << bc3 << " srgb=" << srgb << "\n";
+  std::cout << "reader=" << (pixel_read ? "pixel" : "compute")
+            << " samples=" << sample_count << " distinct_ms=" << distinct_ms
+            << " sample_values_checked=" << (distinct_ms ? 3 * sample_count : 0)
+            << " mask="
+            << (mask_all    ? "all"
+                : mask_zero ? "zero"
+                            : "one-bit")
+            << "\n";
+  std::cout << "depth_ms=" << depth_ms << " reversed=" << reversed
+            << " stencil_ms=" << stencil_ms << " rgb96=" << rgb96
+            << " storage=" << (typeless ? "typeless" : "typed")
+            << " filter=" << ((typeless || bc) ? "linear" : "point") << "\n";
+  std::cout << "texture dimensions readback passed: 11,22,33,44,55,66,77,88,99\n";
+  result = true;
+  return result ? 0 : 1;
+}

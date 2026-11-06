@@ -1,0 +1,1834 @@
+#define WIN32_LEAN_AND_MEAN
+
+#include <windows.h>
+#include <d3d12.h>
+#include <d3dcompiler.h>
+#include "d3d12_device.hpp"
+
+#include <algorithm>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <iostream>
+#include <string>
+#include <vector>
+
+namespace {
+
+template <typename T>
+void Release(T *&object) {
+  if (object)
+    object->Release();
+  object = nullptr;
+}
+
+bool CheckHR(const char *name, HRESULT hr) {
+  if (SUCCEEDED(hr))
+    return true;
+  std::cerr << name << " failed: 0x" << std::hex << static_cast<unsigned long>(hr) << std::dec << "\n";
+  return false;
+}
+
+D3D12_HEAP_PROPERTIES HeapProperties(D3D12_HEAP_TYPE type) {
+  D3D12_HEAP_PROPERTIES properties = {};
+  properties.Type = type;
+  properties.CreationNodeMask = 1;
+  properties.VisibleNodeMask = 1;
+  return properties;
+}
+
+D3D12_RESOURCE_DESC BufferDescription(UINT64 size) {
+  D3D12_RESOURCE_DESC description = {};
+  description.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  description.Width = size;
+  description.Height = 1;
+  description.DepthOrArraySize = 1;
+  description.MipLevels = 1;
+  description.SampleDesc.Count = 1;
+  description.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  return description;
+}
+
+D3D12_RESOURCE_DESC RenderTargetDescription() {
+  D3D12_RESOURCE_DESC description = {};
+  description.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+  description.Width = 1;
+  description.Height = 1;
+  description.DepthOrArraySize = 1;
+  description.MipLevels = 1;
+  description.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  description.SampleDesc.Count = 1;
+  description.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+  description.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+  return description;
+}
+
+D3D12_RESOURCE_DESC QueryTextureDescription(UINT width) {
+  D3D12_RESOURCE_DESC description = {};
+  description.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+  description.Width = width;
+  description.Height = 1;
+  description.DepthOrArraySize = 1;
+  description.MipLevels = 1;
+  description.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  description.SampleDesc.Count = 1;
+  description.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+  return description;
+}
+
+bool CompileShader(pD3DCompile compile_shader, const char *source, const char *source_name, const char *entry,
+                  const char *target, std::vector<uint8_t> &bytecode) {
+  ID3DBlob *shader = nullptr;
+  ID3DBlob *errors = nullptr;
+  HRESULT hr = compile_shader(source, std::strlen(source), source_name, nullptr, nullptr, entry, target,
+                              D3DCOMPILE_ENABLE_STRICTNESS, 0, &shader, &errors);
+  if (FAILED(hr)) {
+    if (errors)
+      std::cerr << static_cast<const char *>(errors->GetBufferPointer()) << "\n";
+    Release(errors);
+    Release(shader);
+    return false;
+  }
+  const auto *data = static_cast<const uint8_t *>(shader->GetBufferPointer());
+  bytecode.assign(data, data + shader->GetBufferSize());
+  Release(errors);
+  Release(shader);
+  return !bytecode.empty();
+}
+
+struct ShaderSet {
+  std::vector<uint8_t> vertex;
+  std::vector<uint8_t> no_input_vertex;
+  std::vector<uint8_t> root_vertex;
+  std::vector<uint8_t> geometry;
+  std::vector<uint8_t> geometry_root_cbv;
+  std::vector<uint8_t> geometry_root_srv_uav;
+  std::vector<uint8_t> adjacency_geometry;
+  std::vector<uint8_t> pixel;
+  std::vector<uint8_t> pixel_query;
+  std::vector<uint8_t> pixel_query_t5;
+};
+
+bool CompileShaders(pD3DCompile compile_shader, ShaderSet &shaders) {
+  static constexpr char vertex_source[] = R"(
+struct VSInput {
+  float2 position : POSITION;
+  float4 color : COLOR;
+};
+
+struct VSOutput {
+  float4 position : SV_Position;
+  float4 color : COLOR;
+};
+
+VSOutput vs_main(VSInput input) {
+  VSOutput output;
+  output.position = float4(input.position, 0.0, 1.0);
+  output.color = input.color;
+  return output;
+}
+)";
+  static constexpr char no_input_vertex_source[] = R"(
+struct VSOutput {
+  float4 position : SV_Position;
+  float4 color : COLOR;
+};
+
+VSOutput vs_main(uint vertex_id : SV_VertexID) {
+  VSOutput output;
+  if (vertex_id == 0)
+    output.position = float4(-1.0, -1.0, 0.0, 1.0);
+  else if (vertex_id == 1)
+    output.position = float4(3.0, -1.0, 0.0, 1.0);
+  else
+    output.position = float4(-1.0, 3.0, 0.0, 1.0);
+  output.color = float4(1.0, 1.0, 1.0, 1.0);
+  return output;
+}
+)";
+  static constexpr char root_vertex_source[] = R"(
+cbuffer RootData : register(b0) {
+  float4 root_color;
+};
+
+struct VSInput {
+  float2 position : POSITION;
+  float4 color : COLOR;
+};
+
+struct VSOutput {
+  float4 position : SV_Position;
+  float4 color : COLOR;
+};
+
+VSOutput vs_main(VSInput input) {
+  VSOutput output;
+  output.position = float4(input.position, 0.0, 1.0);
+  output.color = root_color;
+  return output;
+}
+)";
+  static constexpr char geometry_root_cbv_source[] = R"(
+cbuffer RootData : register(b0) {
+  float4 root_color;
+};
+
+struct VSOutput {
+  float4 position : SV_Position;
+  float4 color : COLOR;
+};
+
+[maxvertexcount(3)]
+void gs_main(triangle VSOutput input[3], inout TriangleStream<VSOutput> output) {
+  for (uint i = 0; i < 3; ++i) {
+    VSOutput vertex = input[i];
+    vertex.color = root_color;
+    output.Append(vertex);
+  }
+}
+)";
+  static constexpr char geometry_root_srv_uav_source[] = R"(
+StructuredBuffer<float4> root_input : register(t0);
+RWStructuredBuffer<float4> root_output : register(u0);
+
+struct VSOutput {
+  float4 position : SV_Position;
+  float4 color : COLOR;
+};
+
+[maxvertexcount(3)]
+void gs_main(triangle VSOutput input[3], inout TriangleStream<VSOutput> output) {
+  const float4 root_color = root_input[0];
+  root_output[0] = root_color;
+  for (uint i = 0; i < 3; ++i) {
+    VSOutput vertex = input[i];
+    vertex.color = root_color;
+    output.Append(vertex);
+  }
+}
+)";
+  static constexpr char geometry_source[] = R"(
+struct VSOutput {
+  float4 position : SV_Position;
+  float4 color : COLOR;
+};
+
+[maxvertexcount(3)]
+void gs_main(triangle VSOutput input[3], inout TriangleStream<VSOutput> output) {
+  for (uint i = 0; i < 3; ++i) {
+    VSOutput vertex = input[i];
+    output.Append(vertex);
+  }
+}
+)";
+  static constexpr char adjacency_geometry_source[] = R"(
+struct VSOutput {
+  float4 position : SV_Position;
+  float4 color : COLOR;
+};
+
+[maxvertexcount(3)]
+void gs_main(triangleadj VSOutput input[6], inout TriangleStream<VSOutput> output) {
+  for (uint i = 0; i < 3; ++i) {
+    VSOutput vertex = input[i * 2];
+    output.Append(vertex);
+  }
+}
+)";
+  static constexpr char pixel_source[] = R"(
+struct PSInput {
+  float4 position : SV_Position;
+  float4 color : COLOR;
+};
+
+float4 ps_main(PSInput input) : SV_Target {
+  return input.color;
+}
+)";
+  static constexpr char pixel_query_source[] = R"(
+Texture2D<float4> input_texture : register(t0);
+
+struct PSInput {
+  float4 position : SV_Position;
+  float4 color : COLOR;
+};
+
+float4 ps_main(PSInput input) : SV_Target {
+  uint width;
+  uint height;
+  input_texture.GetDimensions(width, height);
+  if (width == 0 && height == 0)
+    return float4(1.0, 1.0, 1.0, 1.0);
+  return width == 1 ? float4(1.0, 0.0, 0.0, 1.0) : float4(0.0, 1.0, 0.0, 1.0);
+}
+)";
+
+  std::string pixel_t5 = pixel_query_source;
+  pixel_t5.replace(pixel_t5.find("register(t0)"), 12, "register(t5)");
+  if (!CompileShader(compile_shader, pixel_t5.c_str(), "dx12_graphics_sm5_t5.hlsl", "ps_main", "ps_5_0", shaders.pixel_query_t5))
+    return false;
+
+  return CompileShader(compile_shader, vertex_source, "dx12_graphics_sm5_vs.hlsl", "vs_main", "vs_5_0",
+                       shaders.vertex) &&
+         CompileShader(compile_shader, no_input_vertex_source, "dx12_graphics_sm5_no_input_vs.hlsl", "vs_main",
+                       "vs_5_0", shaders.no_input_vertex) &&
+         CompileShader(compile_shader, root_vertex_source, "dx12_graphics_sm5_root_vs.hlsl", "vs_main", "vs_5_0",
+                       shaders.root_vertex) &&
+         CompileShader(compile_shader, geometry_source, "dx12_graphics_sm5_gs.hlsl", "gs_main", "gs_5_0",
+                       shaders.geometry) &&
+         CompileShader(compile_shader, geometry_root_cbv_source, "dx12_graphics_sm5_geometry_root_cbv_gs.hlsl", "gs_main",
+                       "gs_5_0", shaders.geometry_root_cbv) &&
+         CompileShader(compile_shader, geometry_root_srv_uav_source,
+                       "dx12_graphics_sm5_geometry_root_srv_uav_gs.hlsl", "gs_main", "gs_5_0",
+                       shaders.geometry_root_srv_uav) &&
+         CompileShader(compile_shader, adjacency_geometry_source, "dx12_graphics_sm5_adj_gs.hlsl", "gs_main",
+                       "gs_5_0", shaders.adjacency_geometry) &&
+         CompileShader(compile_shader, pixel_source, "dx12_graphics_sm5_ps.hlsl", "ps_main", "ps_5_0", shaders.pixel) &&
+         CompileShader(compile_shader, pixel_query_source, "dx12_graphics_sm5_null_query_ps.hlsl", "ps_main", "ps_5_0",
+                       shaders.pixel_query);
+}
+
+bool TestFootprintStages(ID3D12Device *device, pD3DCompile compile_shader) {
+  static constexpr char source[] = R"HLSL(
+Texture2D<float4> texture_data : register(t0);
+struct Vertex { float4 position : SV_Position; float4 color : COLOR; };
+Vertex vs_main(uint id : SV_VertexID) {
+  Vertex value;
+  value.position = float4(float(id & 1), float(id >> 1), 0, 1);
+  value.color = texture_data.Load(int3(0, 0, 0));
+  return value;
+}
+[maxvertexcount(3)]
+void gs_main(triangle Vertex input[3], inout TriangleStream<Vertex> output) {
+  for (uint i = 0; i < 3; i++) {
+    Vertex value = input[i];
+    value.color += texture_data.Load(int3(0, 0, 0));
+    output.Append(value);
+  }
+}
+float4 ps_main(Vertex input) : SV_Target { return input.color + texture_data.Load(int3(0, 0, 0)); }
+)HLSL";
+  std::vector<uint8_t> vs, gs, ps;
+  if (!CompileShader(compile_shader, source, "footprint_stages.hlsl", "vs_main", "vs_5_0", vs) ||
+      !CompileShader(compile_shader, source, "footprint_stages.hlsl", "gs_main", "gs_5_0", gs) ||
+      !CompileShader(compile_shader, source, "footprint_stages.hlsl", "ps_main", "ps_5_0", ps))
+    return false;
+  for (unsigned mode = 0; mode < 3; mode++) {
+    D3D12_DESCRIPTOR_RANGE ranges[2] = {};
+    D3D12_ROOT_PARAMETER parameters[2] = {};
+    for (unsigned i = 0; i < 2; i++) {
+      ranges[i].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+      ranges[i].NumDescriptors = 128;
+      ranges[i].OffsetInDescriptorsFromTableStart = i * 32;
+      parameters[i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+      parameters[i].DescriptorTable = {1, &ranges[i]};
+      parameters[i].ShaderVisibility = mode == 1
+          ? (i ? D3D12_SHADER_VISIBILITY_PIXEL : D3D12_SHADER_VISIBILITY_VERTEX)
+          : D3D12_SHADER_VISIBILITY_ALL;
+    }
+    D3D12_ROOT_SIGNATURE_DESC root_desc = {};
+    root_desc.NumParameters = mode == 1 ? 2 : 1;
+    root_desc.pParameters = parameters;
+    ID3DBlob *blob = nullptr, *error = nullptr;
+    ID3D12RootSignature *root = nullptr;
+    ID3D12PipelineState *pipeline = nullptr;
+    bool valid = CheckHR("Serialize footprint root", D3D12SerializeRootSignature(
+        &root_desc, D3D_ROOT_SIGNATURE_VERSION_1, &blob, &error));
+    if (valid)
+      valid = CheckHR("Create footprint root", device->CreateRootSignature(
+          0, blob->GetBufferPointer(), blob->GetBufferSize(), IID_PPV_ARGS(&root)));
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC desc = {};
+    desc.pRootSignature = root;
+    desc.VS = {vs.data(), vs.size()};
+    desc.PS = {ps.data(), ps.size()};
+    if (mode == 2)
+      desc.GS = {gs.data(), gs.size()};
+    desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    desc.NumRenderTargets = 1;
+    desc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+    desc.SampleDesc.Count = 1;
+    desc.SampleMask = UINT_MAX;
+    desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    desc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    if (valid)
+      valid = CheckHR("Create footprint graphics PSO", device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&pipeline)));
+    if (valid) {
+      const auto *internal = static_cast<dxmt::MTLD3D12PipelineState *>(pipeline);
+      const auto &footprint = internal->descriptor_footprint;
+      valid = internal->descriptor_footprint_exact && footprint.size() == (mode == 1 ? 2 : 1);
+      if (valid && mode == 1)
+        valid = footprint[0].parameter_index == 0 && footprint[0].offset == 0 && footprint[0].count == 1 &&
+            footprint[0].stages == WMTRenderStageVertex && footprint[1].parameter_index == 1 &&
+            footprint[1].offset == 32 && footprint[1].count == 1 && footprint[1].stages == WMTRenderStageFragment;
+      else if (valid)
+        valid = footprint[0].parameter_index == 0 && footprint[0].offset == 0 && footprint[0].count == 1 &&
+            footprint[0].stages == (mode == 2 ? (WMTRenderStageObject | WMTRenderStageMesh | WMTRenderStageFragment)
+                                            : (WMTRenderStageVertex | WMTRenderStageFragment));
+    }
+    Release(pipeline);
+    Release(root);
+    Release(error);
+    Release(blob);
+    if (!valid) {
+      std::cerr << "AIRCONV graphics footprint stage/visibility mismatch: mode=" << mode << "\n";
+      return false;
+    }
+  }
+  std::cout << "AIRCONV graphics footprint visibility, shared stages, and geometry passed\n";
+  return true;
+}
+
+struct TestCase {
+  const char *name;
+  D3D12_PRIMITIVE_TOPOLOGY topology;
+  bool indexed;
+  bool index32;
+  bool adjacency;
+  bool root_cbv;
+  bool indirect;
+  uint32_t expected_rgb;
+  bool no_input = false;
+  bool geometry_root_cbv = false;
+  bool zero_index_view = false;
+  bool geometry_root_srv_uav = false;
+  bool null_texture_query = false;
+  bool release_resources_before_execute = false;
+  bool descriptor_mutation = false;
+  bool root_cbv_mutation = false;
+  bool root_srv_mutation = false;
+  bool root_uav_mutation = false;
+  bool descriptor_encoder_break = false;
+  bool direct_indexed_heap_scan = false;
+  bool descriptor_incompatible_range = false;
+  bool descriptor_unbounded_range = false;
+  bool descriptor_two_slot_encoder_break = false;
+  bool descriptor_wide_footprint = false;
+};
+
+bool RunCase(ID3D12Device *device, const ShaderSet &shaders, const TestCase &test) {
+  struct Vertex {
+    float position[2];
+    float color[4];
+  };
+  static constexpr Vertex triangle_vertices[] = {
+      {{0.0f, 0.0f}, {1.0f, 1.0f, 1.0f, 1.0f}},
+      {{-1.0f, -1.0f}, {1.0f, 1.0f, 1.0f, 1.0f}},
+      {{3.0f, -1.0f}, {1.0f, 1.0f, 1.0f, 1.0f}},
+      {{-1.0f, 3.0f}, {1.0f, 1.0f, 1.0f, 1.0f}},
+  };
+  static constexpr Vertex adjacency_vertices[] = {
+      {{0.0f, 0.0f}, {1.0f, 1.0f, 1.0f, 1.0f}},
+      {{-1.0f, -1.0f}, {1.0f, 1.0f, 1.0f, 1.0f}},
+      {{0.0f, -1.0f}, {1.0f, 1.0f, 1.0f, 1.0f}},
+      {{3.0f, -1.0f}, {1.0f, 1.0f, 1.0f, 1.0f}},
+      {{0.0f, 0.0f}, {1.0f, 1.0f, 1.0f, 1.0f}},
+      {{-1.0f, 3.0f}, {1.0f, 1.0f, 1.0f, 1.0f}},
+      {{0.0f, 0.0f}, {1.0f, 1.0f, 1.0f, 1.0f}},
+  };
+  static constexpr uint16_t triangle_indices[] = {0xffff, 0, 1, 2};
+  static constexpr uint16_t adjacency_indices[] = {0xffff, 0, 1, 2, 3, 4, 5};
+
+  const Vertex *vertex_data = test.adjacency ? adjacency_vertices
+                                             : (test.indexed ? triangle_vertices : triangle_vertices + 1);
+  const UINT vertex_count = test.adjacency ? 7 : (test.indexed ? 4 : 3);
+  const UINT index_count = test.adjacency ? 6 : 3;
+  const UINT index_buffer_count = index_count + (test.indexed ? 1 : 0);
+  std::vector<uint32_t> index32(index_buffer_count);
+  if (test.index32) {
+    const auto *source = test.adjacency ? adjacency_indices : triangle_indices;
+    for (UINT i = 0; i < index_buffer_count; ++i)
+      index32[i] = source[i];
+  }
+
+  ID3D12CommandQueue *queue = nullptr;
+  ID3D12CommandAllocator *allocator = nullptr;
+  ID3D12GraphicsCommandList *list = nullptr;
+  ID3D12PipelineState *pso = nullptr;
+  ID3D12RootSignature *root_signature = nullptr;
+  ID3DBlob *root_blob = nullptr;
+  ID3DBlob *root_error = nullptr;
+  ID3D12DescriptorHeap *rtv_heap = nullptr;
+  ID3D12DescriptorHeap *shader_heap = nullptr;
+  ID3D12Resource *render_target = nullptr;
+  ID3D12Resource *vertex_buffer = nullptr;
+  ID3D12Resource *index_buffer = nullptr;
+  ID3D12Resource *root_data = nullptr;
+  ID3D12Resource *root_data_b = nullptr;
+  ID3D12Resource *root_uav_data = nullptr;
+  ID3D12Resource *root_uav_data_b = nullptr;
+  ID3D12Resource *query_texture_a = nullptr;
+  ID3D12Resource *query_texture_b = nullptr;
+  ID3D12Resource *indirect_args = nullptr;
+  ID3D12CommandSignature *command_signature = nullptr;
+  ID3D12Resource *readback = nullptr;
+  ID3D12Fence *fence = nullptr;
+  HANDLE event = nullptr;
+  void *mapped_vertex = nullptr;
+  void *mapped_index = nullptr;
+  void *mapped_root = nullptr;
+  void *mapped_root_b = nullptr;
+  void *mapped_indirect = nullptr;
+  BYTE *mapped_readback = nullptr;
+  ID3D12Resource *uav_readback = nullptr;
+  void *mapped_uav_readback = nullptr;
+  D3D12_CPU_DESCRIPTOR_HANDLE query_descriptor = {};
+
+  auto cleanup = [&] {
+    if (mapped_readback)
+      readback->Unmap(0, nullptr);
+    if (mapped_indirect)
+      indirect_args->Unmap(0, nullptr);
+    if (mapped_root)
+      root_data->Unmap(0, nullptr);
+    if (mapped_root_b)
+      root_data_b->Unmap(0, nullptr);
+    if (mapped_uav_readback)
+      uav_readback->Unmap(0, nullptr);
+    if (mapped_index)
+      index_buffer->Unmap(0, nullptr);
+    if (mapped_vertex)
+      vertex_buffer->Unmap(0, nullptr);
+    if (event)
+      CloseHandle(event);
+    Release(fence);
+    Release(readback);
+    Release(command_signature);
+    Release(indirect_args);
+    Release(uav_readback);
+    Release(root_uav_data);
+    Release(root_uav_data_b);
+    Release(root_data);
+    Release(root_data_b);
+    Release(query_texture_b);
+    Release(query_texture_a);
+    Release(index_buffer);
+    Release(vertex_buffer);
+    Release(render_target);
+    Release(shader_heap);
+    Release(rtv_heap);
+    Release(root_error);
+    Release(root_blob);
+    Release(root_signature);
+    Release(pso);
+    Release(list);
+    Release(allocator);
+    Release(queue);
+  };
+  auto fail = [&](const char *message) {
+    std::cerr << "DXBC SM5 " << test.name << ": " << message << "\n";
+    cleanup();
+    return false;
+  };
+
+  D3D12_COMMAND_QUEUE_DESC queue_desc = {};
+  queue_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+  if (!CheckHR("CreateCommandQueue", device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&queue))) ||
+      !CheckHR("CreateCommandAllocator",
+               device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator))))
+    return fail("queue setup failed");
+
+  D3D12_ROOT_PARAMETER root_parameters[2] = {};
+  D3D12_DESCRIPTOR_RANGE descriptor_ranges[2] = {};
+  D3D12_ROOT_SIGNATURE_DESC root_desc = {};
+  if (test.null_texture_query) {
+    auto &srv_range = descriptor_ranges[0];
+    srv_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    srv_range.NumDescriptors = test.descriptor_wide_footprint ? 128 : test.descriptor_two_slot_encoder_break ? 2
+                               : test.descriptor_unbounded_range ? UINT_MAX
+                                                                 : 1;
+    srv_range.BaseShaderRegister = 0;
+    srv_range.RegisterSpace = 0;
+    srv_range.OffsetInDescriptorsFromTableStart = 0;
+    root_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    root_parameters[0].DescriptorTable.NumDescriptorRanges = 1;
+    root_parameters[0].DescriptorTable.pDescriptorRanges = &srv_range;
+    root_parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    root_desc.NumParameters = test.descriptor_incompatible_range ? 2 : 1;
+    root_desc.pParameters = root_parameters;
+    if (test.descriptor_incompatible_range) {
+      auto &uav_range = descriptor_ranges[1];
+      uav_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+      uav_range.NumDescriptors = 1;
+      uav_range.BaseShaderRegister = 0;
+      uav_range.RegisterSpace = 0;
+      uav_range.OffsetInDescriptorsFromTableStart = 0;
+      root_parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+      root_parameters[1].DescriptorTable.NumDescriptorRanges = 1;
+      root_parameters[1].DescriptorTable.pDescriptorRanges = &uav_range;
+      root_parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    }
+  } else if (test.root_cbv || test.geometry_root_cbv) {
+    root_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    root_parameters[0].Descriptor.ShaderRegister = 0;
+    root_parameters[0].ShaderVisibility = test.geometry_root_cbv ? D3D12_SHADER_VISIBILITY_GEOMETRY
+                                                                   : D3D12_SHADER_VISIBILITY_VERTEX;
+    root_desc.NumParameters = 1;
+    root_desc.pParameters = root_parameters;
+  } else if (test.geometry_root_srv_uav) {
+    root_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+    root_parameters[0].Descriptor.ShaderRegister = 0;
+    root_parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_GEOMETRY;
+    root_parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+    root_parameters[1].Descriptor.ShaderRegister = 0;
+    root_parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_GEOMETRY;
+    root_desc.NumParameters = 2;
+    root_desc.pParameters = root_parameters;
+  }
+  HRESULT root_signature_hr = E_FAIL;
+  if (test.direct_indexed_heap_scan) {
+    D3D12_VERSIONED_ROOT_SIGNATURE_DESC direct_indexed_desc = {};
+    direct_indexed_desc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
+    direct_indexed_desc.Desc_1_1.NumParameters = root_desc.NumParameters;
+    direct_indexed_desc.Desc_1_1.pParameters = nullptr;
+    direct_indexed_desc.Desc_1_1.NumStaticSamplers = root_desc.NumStaticSamplers;
+    direct_indexed_desc.Desc_1_1.pStaticSamplers = root_desc.pStaticSamplers;
+    direct_indexed_desc.Desc_1_1.Flags = D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED;
+    root_signature_hr = D3D12SerializeVersionedRootSignature(&direct_indexed_desc, &root_blob, &root_error);
+  } else {
+    root_signature_hr = D3D12SerializeRootSignature(&root_desc, D3D_ROOT_SIGNATURE_VERSION_1, &root_blob, &root_error);
+  }
+  if (!CheckHR("D3D12SerializeRootSignature", root_signature_hr)) {
+    if (root_error)
+      std::cerr << static_cast<const char *>(root_error->GetBufferPointer()) << "\n";
+    return fail("root signature serialization failed");
+  }
+  if (!CheckHR("CreateRootSignature",
+               device->CreateRootSignature(0, root_blob->GetBufferPointer(), root_blob->GetBufferSize(),
+                                            IID_PPV_ARGS(&root_signature))))
+    return fail("root signature creation failed");
+  if (test.null_texture_query) {
+    const auto *metadata = static_cast<const dxmt::MTLD3D12RootSignature *>(root_signature);
+    const UINT expected_table_count = test.descriptor_incompatible_range ? 2 : 1;
+    const UINT expected_range_count = test.descriptor_incompatible_range ? 2 : 1;
+    if (metadata->RootDescriptorTableCount != expected_table_count || !metadata->RootDescriptorTables ||
+        metadata->RootDescriptorRangeCount != expected_range_count || !metadata->RootDescriptorRanges ||
+        metadata->RootDescriptorTables[0].parameter_index != 0 ||
+        metadata->RootDescriptorTables[0].range_count != 1 ||
+        metadata->RootDescriptorRanges[0].type != descriptor_ranges[0].RangeType ||
+        metadata->RootDescriptorRanges[0].num_descriptors != descriptor_ranges[0].NumDescriptors ||
+        metadata->RootDescriptorRanges[0].offset != descriptor_ranges[0].OffsetInDescriptorsFromTableStart ||
+        (test.descriptor_incompatible_range &&
+         (metadata->RootDescriptorTables[1].parameter_index != 1 ||
+          metadata->RootDescriptorTables[1].range_count != 1 ||
+          metadata->RootDescriptorRanges[1].type != D3D12_DESCRIPTOR_RANGE_TYPE_UAV))) {
+      std::cerr << "DXBC SM5 " << test.name << ": descriptor-table metadata mismatch\n";
+      cleanup();
+      return false;
+    }
+  }
+
+  const auto &vertex_shader = test.geometry_root_cbv || test.geometry_root_srv_uav ? shaders.vertex
+                             : test.root_cbv           ? shaders.root_vertex
+                             : test.no_input            ? shaders.no_input_vertex
+                                                        : shaders.vertex;
+  const auto &geometry_shader = test.geometry_root_cbv       ? shaders.geometry_root_cbv
+                              : test.geometry_root_srv_uav ? shaders.geometry_root_srv_uav
+                              : test.adjacency             ? shaders.adjacency_geometry
+                                                           : shaders.geometry;
+  D3D12_INPUT_ELEMENT_DESC input_layout[] = {
+      {"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+      {"COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 8, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+  };
+  D3D12_GRAPHICS_PIPELINE_STATE_DESC pso_desc = {};
+  pso_desc.pRootSignature = root_signature;
+  pso_desc.VS = {vertex_shader.data(), vertex_shader.size()};
+  pso_desc.GS = test.null_texture_query ? D3D12_SHADER_BYTECODE{}
+                                         : D3D12_SHADER_BYTECODE{geometry_shader.data(), geometry_shader.size()};
+  const auto &pixel_shader = test.descriptor_wide_footprint ? shaders.pixel_query_t5 : test.null_texture_query ? shaders.pixel_query : shaders.pixel;
+  pso_desc.PS = {pixel_shader.data(), pixel_shader.size()};
+  pso_desc.InputLayout = test.no_input ? D3D12_INPUT_LAYOUT_DESC{} : D3D12_INPUT_LAYOUT_DESC{input_layout, 2};
+  pso_desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+  pso_desc.NumRenderTargets = 1;
+  pso_desc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+  pso_desc.SampleDesc.Count = 1;
+  pso_desc.SampleMask = UINT_MAX;
+  pso_desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+  pso_desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+  pso_desc.RasterizerState.DepthClipEnable = TRUE;
+  pso_desc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+  if (!CheckHR("CreateGraphicsPipelineState",
+               device->CreateGraphicsPipelineState(&pso_desc, IID_PPV_ARGS(&pso))))
+    return fail("graphics PSO creation failed");
+
+  auto default_heap = HeapProperties(D3D12_HEAP_TYPE_DEFAULT);
+  auto upload_heap = HeapProperties(D3D12_HEAP_TYPE_UPLOAD);
+  auto readback_heap = HeapProperties(D3D12_HEAP_TYPE_READBACK);
+  auto render_target_desc = RenderTargetDescription();
+  D3D12_CLEAR_VALUE clear_value = {};
+  clear_value.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  clear_value.Color[2] = 1.0f;
+  if (!CheckHR("CreateRenderTarget",
+               device->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE, &render_target_desc,
+                                               D3D12_RESOURCE_STATE_RENDER_TARGET, &clear_value,
+                                               IID_PPV_ARGS(&render_target))))
+    return fail("render target creation failed");
+
+  D3D12_DESCRIPTOR_HEAP_DESC rtv_heap_desc = {};
+  rtv_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+  rtv_heap_desc.NumDescriptors = 1;
+  if (!CheckHR("CreateRTVHeap", device->CreateDescriptorHeap(&rtv_heap_desc, IID_PPV_ARGS(&rtv_heap))))
+    return fail("RTV heap creation failed");
+  auto rtv = rtv_heap->GetCPUDescriptorHandleForHeapStart();
+  device->CreateRenderTargetView(render_target, nullptr, rtv);
+
+  if (test.null_texture_query || test.descriptor_encoder_break || test.direct_indexed_heap_scan ||
+      test.descriptor_incompatible_range) {
+    D3D12_DESCRIPTOR_HEAP_DESC shader_heap_desc = {};
+    shader_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    shader_heap_desc.NumDescriptors = test.descriptor_wide_footprint    ? 128
+                                      : test.descriptor_unbounded_range ? 192
+                                      : test.direct_indexed_heap_scan   ? 128
+                                      : test.descriptor_two_slot_encoder_break
+                                          ? 2
+                                          : 1;
+    shader_heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    if (!CheckHR("CreateShaderHeap", device->CreateDescriptorHeap(&shader_heap_desc, IID_PPV_ARGS(&shader_heap))))
+      return fail("shader heap creation failed");
+    query_descriptor = shader_heap->GetCPUDescriptorHandleForHeapStart();
+    const auto descriptor_stride =
+        device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    if (test.descriptor_wide_footprint)
+      query_descriptor.ptr += uint64_t(descriptor_stride) * 5;
+    if (test.descriptor_unbounded_range)
+      query_descriptor.ptr += uint64_t(descriptor_stride) * 63;
+    if (test.null_texture_query && !test.descriptor_incompatible_range) {
+      D3D12_SHADER_RESOURCE_VIEW_DESC null_srv = {};
+      null_srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+      null_srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+      null_srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+      null_srv.Texture2D.MipLevels = 1;
+      device->CreateShaderResourceView(nullptr, &null_srv, query_descriptor);
+    }
+    if (test.descriptor_mutation || test.descriptor_encoder_break || test.direct_indexed_heap_scan ||
+        test.descriptor_incompatible_range || test.descriptor_unbounded_range) {
+      const auto query_desc_a = QueryTextureDescription(1);
+      if (!CheckHR("CreateQueryTexture A", device->CreateCommittedResource(
+                                              &default_heap, D3D12_HEAP_FLAG_NONE, &query_desc_a,
+                                              D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr,
+                                              IID_PPV_ARGS(&query_texture_a)
+                                          )))
+        return fail("query texture setup failed");
+      if (test.descriptor_mutation || test.descriptor_encoder_break) {
+        const auto query_desc_b = QueryTextureDescription(2);
+        if (!CheckHR("CreateQueryTexture B", device->CreateCommittedResource(
+                                                &default_heap, D3D12_HEAP_FLAG_NONE, &query_desc_b,
+                                                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr,
+                                                IID_PPV_ARGS(&query_texture_b)
+                                            )))
+          return fail("second query texture setup failed");
+      }
+      if (test.descriptor_encoder_break || test.direct_indexed_heap_scan || test.descriptor_incompatible_range ||
+          test.descriptor_unbounded_range)
+        device->CreateShaderResourceView(query_texture_a, nullptr, query_descriptor);
+      if (test.descriptor_two_slot_encoder_break) {
+        auto second_descriptor = query_descriptor;
+        second_descriptor.ptr += descriptor_stride;
+        device->CreateShaderResourceView(query_texture_a, nullptr, second_descriptor);
+      }
+    }
+  }
+
+  auto vertex_desc = BufferDescription(sizeof(Vertex) * vertex_count);
+  if (!CheckHR("CreateVertexBuffer",
+               device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &vertex_desc,
+                                               D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                               IID_PPV_ARGS(&vertex_buffer))) ||
+      !CheckHR("MapVertexBuffer", vertex_buffer->Map(0, nullptr, &mapped_vertex)))
+    return fail("vertex buffer setup failed");
+  std::memcpy(mapped_vertex, vertex_data, sizeof(Vertex) * vertex_count);
+  vertex_buffer->Unmap(0, nullptr);
+  mapped_vertex = nullptr;
+  D3D12_VERTEX_BUFFER_VIEW vertex_view = {};
+  vertex_view.BufferLocation = vertex_buffer->GetGPUVirtualAddress();
+  vertex_view.SizeInBytes = sizeof(Vertex) * vertex_count;
+  vertex_view.StrideInBytes = sizeof(Vertex);
+
+  D3D12_INDEX_BUFFER_VIEW index_view = {};
+  if (test.indexed) {
+    const size_t index_size = test.index32 ? sizeof(uint32_t) : sizeof(uint16_t);
+    const void *index_data = test.index32 ? static_cast<const void *>(index32.data())
+                                          : static_cast<const void *>(test.adjacency ? adjacency_indices : triangle_indices);
+    auto index_desc = BufferDescription(index_size * index_buffer_count);
+    if (!CheckHR("CreateIndexBuffer",
+                 device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &index_desc,
+                                                 D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                 IID_PPV_ARGS(&index_buffer))) ||
+        !CheckHR("MapIndexBuffer", index_buffer->Map(0, nullptr, &mapped_index)))
+      return fail("index buffer setup failed");
+    std::memcpy(mapped_index, index_data, index_size * index_buffer_count);
+    index_buffer->Unmap(0, nullptr);
+    mapped_index = nullptr;
+    index_view.BufferLocation = index_buffer->GetGPUVirtualAddress();
+    index_view.SizeInBytes = static_cast<UINT>(index_size * index_buffer_count);
+    index_view.Format = test.index32 ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT;
+  }
+
+  if (test.root_cbv || test.geometry_root_cbv || test.geometry_root_srv_uav) {
+    auto root_desc_buffer = BufferDescription(256);
+    if (!CheckHR("CreateRootData",
+                 device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &root_desc_buffer,
+                                                 D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                 IID_PPV_ARGS(&root_data))) ||
+        !CheckHR("MapRootData", root_data->Map(0, nullptr, &mapped_root)))
+      return fail("root data setup failed");
+    static constexpr float root_color[] = {0.0f, 1.0f, 0.0f, 1.0f};
+    std::memcpy(mapped_root, root_color, sizeof(root_color));
+    root_data->Unmap(0, nullptr);
+    mapped_root = nullptr;
+  }
+
+  if (test.root_cbv_mutation || test.root_srv_mutation) {
+    auto root_desc_buffer = BufferDescription(256);
+    if (!CheckHR("CreateRootDataB",
+                 device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &root_desc_buffer,
+                                                 D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                 IID_PPV_ARGS(&root_data_b))) ||
+        !CheckHR("MapRootDataB", root_data_b->Map(0, nullptr, &mapped_root_b)))
+      return fail("second root data setup failed");
+    static constexpr float root_color_b[] = {1.0f, 0.0f, 0.0f, 1.0f};
+    std::memcpy(mapped_root_b, root_color_b, sizeof(root_color_b));
+    root_data_b->Unmap(0, nullptr);
+    mapped_root_b = nullptr;
+  }
+
+  if (test.geometry_root_srv_uav) {
+    auto root_uav_desc = BufferDescription(256);
+    root_uav_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    if (!CheckHR("CreateRootUAVData",
+                 device->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE, &root_uav_desc,
+                                                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+                                                 IID_PPV_ARGS(&root_uav_data))))
+      return fail("root UAV setup failed");
+  }
+
+  if (test.root_uav_mutation) {
+    auto root_uav_desc = BufferDescription(256);
+    root_uav_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    if (!CheckHR("CreateRootUAVDataB",
+                 device->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE, &root_uav_desc,
+                                                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+                                                 IID_PPV_ARGS(&root_uav_data_b))))
+      return fail("second root UAV setup failed");
+  }
+
+  if (test.indirect) {
+    const UINT64 argument_size = test.indexed ? sizeof(D3D12_DRAW_INDEXED_ARGUMENTS) : sizeof(D3D12_DRAW_ARGUMENTS);
+    auto indirect_desc = BufferDescription(argument_size);
+    if (!CheckHR("CreateIndirectArgs",
+                 device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &indirect_desc,
+                                                 D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                 IID_PPV_ARGS(&indirect_args))) ||
+        !CheckHR("MapIndirectArgs", indirect_args->Map(0, nullptr, &mapped_indirect)))
+      return fail("indirect argument setup failed");
+    if (test.indexed) {
+      auto *arguments = static_cast<D3D12_DRAW_INDEXED_ARGUMENTS *>(mapped_indirect);
+      arguments->IndexCountPerInstance = index_count;
+      arguments->InstanceCount = 1;
+      arguments->StartIndexLocation = 1;
+      arguments->BaseVertexLocation = 1;
+      arguments->StartInstanceLocation = 0;
+    } else {
+      auto *arguments = static_cast<D3D12_DRAW_ARGUMENTS *>(mapped_indirect);
+      arguments->VertexCountPerInstance = vertex_count;
+      arguments->InstanceCount = 1;
+      arguments->StartVertexLocation = 0;
+      arguments->StartInstanceLocation = 0;
+    }
+    indirect_args->Unmap(0, nullptr);
+    mapped_indirect = nullptr;
+
+    D3D12_INDIRECT_ARGUMENT_DESC argument_desc = {};
+    argument_desc.Type = test.indexed ? D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED
+                                      : D3D12_INDIRECT_ARGUMENT_TYPE_DRAW;
+    D3D12_COMMAND_SIGNATURE_DESC signature_desc = {};
+    signature_desc.ByteStride = static_cast<UINT>(argument_size);
+    signature_desc.NumArgumentDescs = 1;
+    signature_desc.pArgumentDescs = &argument_desc;
+    if (!CheckHR("CreateCommandSignature",
+                 device->CreateCommandSignature(&signature_desc, nullptr, IID_PPV_ARGS(&command_signature))))
+      return fail("command signature creation failed");
+  }
+
+  if (!CheckHR("CreateCommandList",
+               device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator, pso,
+                                         IID_PPV_ARGS(&list))))
+    return fail("command list creation failed");
+
+  list->SetPipelineState(pso);
+  if (root_signature) {
+    if (test.direct_indexed_heap_scan) {
+      ID3D12DescriptorHeap *heaps[] = {shader_heap};
+      list->SetDescriptorHeaps(1, heaps);
+    }
+    list->SetGraphicsRootSignature(root_signature);
+    if (test.null_texture_query || test.direct_indexed_heap_scan) {
+      if (!test.direct_indexed_heap_scan) {
+        ID3D12DescriptorHeap *heaps[] = {shader_heap};
+        list->SetDescriptorHeaps(1, heaps);
+      }
+      if (test.null_texture_query) {
+        auto table = shader_heap->GetGPUDescriptorHandleForHeapStart();
+        if (test.descriptor_unbounded_range)
+          table.ptr += uint64_t(device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)) * 63;
+        list->SetGraphicsRootDescriptorTable(0, table);
+        if (test.descriptor_incompatible_range)
+          list->SetGraphicsRootDescriptorTable(1, table);
+      }
+    } else if (test.geometry_root_srv_uav) {
+      list->SetGraphicsRootShaderResourceView(0, root_data->GetGPUVirtualAddress());
+      list->SetGraphicsRootUnorderedAccessView(1, root_uav_data->GetGPUVirtualAddress());
+    } else if (test.root_cbv || test.geometry_root_cbv) {
+      list->SetGraphicsRootConstantBufferView(0, root_data->GetGPUVirtualAddress());
+    }
+  }
+  list->IASetPrimitiveTopology(test.topology);
+  if (!test.no_input)
+    list->IASetVertexBuffers(0, 1, &vertex_view);
+  if (test.indexed || test.zero_index_view)
+    list->IASetIndexBuffer(&index_view);
+  list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+  list->ClearRenderTargetView(rtv, clear_value.Color, 0, nullptr);
+  D3D12_VIEWPORT viewport = {0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f};
+  D3D12_RECT scissor = {0, 0, 1, 1};
+  list->RSSetViewports(1, &viewport);
+  list->RSSetScissorRects(1, &scissor);
+  auto draw = [&] {
+    if (test.indirect) {
+      list->ExecuteIndirect(command_signature, 1, indirect_args, 0, nullptr, 0);
+    } else if (test.indexed) {
+      list->DrawIndexedInstanced(index_count, 1, 1, 1, 0);
+    } else {
+      list->DrawInstanced(vertex_count, 1, 0, 0);
+    }
+  };
+  draw();
+  if (test.direct_indexed_heap_scan) {
+    draw();
+    auto unrelated_descriptor = shader_heap->GetCPUDescriptorHandleForHeapStart();
+    unrelated_descriptor.ptr += uint64_t(device->GetDescriptorHandleIncrementSize(
+                                  D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)) * 3;
+    device->CreateShaderResourceView(query_texture_a, nullptr, unrelated_descriptor);
+    device->CreateConstantBufferView(nullptr, unrelated_descriptor);
+    device->CreateShaderResourceView(query_texture_a, nullptr,
+                                     unrelated_descriptor);
+    draw();
+    // The same heap intent must fan out to a later encoder while retaining
+    // one live slot read/lock per submission.
+    D3D12_RESOURCE_BARRIER alias_barrier = {};
+    alias_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING;
+    list->ResourceBarrier(1, &alias_barrier);
+    draw();
+  }
+  if (test.descriptor_encoder_break) {
+    for (unsigned encoder_break = 0; encoder_break < 2; encoder_break++) {
+      D3D12_RESOURCE_BARRIER alias_barrier = {};
+      alias_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING;
+      list->ResourceBarrier(1, &alias_barrier);
+      draw();
+    }
+  }
+  if (test.descriptor_unbounded_range) {
+    draw();
+    const auto descriptor_stride =
+        device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    auto relevant_descriptor = shader_heap->GetCPUDescriptorHandleForHeapStart();
+    relevant_descriptor.ptr += uint64_t(descriptor_stride) * 130;
+    device->CreateShaderResourceView(query_texture_a, nullptr, relevant_descriptor);
+    draw();
+  }
+  if (test.descriptor_mutation) {
+    draw();
+    auto mutation_descriptor = test.descriptor_wide_footprint ? shader_heap->GetCPUDescriptorHandleForHeapStart() : query_descriptor;
+    device->CreateShaderResourceView(query_texture_a, nullptr, mutation_descriptor);
+    draw();
+  }
+  if (test.root_cbv_mutation || test.root_srv_mutation || test.root_uav_mutation) {
+    draw();
+    if (test.root_srv_mutation && !test.root_uav_mutation) {
+      D3D12_RESOURCE_BARRIER uav_barrier = {};
+      uav_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+      uav_barrier.UAV.pResource = root_uav_data;
+      list->ResourceBarrier(1, &uav_barrier);
+    }
+    if (test.root_cbv_mutation) {
+      list->SetGraphicsRootConstantBufferView(0, root_data_b->GetGPUVirtualAddress());
+    } else {
+      if (test.root_srv_mutation)
+        list->SetGraphicsRootShaderResourceView(0, root_data_b->GetGPUVirtualAddress());
+      if (test.root_uav_mutation)
+        list->SetGraphicsRootUnorderedAccessView(1, root_uav_data_b->GetGPUVirtualAddress());
+    }
+    draw();
+  }
+
+  D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint = {};
+  UINT row_count = 0;
+  UINT64 row_size = 0;
+  UINT64 total_size = 0;
+  device->GetCopyableFootprints(&render_target_desc, 0, 1, 0, &footprint, &row_count, &row_size, &total_size);
+  auto readback_desc = BufferDescription(total_size);
+  if (!CheckHR("CreateReadback",
+               device->CreateCommittedResource(&readback_heap, D3D12_HEAP_FLAG_NONE, &readback_desc,
+                                               D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                               IID_PPV_ARGS(&readback))))
+    return fail("readback creation failed");
+
+  ID3D12Resource *root_uav_output = test.root_uav_mutation ? root_uav_data_b : root_uav_data;
+  if (test.geometry_root_srv_uav) {
+    auto uav_readback_desc = BufferDescription(256);
+    if (!CheckHR("CreateRootUAVReadback",
+                 device->CreateCommittedResource(&readback_heap, D3D12_HEAP_FLAG_NONE, &uav_readback_desc,
+                                                 D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                 IID_PPV_ARGS(&uav_readback))))
+      return fail("root UAV readback setup failed");
+    D3D12_RESOURCE_BARRIER uav_barrier = {};
+    uav_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    uav_barrier.Transition.pResource = root_uav_output;
+    uav_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    uav_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    uav_barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    list->ResourceBarrier(1, &uav_barrier);
+    list->CopyBufferRegion(uav_readback, 0, root_uav_output, 0, sizeof(float) * 4);
+  }
+
+  D3D12_RESOURCE_BARRIER barrier = {};
+  barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+  barrier.Transition.pResource = render_target;
+  barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+  barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+  barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+  list->ResourceBarrier(1, &barrier);
+  D3D12_TEXTURE_COPY_LOCATION copy_dst = {};
+  copy_dst.pResource = readback;
+  copy_dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+  copy_dst.PlacedFootprint = footprint;
+  D3D12_TEXTURE_COPY_LOCATION copy_src = {};
+  copy_src.pResource = render_target;
+  copy_src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+  list->CopyTextureRegion(&copy_dst, 0, 0, 0, &copy_src, nullptr);
+  if (!CheckHR("Close", list->Close()))
+    return fail("command list close failed");
+
+  if (test.descriptor_mutation) {
+    auto *internal_list = static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list);
+    const auto counters = internal_list->GetAirconvResidencyCounters();
+    if (counters.root_scan_requests != 3 || counters.root_scans_executed != 0 ||
+        counters.root_scan_skips != 3 || counters.root_deserializer_creates != 0 ||
+        counters.descriptor_requests != 3 || counters.descriptor_scans_executed != 2 ||
+        counters.descriptor_scan_skips != 1 || counters.descriptor_slots_visited != 2 ||
+        counters.descriptor_batch_locks != 2 || counters.heap_generation_invalidations != 1 ||
+        counters.table_invalidations != 1 || counters.pending_descriptors_inserted != 1 ||
+        counters.pending_descriptor_duplicates != 1 || counters.submission_live_slot_resolutions != 0) {
+      std::cerr << "DXBC SM5 " << test.name << ": unexpected AIRCONV residency counters before submission\n";
+      cleanup();
+      return false;
+    }
+    if (test.descriptor_wide_footprint &&
+        (counters.conservative_descriptor_slots != 256 || counters.shader_reachable_descriptor_slots != 2))
+      return fail("wide table did not narrow to t5 across an unrelated heap mutation");
+    device->CreateShaderResourceView(query_texture_b, nullptr, query_descriptor);
+  }
+  if (test.descriptor_encoder_break)
+    device->CreateShaderResourceView(query_texture_b, nullptr, query_descriptor);
+
+  if (test.descriptor_encoder_break) {
+    const auto counters = static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list)->GetAirconvResidencyCounters();
+    const auto expected_slots = 1u;
+    const auto expected_uses = expected_slots * 3u;
+    if (counters.root_scan_requests != 3 || counters.root_scan_skips != 3 ||
+        counters.descriptor_requests != 3 || counters.descriptor_scans_executed != 3 ||
+        counters.descriptor_scan_skips != 0 || counters.descriptor_slots_visited != expected_uses ||
+        counters.descriptor_batch_locks != 3 || counters.encoder_invalidations != 2 ||
+        counters.pending_descriptors_inserted != expected_uses || counters.pending_descriptor_duplicates != 0) {
+      std::cerr << "DXBC SM5 " << test.name << ": new encoder did not receive an independent descriptor scan\n";
+      cleanup();
+      return false;
+    }
+  }
+
+  if (test.descriptor_incompatible_range) {
+    const auto counters = static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list)->GetAirconvResidencyCounters();
+    if (counters.descriptor_scans_executed != 1 || counters.descriptor_slots_visited != 1 ||
+        counters.conservative_descriptor_slots != 2 || counters.shader_reachable_descriptor_slots != 1 ||
+        counters.descriptor_batch_locks != 1 || counters.pending_descriptors_inserted != 1) {
+      std::cerr << "DXBC SM5 " << test.name << ": unused UAV range was not excluded from the static footprint\n";
+      cleanup();
+      return false;
+    }
+  }
+
+  if (test.descriptor_unbounded_range) {
+    const auto counters = static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list)->GetAirconvResidencyCounters();
+    if (counters.descriptor_requests != 3 || counters.descriptor_scans_executed != 2 ||
+        counters.descriptor_scan_skips != 1 || counters.descriptor_slots_visited != 2 ||
+        counters.conservative_descriptor_slots != 258 || counters.shader_reachable_descriptor_slots != 2 ||
+        counters.descriptor_batch_locks != 2 || counters.heap_global_generation_changes_seen != 1) {
+      std::cerr << "DXBC SM5 " << test.name << ": unbounded table static shader footprint mismatch (requests="
+                << counters.descriptor_requests << ", scans=" << counters.descriptor_scans_executed
+                << ", skips=" << counters.descriptor_scan_skips << ", slots=" << counters.descriptor_slots_visited
+                << ", locks=" << counters.descriptor_batch_locks
+                << ", global=" << counters.heap_global_generation_changes_seen << ")\n";
+      cleanup();
+      return false;
+    }
+  }
+
+  if (test.direct_indexed_heap_scan) {
+    const auto counters = static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list)->GetAirconvResidencyCounters();
+    if (counters.root_scan_requests != 4 || counters.root_scan_skips != 4 ||
+        counters.descriptor_requests != 4 ||
+        counters.descriptor_scans_executed != 3 ||
+        counters.descriptor_scan_skips != 1 ||
+        counters.descriptor_slots_visited != 5 ||
+        counters.descriptor_batch_locks != 3 ||
+        counters.direct_indexed_root_requests != 4 ||
+        counters.direct_indexed_scans != 3 ||
+        counters.direct_indexed_descriptors != 5 ||
+        counters.pending_descriptors_inserted != 2 ||
+        counters.pending_descriptor_duplicates != 1 ||
+        counters.heap_generation_invalidations != 1) {
+      std::cerr << "DXBC SM5 " << test.name
+                << ": direct-indexed scan did not cover the resource slots\n";
+      cleanup();
+      return false;
+    }
+  }
+
+  if (test.root_cbv_mutation || test.root_srv_mutation || test.root_uav_mutation) {
+    auto *internal_list = static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list);
+    const auto counters = internal_list->GetAirconvResidencyCounters();
+    const uint64_t expected_va_lookups = test.root_cbv_mutation ? 2 :
+                                         test.root_srv_mutation && test.root_uav_mutation ? 4 : 3;
+    if (counters.root_scan_requests != 3 || counters.root_scans_executed != 2 ||
+        counters.root_scan_skips != 1 || counters.root_deserializer_creates != 0 ||
+        counters.root_va_lookups != expected_va_lookups) {
+      std::cerr << "DXBC SM5 " << test.name << ": root-address mutation did not invalidate residency exactly once\n";
+      cleanup();
+      return false;
+    }
+  }
+
+  if (test.release_resources_before_execute) {
+    // D3D12 command recording must retain resources referenced by root
+    // descriptors until the queue has finished translating and executing the
+    // command list.  This deliberately releases the application references
+    // after Close and before ExecuteCommandLists.
+    Release(root_uav_data);
+    root_uav_data = nullptr;
+    Release(root_data);
+    root_data = nullptr;
+  }
+
+  ID3D12CommandList *command_lists[] = {list};
+  queue->ExecuteCommandLists(1, command_lists);
+  if (!CheckHR("CreateFence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence))) ||
+      !CheckHR("Signal", queue->Signal(fence, 1)))
+    return fail("queue submission failed");
+  event = CreateEventA(nullptr, FALSE, FALSE, nullptr);
+  if (!event || !CheckHR("SetEventOnCompletion", fence->SetEventOnCompletion(1, event)))
+    return fail("fence setup failed");
+  if (WaitForSingleObject(event, INFINITE) != WAIT_OBJECT_0)
+    return fail("queue wait failed");
+
+  if (test.descriptor_mutation) {
+    const auto counters = static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list)->GetAirconvResidencyCounters();
+    if (counters.submission_pending_uses != 1 || counters.submission_unique_heaps != 1 ||
+        counters.submission_unique_slots != 1 || counters.submission_batch_locks != 1 ||
+        counters.submission_live_slot_resolutions != 1 || counters.submission_slot_reuse_hits != 0 ||
+        counters.submission_fanout_uses != 1) {
+      std::cerr << "DXBC SM5 " << test.name << ": submission did not resolve the post-Close descriptor value once\n";
+      cleanup();
+      return false;
+    }
+  }
+
+  if (test.descriptor_encoder_break) {
+    const auto counters = static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list)->GetAirconvResidencyCounters();
+    const auto expected_slots = 1u;
+    const auto expected_uses = expected_slots * 3u;
+    if (counters.submission_pending_uses != expected_uses || counters.submission_unique_heaps != 1 ||
+        counters.submission_unique_slots != expected_slots || counters.submission_batch_locks != 1 ||
+        counters.submission_live_slot_resolutions != expected_slots ||
+        counters.submission_slot_reuse_hits != expected_uses - expected_slots ||
+        counters.submission_fanout_uses != expected_uses) {
+      std::cerr << "DXBC SM5 " << test.name << ": same-slot resolution was not deduplicated across encoders\n";
+      cleanup();
+      return false;
+    }
+  }
+
+  if (test.direct_indexed_heap_scan) {
+    const auto counters = static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list)->GetAirconvResidencyCounters();
+    if (counters.submission_pending_uses != 2 ||
+        counters.submission_unique_heaps != 1 ||
+        counters.submission_unique_slots != 2 ||
+        counters.submission_batch_locks != 1 ||
+        counters.submission_live_slot_resolutions != 2 ||
+        counters.submission_slot_reuse_hits != 2 ||
+        counters.submission_fanout_uses != 4) {
+      std::cerr
+          << "DXBC SM5 " << test.name
+          << ": submission did not resolve the direct-indexed resource slots\n";
+      cleanup();
+      return false;
+    }
+  }
+
+  if (test.descriptor_incompatible_range) {
+    const auto counters = static_cast<dxmt::MTLD3D12GraphicsCommandList *>(list)->GetAirconvResidencyCounters();
+    if (counters.submission_pending_uses != 2 || counters.submission_unique_heaps != 1 ||
+        counters.submission_unique_slots != 1 || counters.submission_batch_locks != 1 ||
+        counters.submission_live_slot_resolutions != 1 || counters.submission_slot_reuse_hits != 1 ||
+        counters.submission_fanout_uses != 2) {
+      std::cerr << "DXBC SM5 " << test.name << ": slot resolution did not preserve per-range acceptance\n";
+      cleanup();
+      return false;
+    }
+  }
+
+  if (!CheckHR("MapReadback", readback->Map(0, nullptr, reinterpret_cast<void **>(&mapped_readback))))
+    return fail("readback mapping failed");
+  const UINT pixel = *reinterpret_cast<const UINT *>(mapped_readback);
+  readback->Unmap(0, nullptr);
+  mapped_readback = nullptr;
+  if (test.geometry_root_srv_uav) {
+    if (!CheckHR("MapRootUAVReadback", uav_readback->Map(0, nullptr, &mapped_uav_readback)))
+      return fail("root UAV readback mapping failed");
+    static constexpr uint32_t expected_root_uav_green[] = {0x00000000u, 0x3f800000u, 0x00000000u, 0x3f800000u};
+    static constexpr uint32_t expected_root_uav_red[] = {0x3f800000u, 0x00000000u, 0x00000000u, 0x3f800000u};
+    const auto *expected_root_uav = test.root_srv_mutation ? expected_root_uav_red : expected_root_uav_green;
+    if (std::memcmp(mapped_uav_readback, expected_root_uav, sizeof(expected_root_uav_green)) != 0) {
+      const auto *actual_root_uav = static_cast<const uint32_t *>(mapped_uav_readback);
+      std::cerr << "DXBC SM5 " << test.name << ": root UAV data mismatch: 0x" << std::hex
+                << actual_root_uav[0] << ",0x" << actual_root_uav[1] << ",0x" << actual_root_uav[2] << ",0x"
+                << actual_root_uav[3] << std::dec << "\n";
+      uav_readback->Unmap(0, nullptr);
+      mapped_uav_readback = nullptr;
+      return fail("root UAV data mismatch");
+    }
+    uav_readback->Unmap(0, nullptr);
+    mapped_uav_readback = nullptr;
+  }
+  if ((pixel & 0x00ffffffu) != test.expected_rgb) {
+    std::cerr << "DXBC SM5 " << test.name << ": readback mismatch: 0x" << std::hex << pixel
+              << " (expected 0x" << test.expected_rgb << ")" << std::dec << "\n";
+    cleanup();
+    return false;
+  }
+
+  std::cout << "DXBC SM5 " << test.name << " readback passed: 0x" << std::hex << pixel << std::dec << "\n";
+  cleanup();
+  return true;
+}
+
+bool RunTriangleStripAdjacency(pD3DCompile compiler, const char *index_mode,
+                               UINT count, UINT gs_instances, bool wrong,
+                               UINT cut_pattern) {
+  using dxmt::Com;
+  const bool indexed = std::strcmp(index_mode, "none") != 0;
+  const bool index32 = std::strcmp(index_mode, "u32") == 0;
+  if ((indexed && !index32 && std::strcmp(index_mode, "u16")) || count > 280 ||
+      (gs_instances != 1 && gs_instances != 3) || (cut_pattern && !indexed))
+    return false;
+  std::string source =
+      std::string("#define GS_COUNT ") + std::to_string(gs_instances) + R"HLSL(
+struct V { float4 position : SV_Position; nointerpolation uint id : TEXCOORD0; nointerpolation uint instance : TEXCOORD1; };
+struct O { float4 position : SV_Position; nointerpolation float4 value : TEXCOORD0; };
+V vs_main(uint id : SV_VertexID, uint instance : SV_InstanceID) {
+  V v; v.position = float4(0,0,0,1); v.id = id; v.instance = instance; return v;
+}
+[instance(GS_COUNT)] [maxvertexcount(7)]
+void gs_main(triangleadj V input[6], uint primitive : SV_PrimitiveID,
+             uint gs_instance : SV_GSInstanceID, inout PointStream<O> output) {
+  for (uint k = 0; k < 7; ++k) {
+    uint x = primitive * 7 + k;
+    uint y = input[0].instance * GS_COUNT + gs_instance;
+    O o; o.position = float4((float(x)+0.5)/1024.0*2.0-1.0,
+                             1.0-(float(y)+0.5)/(2.0*GS_COUNT)*2.0,0,1);
+    o.value = float4(k < 6 ? float(input[min(k, 5u)].id + 1) : 1.0, 1, 1, 1);
+    output.Append(o);
+  }
+}
+float4 ps_main(O input) : SV_Target { return input.value; }
+)HLSL";
+  if (cut_pattern == 25) {
+    auto pos = source.find("triangleadj V input[6]");
+    if (pos == std::string::npos)
+      return false;
+    source.replace(pos, std::strlen("triangleadj V input[6]"), "triangle V input[3]");
+    pos = source.find("min(k, 5u)");
+    if (pos == std::string::npos)
+      return false;
+    source.replace(pos, std::strlen("min(k, 5u)"), "min(k, 2u)");
+  }
+  std::vector<uint8_t> vs, gs, ps;
+  if (!CompileShader(compiler, source.c_str(), "adj_dx12", "vs_main", "vs_5_0",
+                     vs) ||
+      !CompileShader(compiler, source.c_str(), "adj_dx12", "gs_main", "gs_5_0",
+                     gs) ||
+      !CompileShader(compiler, source.c_str(), "adj_dx12", "ps_main", "ps_5_0",
+                     ps))
+    return false;
+  Com<ID3D12Device> device;
+  Com<ID3D12CommandQueue> queue;
+  Com<ID3D12CommandAllocator> allocator;
+  Com<ID3D12GraphicsCommandList> list;
+  Com<ID3D12RootSignature> root;
+  Com<ID3D12PipelineState> pso;
+  Com<ID3D12DescriptorHeap> rtvs;
+  Com<ID3D12Resource> ib, target, readback, indirect_args, gpu_ib, gpu_args;
+  Com<ID3D12CommandSignature> indirect_signature;
+  Com<ID3D12RootSignature> compute_root;
+  Com<ID3D12PipelineState> compute_pso;
+  Com<ID3D12Fence> fence;
+  Com<ID3DBlob> blob;
+  if (!CheckHR("adj device", D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
+                                               IID_PPV_ARGS(&device))))
+    return false;
+  D3D12_ROOT_SIGNATURE_DESC root_desc = {};
+  root_desc.Flags =
+      D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+  if (!CheckHR("adj root serialize",
+               D3D12SerializeRootSignature(
+                   &root_desc, D3D_ROOT_SIGNATURE_VERSION_1, &blob, nullptr)) ||
+      !CheckHR("adj root", device->CreateRootSignature(
+                               0, blob->GetBufferPointer(),
+                               blob->GetBufferSize(), IID_PPV_ARGS(&root))))
+    return false;
+  D3D12_GRAPHICS_PIPELINE_STATE_DESC desc = {};
+  desc.pRootSignature = root.ptr();
+  desc.VS = {vs.data(), vs.size()};
+  desc.GS = {gs.data(), gs.size()};
+  desc.PS = {ps.data(), ps.size()};
+  desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+  const bool cut_enabled = (cut_pattern && cut_pattern < 4) || cut_pattern == 7 ||
+                           cut_pattern == 11 || cut_pattern == 12 || cut_pattern == 24 || cut_pattern == 26 || cut_pattern == 27;
+  if (cut_enabled)
+    desc.IBStripCutValue = index32
+                               ? D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFFFFFF
+                               : D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFF;
+  desc.NumRenderTargets = 1;
+  desc.RTVFormats[0] = DXGI_FORMAT_R32G32B32A32_FLOAT;
+  desc.SampleDesc.Count = 1;
+  desc.SampleMask = ~0u;
+  desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+  desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+  desc.RasterizerState.DepthClipEnable = TRUE;
+  auto &blend = desc.BlendState.RenderTarget[0];
+  blend.BlendEnable = TRUE;
+  blend.SrcBlend = blend.DestBlend = D3D12_BLEND_ONE;
+  blend.BlendOp = D3D12_BLEND_OP_ADD;
+  blend.SrcBlendAlpha = blend.DestBlendAlpha = D3D12_BLEND_ONE;
+  blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+  blend.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+  if (!CheckHR("adj PSO",
+               device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&pso))))
+    return false;
+  auto *pipeline =
+      static_cast<dxmt::MTLD3D12GraphicsPipelineState *>(pso.ptr());
+  if (pipeline->shader_backend != dxmt::D3D12ShaderBackend::Airconv ||
+      !pipeline->airconv_geometry)
+    return false;
+  if (cut_pattern == 25 && pipeline->airconv_geometry_restart)
+    return false;
+  constexpr UINT width = 1024, first = 3, base = 5;
+  const UINT height = 2 * gs_instances, pitch = width * 16;
+  std::vector<UINT> indices(first + std::max(count, 1u));
+  for (UINT i = 0; i < count; ++i) {
+    indices[first + i] = (i * 7 + 3) % 251;
+    if (((cut_pattern == 1 || cut_pattern == 7 || cut_pattern == 11 || cut_pattern == 12 || cut_pattern == 26 || cut_pattern == 27) &&
+         (i == 7 || i == 18 || i == 19 || i == 27 || i == 56)) ||
+        (cut_pattern == 2 && (i == 27 || i == 28 || i == 55)) ||
+        (cut_pattern == 3 && (i == 255 || i == 256 || i == 257)) ||
+        ((cut_pattern == 4 || cut_pattern == 5 || cut_pattern == 6) && i == 10))
+      indices[first + i] = index32 ? ~0u : 0xffffu;
+  }
+  auto upload = HeapProperties(D3D12_HEAP_TYPE_UPLOAD);
+  auto readback_heap = HeapProperties(D3D12_HEAP_TYPE_READBACK);
+  auto default_heap = HeapProperties(D3D12_HEAP_TYPE_DEFAULT);
+  auto ib_desc = BufferDescription(indices.size() * (index32 ? 4 : 2));
+  auto readback_desc = BufferDescription(UINT64(pitch) * height);
+  D3D12_RESOURCE_DESC tex = {};
+  tex.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+  tex.Width = width;
+  tex.Height = height;
+  tex.DepthOrArraySize = tex.MipLevels = tex.SampleDesc.Count = 1;
+  tex.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+  tex.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+  if (!CheckHR("adj IB", device->CreateCommittedResource(
+                             &upload, D3D12_HEAP_FLAG_NONE, &ib_desc,
+                             D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                             IID_PPV_ARGS(&ib))) ||
+      !CheckHR("adj readback",
+               device->CreateCommittedResource(
+                   &readback_heap, D3D12_HEAP_FLAG_NONE, &readback_desc,
+                   D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                   IID_PPV_ARGS(&readback))) ||
+      !CheckHR("adj target", device->CreateCommittedResource(
+                                 &default_heap, D3D12_HEAP_FLAG_NONE, &tex,
+                                 D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr,
+                                 IID_PPV_ARGS(&target))))
+    return false;
+  void *mapped = nullptr;
+  if (!CheckHR("adj map IB", ib->Map(0, nullptr, &mapped)))
+    return false;
+  for (UINT i = 0; i < indices.size(); ++i)
+    if (index32)
+      static_cast<UINT *>(mapped)[i] = indices[i];
+    else
+      static_cast<uint16_t *>(mapped)[i] = uint16_t(indices[i]);
+  ib->Unmap(0, nullptr);
+  if (cut_pattern == 26 || cut_pattern == 27) {
+    if (cut_pattern == 27 && count != 70)
+      return false;
+    auto gpu_ib_desc = ib_desc;
+    if (cut_pattern == 27) {
+      gpu_ib_desc.Width = (gpu_ib_desc.Width + 3) & ~UINT64(3);
+      gpu_ib_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    }
+    if (!CheckHR("adj GPU IB", device->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE, &gpu_ib_desc,
+            cut_pattern == 27 ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS : D3D12_RESOURCE_STATE_COPY_DEST,
+            nullptr, IID_PPV_ARGS(&gpu_ib))))
+      return false;
+  }
+  D3D12_DESCRIPTOR_HEAP_DESC rtv_desc = {};
+  rtv_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+  rtv_desc.NumDescriptors = 1;
+  D3D12_COMMAND_QUEUE_DESC queue_desc = {};
+  if (!CheckHR("adj RTV heap",
+               device->CreateDescriptorHeap(&rtv_desc, IID_PPV_ARGS(&rtvs))) ||
+      !CheckHR("adj queue",
+               device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&queue))) ||
+      !CheckHR("adj allocator",
+               device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                              IID_PPV_ARGS(&allocator))) ||
+      !CheckHR("adj list",
+               device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                         allocator.ptr(), pso.ptr(),
+                                         IID_PPV_ARGS(&list))) ||
+      !CheckHR("adj fence", device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                                IID_PPV_ARGS(&fence))))
+    return false;
+  auto rtv = rtvs->GetCPUDescriptorHandleForHeapStart();
+  device->CreateRenderTargetView(target.ptr(), nullptr, rtv);
+  if (cut_pattern == 26) {
+    list->CopyBufferRegion(gpu_ib.ptr(), 0, ib.ptr(), 0, ib_desc.Width);
+    D3D12_RESOURCE_BARRIER ready = {};
+    ready.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    ready.Transition = {gpu_ib.ptr(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                        D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_INDEX_BUFFER};
+    list->ResourceBarrier(1, &ready);
+  }
+  list->SetGraphicsRootSignature(root.ptr());
+  list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+  float clear[] = {0, 0, 0, 0};
+  list->ClearRenderTargetView(rtv, clear, 0, nullptr);
+  D3D12_VIEWPORT viewport = {0, 0, float(width), float(height), 0, 1};
+  D3D12_RECT scissor = {0, 0, LONG(width), LONG(height)};
+  list->RSSetViewports(1, &viewport);
+  list->RSSetScissorRects(1, &scissor);
+  list->IASetPrimitiveTopology(cut_pattern == 5
+                                   ? D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST_ADJ
+                                   : D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP_ADJ);
+  if (indexed) {
+    D3D12_INDEX_BUFFER_VIEW view = {
+        (gpu_ib ? gpu_ib.ptr() : ib.ptr())->GetGPUVirtualAddress(), cut_pattern == 25 ? 6u * (index32 ? 4u : 2u) : UINT(ib_desc.Width),
+        index32 ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT};
+    list->IASetIndexBuffer(&view);
+    if (cut_pattern == 6 || cut_pattern == 7 || cut_pattern == 8 ||
+        cut_pattern == 9 || cut_pattern == 10 || cut_pattern == 12 || cut_pattern == 26 || cut_pattern == 27) {
+      D3D12_INDIRECT_ARGUMENT_DESC argument_desc = {};
+      argument_desc.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED;
+      D3D12_COMMAND_SIGNATURE_DESC signature_desc = {};
+      signature_desc.ByteStride = sizeof(D3D12_DRAW_INDEXED_ARGUMENTS);
+      signature_desc.NumArgumentDescs = 1;
+      signature_desc.pArgumentDescs = &argument_desc;
+      auto argument_buffer_desc =
+          BufferDescription(sizeof(D3D12_DRAW_INDEXED_ARGUMENTS));
+      if (!CheckHR("adj indirect signature",
+                   device->CreateCommandSignature(
+                       &signature_desc, nullptr,
+                       IID_PPV_ARGS(&indirect_signature))) ||
+          !CheckHR("adj indirect buffer",
+                   device->CreateCommittedResource(
+                       &upload, D3D12_HEAP_FLAG_NONE, &argument_buffer_desc,
+                       D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                       IID_PPV_ARGS(&indirect_args))) ||
+          !CheckHR("adj indirect map", indirect_args->Map(0, nullptr, &mapped)))
+        return false;
+      *static_cast<D3D12_DRAW_INDEXED_ARGUMENTS *>(mapped) = {
+          cut_pattern == 9 ? ~0u : (cut_pattern == 10 ? 1u : (cut_pattern == 8 ? count + 10 : count)),
+          2, cut_pattern == 10 ? ~0u : first, INT(base), 0};
+      indirect_args->Unmap(0, nullptr);
+      if (cut_pattern == 26 || cut_pattern == 27) {
+        auto gpu_args_desc = argument_buffer_desc;
+        if (cut_pattern == 27)
+          gpu_args_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        if (!CheckHR("adj GPU args", device->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE,
+            &gpu_args_desc, cut_pattern == 27 ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS : D3D12_RESOURCE_STATE_COPY_DEST,
+            nullptr, IID_PPV_ARGS(&gpu_args))))
+          return false;
+        if (cut_pattern == 27) {
+          D3D12_ROOT_PARAMETER params[2] = {};
+          for (UINT i = 0; i < 2; ++i) {
+            params[i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+            params[i].Descriptor.ShaderRegister = i;
+            params[i].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+          }
+          D3D12_ROOT_SIGNATURE_DESC compute_root_desc = {};
+          compute_root_desc.NumParameters = 2;
+          compute_root_desc.pParameters = params;
+          Com<ID3DBlob> compute_blob;
+          if (!CheckHR("adj compute root serialize", D3D12SerializeRootSignature(&compute_root_desc,
+                  D3D_ROOT_SIGNATURE_VERSION_1, &compute_blob, nullptr)) ||
+              !CheckHR("adj compute root", device->CreateRootSignature(0, compute_blob->GetBufferPointer(),
+                  compute_blob->GetBufferSize(), IID_PPV_ARGS(&compute_root))))
+            return false;
+          std::string cs_source = std::string("#define INDEX32 ") + (index32 ? "1\n" : "0\n") + R"HLSL(
+RWByteAddressBuffer ib : register(u0); RWByteAddressBuffer args : register(u1);
+uint value(uint n) { if (n < 3 || n >= 73) return 0; uint i=n-3;
+  if (i==7 || i==18 || i==19 || i==27 || i==56) return INDEX32 ? 0xffffffffu : 0xffffu;
+  return (i*7+3)%251; }
+[numthreads(1,1,1)] void main() {
+  if (INDEX32) { for (uint n=0;n<73;++n) ib.Store(n*4,value(n)); }
+  else { for (uint n=0;n<74;n+=2) ib.Store(n*2,value(n)|(value(n+1)<<16)); }
+  args.Store(0,70); args.Store(4,2); args.Store(8,3); args.Store(12,5); args.Store(16,0);
+})HLSL";
+          std::vector<uint8_t> cs;
+          if (!CompileShader(compiler, cs_source.c_str(), "adj_gpu_writer", "main", "cs_5_0", cs))
+            return false;
+          D3D12_COMPUTE_PIPELINE_STATE_DESC compute_desc = {};
+          compute_desc.pRootSignature = compute_root.ptr();
+          compute_desc.CS = {cs.data(), cs.size()};
+          if (!CheckHR("adj compute PSO", device->CreateComputePipelineState(&compute_desc, IID_PPV_ARGS(&compute_pso))))
+            return false;
+          list->SetPipelineState(compute_pso.ptr());
+          list->SetComputeRootSignature(compute_root.ptr());
+          list->SetComputeRootUnorderedAccessView(0, gpu_ib->GetGPUVirtualAddress());
+          list->SetComputeRootUnorderedAccessView(1, gpu_args->GetGPUVirtualAddress());
+          list->Dispatch(1, 1, 1);
+          D3D12_RESOURCE_BARRIER ib_ready = {};
+          ib_ready.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+          ib_ready.Transition = {gpu_ib.ptr(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+              D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_INDEX_BUFFER};
+          list->ResourceBarrier(1, &ib_ready);
+          list->SetPipelineState(pso.ptr());
+        } else {
+          list->CopyBufferRegion(gpu_args.ptr(), 0, indirect_args.ptr(), 0, sizeof(D3D12_DRAW_INDEXED_ARGUMENTS));
+        }
+        D3D12_RESOURCE_BARRIER ready = {};
+        ready.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        ready.Transition = {gpu_args.ptr(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                            cut_pattern == 27 ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS : D3D12_RESOURCE_STATE_COPY_DEST,
+                            D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT};
+        list->ResourceBarrier(1, &ready);
+      }
+      list->ExecuteIndirect(indirect_signature.ptr(), 1, gpu_args ? gpu_args.ptr() : indirect_args.ptr(), 0,
+                            nullptr, 0);
+    } else {
+      list->DrawIndexedInstanced(count, cut_pattern == 24 ? 0 : 2, first, base, 0);
+    }
+  } else
+    list->DrawInstanced(count, 2, base, 0);
+  D3D12_RESOURCE_BARRIER barrier = {};
+  barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+  barrier.Transition = {target.ptr(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                        D3D12_RESOURCE_STATE_RENDER_TARGET,
+                        D3D12_RESOURCE_STATE_COPY_SOURCE};
+  list->ResourceBarrier(1, &barrier);
+  D3D12_TEXTURE_COPY_LOCATION src = {}, dst = {};
+  src.pResource = target.ptr();
+  src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+  dst.pResource = readback.ptr();
+  dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+  dst.PlacedFootprint.Footprint = {DXGI_FORMAT_R32G32B32A32_FLOAT, width,
+                                   height, 1, pitch};
+  list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+  if (cut_pattern == 11 || cut_pattern == 12) {
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    list->ResourceBarrier(1, &barrier);
+  }
+  if (!CheckHR("adj close", list->Close()))
+    return false;
+  ID3D12CommandList *lists[] = {list.ptr()};
+  queue->ExecuteCommandLists(1, lists);
+  HANDLE event = CreateEventA(nullptr, FALSE, FALSE, nullptr);
+  if (!event)
+    return false;
+  bool done =
+      CheckHR("adj signal", queue->Signal(fence.ptr(), 1)) &&
+      CheckHR("adj completion", fence->SetEventOnCompletion(1, event)) &&
+      WaitForSingleObject(event, 30000) == WAIT_OBJECT_0;
+  CloseHandle(event);
+  if (!done || !CheckHR("adj status", device->GetDeviceRemovedReason()))
+    return false;
+  std::vector<float> expected(width * height * 4, 0);
+  // Segment the input independently of the GPU assembly path. Primitive IDs
+  // continue across cuts and restart for each draw instance.
+  struct Primitive {
+    UINT input[6];
+  };
+  std::vector<Primitive> assembled;
+  if (cut_pattern == 5) {
+    for (UINT i = 0; i + 6 <= count; i += 6)
+      assembled.push_back({{i, i + 1, i + 2, i + 3, i + 4, i + 5}});
+  }
+  for (UINT begin = 0; cut_pattern != 5 && cut_pattern != 8 && cut_pattern != 9 && cut_pattern != 10 && cut_pattern != 24 && cut_pattern != 25 && begin < count;) {
+    UINT end = begin;
+    const UINT cut = index32 ? ~0u : 0xffffu;
+    while (end < count && (!cut_enabled || indices[first + end] != cut))
+      ++end;
+    const UINT complete = (end - begin) & ~1u;
+    const UINT segment_primitives = complete >= 6 ? (complete - 4) / 2 : 0;
+    for (UINT p = 0; p < segment_primitives; ++p) {
+      const UINT odd = p & 1, lead = 2 * p;
+      assembled.push_back(
+          {{begin + lead, begin + (odd ? lead + 3 : (p ? lead - 2 : 1)),
+            begin + 2 * (p + 1 + odd),
+            begin + (p + 1 == segment_primitives ? complete - 1 : lead + 6),
+            begin + 2 * (p + 2 - odd), begin + (odd ? lead - 2 : lead + 3)}});
+    }
+    begin = end < count ? end + 1 : count;
+  }
+  const UINT primitives = UINT(assembled.size());
+  for (UINT instance = 0; instance < 2; ++instance)
+    for (UINT g = 0; g < gs_instances; ++g)
+      for (UINT p = 0; p < primitives; ++p)
+        for (UINT k = 0; k < 7; ++k) {
+          float *out =
+              &expected[((instance * gs_instances + g) * width + p * 7 + k) *
+                        4];
+          out[0] = k == 6
+                       ? 1.0f
+                       : float((indexed ? indices[first + assembled[p].input[k]]
+                                        : assembled[p].input[k]) +
+                               1);
+          out[1] = out[2] = out[3] = 1;
+        }
+  if (wrong && primitives)
+    expected[0] += 1;
+  if (!CheckHR("adj readback map", readback->Map(0, nullptr, &mapped)))
+    return false;
+  bool ok = true;
+  for (UINT i = 0; i < expected.size(); ++i)
+    if (static_cast<const float *>(mapped)[i] != expected[i]) {
+      std::cerr << "FAIL D3D12 TRIANGLESTRIP_ADJ mode=" << index_mode
+                << " count=" << count << " gs=" << gs_instances
+                << " cut_pattern=" << cut_pattern << " element=" << i
+                << " got=" << static_cast<const float *>(mapped)[i]
+                << " expected=" << expected[i] << "\n";
+      ok = false;
+      break;
+    }
+  readback->Unmap(0, nullptr);
+  if (ok && (cut_pattern == 11 || cut_pattern == 12)) {
+    Com<ID3D12Fence> gate;
+    if (!CheckHR("adj lifetime gate", device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate))))
+      return false;
+    struct Unblock { ID3D12Fence *gate; ~Unblock() { gate->Signal(1); } } unblock{gate.ptr()};
+    HANDLE event = CreateEventA(nullptr, FALSE, FALSE, nullptr);
+    if (!event)
+      return false;
+    for (UINT pass = 2; pass <= 3 && ok; ++pass) {
+      if (pass == 3 && !CheckHR("adj queue gate", queue->Wait(gate.ptr(), 1))) {
+        ok = false;
+        break;
+      }
+      ID3D12CommandList *replay[] = {list.ptr()};
+      queue->ExecuteCommandLists(1, replay);
+      if (pass == 3) {
+        if (SUCCEEDED(allocator->Reset())) {
+          std::cerr << "FAIL adj pending allocator reset accepted\n";
+          ok = false;
+          break;
+        }
+        list = nullptr; allocator = nullptr; pso = nullptr; root = nullptr;
+        ib = nullptr; target = nullptr; rtvs = nullptr;
+        indirect_args = nullptr; indirect_signature = nullptr;
+        if (!CheckHR("adj release gate", gate->Signal(1))) {
+          ok = false;
+          break;
+        }
+      }
+      if (!CheckHR("adj replay signal", queue->Signal(fence.ptr(), pass)) ||
+          !CheckHR("adj replay fence", fence->SetEventOnCompletion(pass, event)) ||
+          WaitForSingleObject(event, 30000) != WAIT_OBJECT_0 ||
+          !CheckHR("adj replay status", device->GetDeviceRemovedReason()) ||
+          !CheckHR("adj replay map", readback->Map(0, nullptr, &mapped))) {
+        ok = false;
+        break;
+      }
+      for (UINT i = 0; i < expected.size(); ++i)
+        if (static_cast<const float *>(mapped)[i] != expected[i]) {
+          std::cerr << "FAIL adj replay pass=" << pass << " element=" << i
+                    << " got=" << static_cast<const float *>(mapped)[i]
+                    << " expected=" << expected[i] << "\n";
+          ok = false;
+          break;
+        }
+      readback->Unmap(0, nullptr);
+    }
+    CloseHandle(event);
+    if (ok)
+      std::cout << "D3D12 adj replay and gated release PASS\n";
+  }
+  if (ok)
+    std::cout << "D3D12 TRIANGLESTRIP_ADJ mode=" << index_mode
+              << " count=" << count << " gs=" << gs_instances
+              << " cut_pattern=" << cut_pattern << " primitives=" << primitives
+              << " checked_pixels=" << width * height << " PASS\n";
+  return ok;
+}
+
+} // namespace
+
+int main(int argc, char **argv) {
+  if ((argc == 5 || argc == 6) && !std::strcmp(argv[1], "--tri-strip-adj")) {
+    HMODULE module = LoadLibraryA(D3DCOMPILER_DLL_A);
+    if (!module)
+      return 1;
+    auto compiler =
+        reinterpret_cast<pD3DCompile>(GetProcAddress(module, "D3DCompile"));
+    const bool ok =
+        compiler &&
+        RunTriangleStripAdjacency(
+            compiler, argv[2], UINT(std::strtoul(argv[3], nullptr, 10)),
+            UINT(std::strtoul(argv[4], nullptr, 10)),
+            argc == 6 && !std::strcmp(argv[5], "--wrong-expected"),
+            argc == 6 && !std::strcmp(argv[5], "--cuts")                  ? 1
+            : argc == 6 && !std::strcmp(argv[5], "--cuts-boundary")       ? 2
+            : argc == 6 && !std::strcmp(argv[5], "--cuts-scan")           ? 3
+            : argc == 6 && !std::strcmp(argv[5], "--no-cut-max")          ? 4
+            : argc == 6 && !std::strcmp(argv[5], "--list-max")            ? 5
+            : argc == 6 && !std::strcmp(argv[5], "--no-cut-max-indirect") ? 6
+            : argc == 6 && !std::strcmp(argv[5], "--cuts-indirect")       ? 7
+            : argc == 6 && !std::strcmp(argv[5], "--indirect-oob")        ? 8
+            : argc == 6 && !std::strcmp(argv[5], "--indirect-huge") ? 9
+            : argc == 6 && !std::strcmp(argv[5], "--indirect-first-huge") ? 10
+            : argc == 6 && !std::strcmp(argv[5], "--lifetime-cuts") ? 11
+            : argc == 6 && !std::strcmp(argv[5], "--lifetime-indirect-cuts") ? 12
+            : argc == 6 && !std::strcmp(argv[5], "--zero-instance") ? 24
+            : argc == 6 && !std::strcmp(argv[5], "--mismatched-gs") ? 25
+            : argc == 6 && !std::strcmp(argv[5], "--gpu-copy-indirect") ? 26
+            : argc == 6 && !std::strcmp(argv[5], "--gpu-compute-indirect") ? 27
+                                                                          : 0);
+    FreeLibrary(module);
+    return ok ? 0 : 1;
+  }
+  static constexpr TestCase wide_case = [] {
+    TestCase test{};
+    test.name = "descriptor-wide-footprint";
+    test.topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+    test.expected_rgb = 0x0000ff00u;
+    test.null_texture_query = true;
+    test.descriptor_mutation = true;
+    test.descriptor_wide_footprint = true;
+    return test;
+  }();
+  static constexpr TestCase all_cases[] = {
+      wide_case,
+      {"list", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false, 0x00ffffffu},
+      {"strip", D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP, false, false, false, false, false, 0x00ffffffu},
+      {"indexed16", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, true, false, false, false, false, 0x00ffffffu},
+      {"indexed32", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, true, true, false, false, false, 0x00ffffffu},
+      {"indexed-strip16", D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP, true, false, false, false, false, 0x00ffffffu},
+      {"indexed-strip32", D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP, true, true, false, false, false, 0x00ffffffu},
+      {"adj", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST_ADJ, true, false, true, false, false, 0x00ffffffu},
+      {"adj-strip", D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP_ADJ, true, true, true, false, false, 0x00ffffffu},
+      {"root-cbv", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, true, false, 0x0000ff00u},
+      {"root-cbv-address-mutation", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, true, false,
+       0x000000ffu, false, false, false, false, false, false, false, true},
+      {"indirect", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, true, 0x00ffffffu},
+      {"indirect-indexed32", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, true, true, false, false, true, 0x00ffffffu},
+      {"zero-index-view", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false, 0x00ffffffu,
+       false, false, true},
+      {"no-input-gs", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false, 0x00ffffffu, true,
+       false},
+      {"geometry-root-cbv", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false, 0x0000ff00u,
+       false, true},
+      {"geometry-root-srv-uav", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false,
+       0x0000ff00u, false, false, false, true},
+      {"root-srv-address-mutation", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false,
+       0x000000ffu, false, false, false, true, false, false, false, false, true, false},
+      {"root-uav-address-mutation", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false,
+       0x0000ff00u, false, false, false, true, false, false, false, false, false, true},
+      {"root-srv-uav-address-mutation", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false,
+       0x000000ffu, false, false, false, true, false, false, false, false, true, true},
+      {"geometry-root-srv-uav-lifetime", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false,
+       0x0000ff00u, false, false, false, true, false, true},
+      {"null-texture-query", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false,
+       0x00ffffffu, false, false, false, false, true},
+      {"descriptor-residency-generation", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false,
+       0x0000ff00u, false, false, false, false, true, false, true},
+      {"descriptor-new-encoder", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false,
+       0x0000ff00u, false, false, false, false, true, false, false, false, false, false, true},
+      {"descriptor-direct-indexed", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false,
+       0x00ffffffu, false, false, false, false, false, false, false, false, false, false, false, true},
+      {"descriptor-incompatible-range", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false,
+       0x000000ffu, false, false, false, false, true, false, false, false, false, false, false, false, false, true},
+      {"descriptor-two-slots-new-encoder", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false,
+       0x0000ff00u, false, false, false, false, true, false, false, false, false, false, true, false, false, false,
+       true},
+      {"descriptor-unbounded-range", D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, false, false, false, false, false,
+       0x000000ffu, false, false, false, false, true, false, false, false, false, false, false, false, false, true,
+       false},
+  };
+
+  std::vector<const TestCase *> selected;
+  if (argc == 1 || (argc == 2 && std::strcmp(argv[1], "--all") == 0)) {
+    for (const auto &test : all_cases)
+      selected.push_back(&test);
+  } else if (argc >= 2 && std::strcmp(argv[1], "--help") == 0) {
+    std::cout << "usage: dx12_graphics_sm5 [--all|case ...]\n";
+    for (const auto &test : all_cases)
+      std::cout << "  " << test.name << "\n";
+    return 0;
+  } else {
+    for (int arg = 1; arg < argc; ++arg) {
+      const TestCase *match = nullptr;
+      for (const auto &test : all_cases) {
+        if (std::strcmp(argv[arg], test.name) == 0) {
+          match = &test;
+          break;
+        }
+      }
+      if (!match) {
+        std::cerr << "unknown SM5 geometry test: " << argv[arg] << "\n";
+        return 2;
+      }
+      selected.push_back(match);
+    }
+  }
+
+  HMODULE compiler = LoadLibraryA(D3DCOMPILER_DLL_A);
+  if (!compiler) {
+    std::cerr << "failed to load d3dcompiler_47.dll\n";
+    return 1;
+  }
+  auto compile_shader = reinterpret_cast<pD3DCompile>(GetProcAddress(compiler, "D3DCompile"));
+  if (!compile_shader) {
+    FreeLibrary(compiler);
+    std::cerr << "failed to load D3DCompile\n";
+    return 1;
+  }
+
+  ShaderSet shaders;
+  if (!CompileShaders(compile_shader, shaders)) {
+    FreeLibrary(compiler);
+    std::cerr << "SM5 shader compilation failed\n";
+    return 1;
+  }
+  ID3D12Device *device = nullptr;
+  if (!CheckHR("D3D12CreateDevice",
+               D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device))))
+    return 1;
+
+  bool result = TestFootprintStages(device, compile_shader);
+  FreeLibrary(compiler);
+  for (const auto *test : selected)
+    result = RunCase(device, shaders, *test) && result;
+  Release(device);
+  return result ? 0 : 1;
+}

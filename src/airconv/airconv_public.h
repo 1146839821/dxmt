@@ -5,7 +5,9 @@
 #ifndef __AIRCONV_H
 #define __AIRCONV_H
 
-#define AIRCONV_VERSION 24
+/* 32 invalidates AIR caches containing old geometry index-cut handling. */
+#define AIRCONV_VERSION 33
+#define SM50_ADJ_RESTART_EXPERIMENTAL 1
 
 #ifdef __cplusplus
 #include <string>
@@ -94,6 +96,11 @@ struct MTL_POST_TESSELLATOR_REFLECTION {
   uint32_t MaxPotentialTessFactor;
 };
 
+struct MTL_PIXEL_SHADER_REFLECTION {
+  uint32_t ValidRenderTargets;
+  uint32_t HasCoverageOutput;
+};
+
 struct MTL_SHADER_REFLECTION {
   uint32_t ConstanttBufferTableBindIndex;
   uint32_t ArgumentBufferBindIndex;
@@ -104,7 +111,9 @@ struct MTL_SHADER_REFLECTION {
     struct MTL_TESSELLATOR_REFLECTION Tessellator;
     struct MTL_GEOMETRY_SHADER_REFLECTION GeometryShader;
     struct MTL_POST_TESSELLATOR_REFLECTION PostTessellator;
+    /* Kept as the first member of PixelShader for ABI compatibility. */
     uint32_t PSValidRenderTargets;
+    struct MTL_PIXEL_SHADER_REFLECTION PixelShader;
   };
   uint16_t ConstantBufferSlotMask;
   uint16_t SamplerSlotMask;
@@ -194,6 +203,7 @@ enum SM50_SHADER_COMPILATION_ARGUMENT_TYPE {
   SM50_SHADER_PSO_GEOMETRY_SHADER = 6,
   SM50_SHADER_PSO_TESSELLATOR = 7,
   SM50_SHADER_ROOT_SIGNATURE = 8,
+  SM50_SHADER_ROOT_SIGNATURE2 = 9,
   SM50_SHADER_ARGUMENT_TYPE_MAX = 0xffffffff,
 };
 
@@ -227,6 +237,14 @@ enum SM50_SHADER_METAL_VERSION {
 enum SM50_SHADER_FLAG {
   SM50_SHADER_FLAG_SAMPLE_NAN_TO_ZERO = 1 << 0,
   SM50_SHADER_FLAG_DEFUSE_FMA = 1 << 1,
+  SM50_SHADER_FLAG_EMIT_SO_INDIRECT = 1 << 2,
+  // D3D12 geometry PSOs specify the cut value independently of index format.
+  // With none of these flags, indexed D3D11 draws use their format maximum.
+  SM50_SHADER_FLAG_GEOMETRY_CUT_DISABLED = 1 << 3,
+  SM50_SHADER_FLAG_GEOMETRY_CUT_16 = 1 << 4,
+  SM50_SHADER_FLAG_GEOMETRY_CUT_32 = 1 << 5,
+  SM50_SHADER_FLAG_GEOMETRY_ADJ_RESTART = 1 << 6,
+  SM50_SHADER_FLAG_GEOMETRY_INDEX_OOB_ZERO = 1 << 7,
 };
 
 struct SM50_SHADER_COMMON_DATA {
@@ -243,6 +261,8 @@ struct SM50_SHADER_PSO_PIXEL_SHADER_DATA {
   bool dual_source_blending;
   bool disable_depth_output;
   uint32_t unorm_output_reg_mask;
+  /** MTLPixelFormat */
+  uint32_t pixel_formats[8];
 };
 
 struct SM50_IA_INPUT_ELEMENT {
@@ -308,6 +328,46 @@ AIRCONV_API int SM50Compile(
   sm50_shader_t pShader, struct SM50_SHADER_COMPILATION_ARGUMENT_DATA *pArgs,
   const char *FunctionName, sm50_bitcode_t *ppBitcode, sm50_error_t *ppError
 );
+AIRCONV_API int SM50PatchMetalLibUnsupportedDouble(
+  const void *Data, size_t Size, sm50_bitcode_t *pPatched
+);
+/* Parsed is zero when the input was passed through without inspecting AIR. */
+AIRCONV_API int SM50PatchMetalLibUnsupportedDoubleEx(
+  const void *Data, size_t Size, sm50_bitcode_t *pPatched, uint32_t *Parsed
+);
+/* Experimental, strict AIR shape only. No runtime caller is enabled yet. */
+struct SM50_MSC_LOD_SIDECAR_TABLE {
+  uint32_t sampler_table_offset;
+  uint32_t sidecar_offset;
+};
+enum SM50_MSC_LOD_PATCH_RESULT {
+  SM50_MSC_LOD_PATCHED = 0,
+  SM50_MSC_LOD_INVALID_INPUT = 1,
+  SM50_MSC_LOD_UNSUPPORTED = 2,
+  SM50_MSC_LOD_UNCHANGED = 3,
+};
+/* Infer the compute root argument from AIR entry metadata; reject ambiguity. */
+#define SM50_MSC_LOD_AUTO_ROOT_ARGUMENT UINT32_MAX
+#define SM50_MSC_ARGUMENT_BUFFER_BIND_POINT 2u
+AIRCONV_API int SM50PatchMetalLibSampleLevelLOD(
+  const void *Data, size_t Size, uint32_t RootArgumentIndex, uint32_t OriginalRootSize,
+  const struct SM50_MSC_LOD_SIDECAR_TABLE *Tables, size_t TableCount, sm50_bitcode_t *pPatched
+);
+/* Experimental typed-buffer sidecar rewrite; the runtime path is opt-in. */
+struct SM50_MSC_TYPED_BUFFER_TABLE {
+  uint32_t table_offset;
+  uint32_t sidecar_offset;
+};
+enum SM50_MSC_TYPED_BUFFER_PATCH_RESULT {
+  SM50_MSC_TYPED_BUFFER_PATCHED = 0,
+  SM50_MSC_TYPED_BUFFER_INVALID_INPUT = 1,
+  SM50_MSC_TYPED_BUFFER_UNSUPPORTED = 2,
+  SM50_MSC_TYPED_BUFFER_NOT_APPLICABLE = 3,
+};
+AIRCONV_API int SM50PatchMetalLibTypedBufferSidecar(
+  const void *Data, size_t Size, uint32_t OriginalRootSize, uint32_t ExtendedRootSize,
+  const struct SM50_MSC_TYPED_BUFFER_TABLE *Tables, size_t TableCount, sm50_bitcode_t *pPatched
+);
 AIRCONV_API void SM50GetCompiledBitcode(
   sm50_bitcode_t pBitcode, struct SM50_COMPILED_BITCODE *pData
 );
@@ -335,6 +395,20 @@ AIRCONV_API int SM50CompileGeometryPipelineGeometry(
   sm50_shader_t pVertexShader, sm50_shader_t pGeometryShader,
   struct SM50_SHADER_COMPILATION_ARGUMENT_DATA *pGeometryShaderArgs,
   const char *FunctionName, sm50_bitcode_t *ppBitcode, sm50_error_t *ppError
+);
+
+/* Declared register extents. UINT32_MAX count denotes an unbounded range. */
+struct SM50_RESOURCE_RANGE {
+  uint32_t type;
+  uint32_t range_id;
+  uint32_t lower_bound;
+  uint32_t count;
+  uint32_t space;
+};
+
+/* Returns the required element count; never writes past capacity. */
+AIRCONV_API uint32_t SM50GetResourceRanges(
+  sm50_shader_t shader, struct SM50_RESOURCE_RANGE *ranges, uint32_t capacity
 );
 
 AIRCONV_API void SM50GetArgumentsInfo(

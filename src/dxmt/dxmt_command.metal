@@ -17,13 +17,273 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
-#include <metal_common>
-#include <metal_texture>
-#include <metal_math>
+#include <metal_stdlib>
 #include "dxmt_command_constants.hpp"
 
 using namespace metal;
 using namespace dxmt;
+
+// A single preparation invocation snapshots the GPU cursor before parallel VS
+// writes. Its successor draw sees one immutable complete-primitive allocation.
+[[vertex]] void
+so_prepare_arguments(device StreamOutputDraw &p [[buffer(5)]]) {
+  p.indices = p.input_indices;
+  p.index_count = p.input_index_count;
+  if (p.input_arguments) {
+    device const uint *args = reinterpret_cast<device const uint *>(p.input_arguments);
+    p.input_count = args[0];
+    p.instance_count = args[1];
+    if (p.index_size) {
+      if ((p.flags & kSOHasCut) && (p.input_count > p.prefix_count ||
+                                    (!(p.flags & kSOFixedIndexSubrange) &&
+                                     (args[2] > p.prefix_count || p.input_count > p.prefix_count - args[2])))) {
+        p.capture_arguments[0] = p.capture_arguments[1] = 0;
+        p.primitive_budget = p.primitives_per_instance = 0;
+        return;
+      }
+      p.indices += ulong(args[2]) * p.index_size;
+      p.index_count = args[2] <= p.input_index_count ? p.input_index_count - args[2] : 0;
+      p.base_vertex = args[3];
+      p.base_instance = args[4];
+    } else {
+      p.base_vertex = args[2];
+      p.base_instance = args[3];
+    }
+  }
+  p.capture_arguments[0] = p.input_count;
+  p.capture_arguments[1] = p.instance_count;
+  p.capture_arguments[2] = p.capture_arguments[3] = 0;
+  p.primitives_per_instance =
+      p.input_count < p.input_window ? 0 : (ulong(p.input_count) - p.input_window) / p.input_step + 1;
+  if ((p.flags & kSOHasCut) && p.input_count)
+    p.primitives_per_instance = reinterpret_cast<device const uint2 *>(p.prefix)[p.input_count - 1].y;
+  p.base_offset = p.primitive_budget = 0;
+  if (!p.output_buffer || !p.counter_buffer || !p.stride || !p.primitive_vertices)
+    return;
+  device uint *counter = reinterpret_cast<device uint *>(p.counter_buffer);
+  const uint initial = *counter;
+  p.base_offset = initial;
+  if (initial <= p.output_size) {
+    const ulong primitive_bytes = ulong(p.stride) * p.primitive_vertices;
+    const ulong available = (p.output_size - initial) / primitive_bytes;
+    const ulong requested = p.primitives_per_instance * p.instance_count;
+    p.primitive_budget = available < requested ? available : requested;
+  }
+  *counter = uint(initial + p.primitive_budget * p.primitive_vertices * p.stride);
+}
+
+// Prefix summaries contain the first occurrence after the latest cut and the
+// inclusive number of complete primitives. The associative pair permits a
+// bounded-work parallel scan at every level; no input is scanned serially.
+inline void
+so_index_input(constant StreamOutputDraw &p, thread uint &count, thread ulong &indices, thread uint &bound) {
+  count = p.input_count;
+  indices = p.input_indices;
+  bound = p.input_index_count;
+  if (p.input_arguments) {
+    device const uint *args = reinterpret_cast<device const uint *>(p.input_arguments);
+    const uint first = args[2];
+    count = (p.flags & kSOAllowIndexOOB) ? args[0] :
+        (first <= p.prefix_count && args[0] <= p.prefix_count - first ? args[0] : 0);
+    indices += ulong(min(first, bound)) * p.index_size;
+    bound = first <= bound ? bound - first : 0;
+  }
+}
+
+[[kernel]] void
+so_index_segments(
+    device uint2 *values [[buffer(0)]], constant StreamOutputDraw &p [[buffer(2)]], uint i [[thread_position_in_grid]]
+) {
+  if (i >= p.input_count)
+    return;
+  uint count, bound;
+  ulong indices;
+  so_index_input(p, count, indices, bound);
+  uint marker = 0;
+  // With strip cut disabled, every index is vertex data and the first scan
+  // has no segment markers; avoid reading the input buffer at all.
+  if ((p.flags & kSOHasCut) && i < count) {
+    const uint index = i >= bound          ? 0
+                       : p.index_size == 2 ? uint(reinterpret_cast<device const ushort *>(indices)[i])
+                                           : reinterpret_cast<device const uint *>(indices)[i];
+    marker = index == p.cut_index ? i + 1 : 0;
+  }
+  values[i] = uint2(marker, 0);
+}
+
+[[kernel]] void
+so_index_primitives(
+    device uint2 *values [[buffer(0)]], constant StreamOutputDraw &p [[buffer(2)]], uint i [[thread_position_in_grid]]
+) {
+  if (i >= p.input_count)
+    return;
+  uint count, bound;
+  ulong indices;
+  so_index_input(p, count, indices, bound);
+  const uint segment = values[i].x;
+  const bool complete = i < count && p.input_window <= count - i;
+  const uint end = min(ulong(i) + p.input_window - 1, ulong(p.input_count - 1));
+  const bool valid =
+      complete && i >= segment && (i - segment) % p.input_step == 0 && values[end].x <= i;
+  values[i].y = valid ? 1 : 0;
+}
+
+[[kernel]] void
+so_index_small(
+    device uint2 *values [[buffer(0)]], constant StreamOutputDraw &p [[buffer(2)]],
+    uint lane [[thread_index_in_threadgroup]]
+) {
+  threadgroup uint2 partial[kSOScanThreadgroupSize];
+  uint count, bound;
+  ulong indices;
+  so_index_input(p, count, indices, bound);
+  uint marker = 0;
+  if (lane < p.input_count && lane < count && (p.flags & kSOHasCut)) {
+    const uint index = lane >= bound ? 0 : p.index_size == 2
+        ? uint(reinterpret_cast<device const ushort *>(indices)[lane])
+        : reinterpret_cast<device const uint *>(indices)[lane];
+    marker = index == p.cut_index ? lane + 1 : 0;
+  }
+  partial[lane] = uint2(marker, 0);
+  for (uint offset = 1; offset < kSOScanThreadgroupSize; offset <<= 1) {
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const uint previous = lane >= offset ? partial[lane - offset].x : 0;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    marker = max(marker, previous);
+    partial[lane].x = marker;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  const bool complete = lane < p.input_count && lane < count && p.input_window <= count - lane;
+  const uint end = uint(min(ulong(lane) + p.input_window - 1, ulong(p.input_count - 1)));
+  const bool valid = complete && lane >= marker && (lane - marker) % p.input_step == 0 && partial[end].x <= lane;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  uint primitives = valid ? 1 : 0;
+  partial[lane].y = primitives;
+  for (uint offset = 1; offset < kSOScanThreadgroupSize; offset <<= 1) {
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const uint previous = lane >= offset ? partial[lane - offset].y : 0;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    primitives += previous;
+    partial[lane].y = primitives;
+  }
+  if (lane < p.input_count)
+    values[lane] = uint2(marker, primitives);
+}
+
+[[kernel]] void
+so_scan_blocks(
+    device uint2 *values [[buffer(0)]], device uint2 *totals [[buffer(1)]], constant uint &count [[buffer(2)]],
+    uint lane [[thread_index_in_threadgroup]], uint3 group [[threadgroup_position_in_grid]]
+) {
+  threadgroup uint2 partial[kSOScanThreadgroupSize];
+  const ulong i = ulong(group.x) * kSOScanThreadgroupSize + lane;
+  uint2 value = i < count ? values[i] : uint2(0);
+  partial[lane] = value;
+  for (uint offset = 1; offset < kSOScanThreadgroupSize; offset <<= 1) {
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const uint2 previous = lane >= offset ? partial[lane - offset] : uint2(0);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    value = uint2(max(value.x, previous.x), value.y + previous.y);
+    partial[lane] = value;
+  }
+  if (i < count)
+    values[i] = value;
+  if (lane == kSOScanThreadgroupSize - 1)
+    totals[group.x] = value;
+}
+
+[[kernel]] void
+so_scan_offsets(
+    device uint2 *values [[buffer(0)]], device const uint2 *parents [[buffer(1)]], constant uint &count [[buffer(2)]],
+    uint i [[thread_position_in_grid]]
+) {
+  if (i >= count || i < kSOScanThreadgroupSize)
+    return;
+  const uint2 before = parents[i / kSOScanThreadgroupSize - 1];
+  const uint2 value = values[i];
+  values[i] = uint2(max(value.x, before.x), value.y + before.y);
+}
+
+// D3D12 RGB96 keeps packed three-word application rows but uses RGBA32 texels.
+struct DXMTRGB96Params {
+  ulong source_row, source_image, destination_row, destination_image;
+  uint width, height, depth, source_components;
+};
+[[kernel]] void
+dxmt_convert_rgb96(
+    device const uint *source [[buffer(0)]], device uint *destination [[buffer(1)]],
+    constant DXMTRGB96Params &p [[buffer(2)]], uint3 position [[thread_position_in_grid]]
+) {
+  if (position.x >= p.width || position.y >= p.height || position.z >= p.depth)
+    return;
+  const uint destination_components = 7 - p.source_components;
+  const ulong src = (ulong(position.z) * p.source_image + ulong(position.y) * p.source_row) / 4 +
+                    ulong(position.x) * p.source_components;
+  const ulong dst = (ulong(position.z) * p.destination_image + ulong(position.y) * p.destination_row) / 4 +
+                    ulong(position.x) * destination_components;
+  for (uint i = 0; i < 3; i++)
+    destination[dst + i] = source[src + i];
+  if (destination_components == 4)
+    destination[dst + 3] = 0;
+}
+
+// Native GPU addresses use the existing argument-buffer pointer ABI. Only
+// D3D12 occlusion reduction uses this kernel; no application shader ABI changes.
+struct DXMTVisibilitySegment {
+  device const ulong *samples;
+};
+struct DXMTVisibilitySumParams {
+  uint count;
+  uint binary;
+};
+[[kernel]] void dxmt_sum_visibility_results(
+    device const DXMTVisibilitySegment *segments [[buffer(0)]],
+    device ulong *result [[buffer(1)]],
+    constant DXMTVisibilitySumParams &params [[buffer(2)]],
+    uint position [[thread_position_in_grid]]
+) {
+  if (position != 0)
+    return;
+  ulong sum = 0;
+  for (uint i = 0; i < params.count; ++i) {
+    const ulong samples = segments[i].samples[0];
+    sum = params.binary ? (sum | samples) : (sum + samples);
+  }
+  result[0] = params.binary ? ulong(sum != 0) : sum;
+}
+
+struct DXMTPredicationParams {
+  uint operation;
+  uint reserved;
+};
+
+[[kernel]] void dxmt_predicate_arguments(
+    device const ulong* predicate [[buffer(kPredicationPredicateIndex)]],
+    device uint* arguments [[buffer(kPredicationOutputIndex)]],
+    constant DXMTPredicationParams& params [[buffer(kPredicationParamsIndex)]],
+    uint position [[thread_position_in_grid]]
+) {
+  if (position != 0)
+    return;
+
+  const bool execute = params.operation ? predicate[0] != 0 : predicate[0] == 0;
+  if (!execute)
+    arguments[0] = 0;
+}
+
+[[kernel]] void dxmt_predicate_count(
+    device const ulong* predicate [[buffer(kPredicationPredicateIndex)]],
+    device const uint* source_count [[buffer(kPredicationSourceIndex)]],
+    device uint* output_count [[buffer(kPredicationOutputIndex)]],
+    constant DXMTPredicationParams& params [[buffer(kPredicationParamsIndex)]],
+    uint position [[thread_position_in_grid]]
+) {
+  if (position != 0)
+    return;
+
+  const bool execute = params.operation ? predicate[0] != 0 : predicate[0] == 0;
+  output_count[0] = execute ? source_count[0] : 0;
+}
 
 [[kernel]] void clear_texture_1d_uint(
     texture1d<uint, access::read_write> tex [[texture(0)]],
@@ -397,9 +657,9 @@ struct DXMTTSDispatchMarshal {
     device DXMTDispatchArguments& output = task.dispatch_arguments_out;
 
     uint patch_count_per_instance = task.draw_arguments.x / (uint)task.control_point_count;
-    uint x = (patch_count_per_instance - 1) / task.patch_per_group + 1;
-    if ((task.draw_arguments.x * task.draw_arguments.y) == 0 ||
-        x * task.draw_arguments.y > task.max_object_threadgroups) {
+    uint x = patch_count_per_instance ? (patch_count_per_instance - 1) / task.patch_per_group + 1 : 0;
+    if (!patch_count_per_instance || !task.draw_arguments.y ||
+        ulong(x) * task.draw_arguments.y > task.max_object_threadgroups) {
       output.x = 0;
       output.y = 0;
       output.z = 0;
@@ -448,6 +708,32 @@ struct DXMTGSDispatchMarshal {
       break;
     index++;
   };
+}
+
+// The restarted adjacency path scans a bounded index view before dispatching.
+// Invalid GPU arguments must not launch object groups that could read past it.
+struct DXMTGSIndexedRestartMarshal {
+  constant uint *draw_arguments;
+  device DXMTDispatchArguments *dispatch_arguments_out;
+  ulong max_object_threadgroups;
+  uint vertex_count_per_warp;
+  uint end_of_command;
+  uint index_count;
+  uint reserved;
+};
+[[vertex]] void gs_indexed_restart_arguments_marshal(
+    constant DXMTGSIndexedRestartMarshal *task [[buffer(kCustomBufferArgumentIndex0)]]
+) {
+  uint count = task->draw_arguments[0];
+  uint instances = task->draw_arguments[1];
+  uint first = task->draw_arguments[2];
+  bool valid = (task->reserved || (first <= task->index_count && count <= task->index_count - first)) &&
+               count != 0 && instances != 0 && task->vertex_count_per_warp != 0;
+  ulong groups = valid ? (ulong(count) + task->vertex_count_per_warp - 1) / task->vertex_count_per_warp : 0;
+  if (!valid || groups * ulong(instances) > task->max_object_threadgroups)
+    *task->dispatch_arguments_out = {0, 0, 0};
+  else
+    *task->dispatch_arguments_out = {uint(groups), instances, 1};
 }
 
 struct depth_stencil_out {

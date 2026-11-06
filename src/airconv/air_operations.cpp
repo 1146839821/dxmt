@@ -450,9 +450,76 @@ AIRBuilderResult pull_vec4_from_addr_checked(
   co_return value;
 };
 
-AIRBuilderResult pull_vec4_from_addr(
-  MTLAttributeFormat format, pvalue base_addr, pvalue byte_offset
-) {
+struct VertexFormatExtent {
+  uint32_t bytes, components;
+};
+static VertexFormatExtent
+vertex_format_extent(MTLAttributeFormat format) {
+  switch (format) {
+  case MTLAttributeFormat::UChar:
+  case MTLAttributeFormat::Char:
+  case MTLAttributeFormat::UCharNormalized:
+  case MTLAttributeFormat::CharNormalized:
+    return {1, 1};
+  case MTLAttributeFormat::UChar2:
+  case MTLAttributeFormat::Char2:
+  case MTLAttributeFormat::UChar2Normalized:
+  case MTLAttributeFormat::Char2Normalized:
+    return {2, 2};
+  case MTLAttributeFormat::UChar4:
+  case MTLAttributeFormat::Char4:
+  case MTLAttributeFormat::UChar4Normalized:
+  case MTLAttributeFormat::Char4Normalized:
+  case MTLAttributeFormat::UChar4Normalized_BGRA:
+    return {4, 4};
+  case MTLAttributeFormat::UShort:
+  case MTLAttributeFormat::Short:
+  case MTLAttributeFormat::Half:
+  case MTLAttributeFormat::UShortNormalized:
+  case MTLAttributeFormat::ShortNormalized:
+    return {2, 1};
+  case MTLAttributeFormat::UShort2:
+  case MTLAttributeFormat::Short2:
+  case MTLAttributeFormat::Half2:
+  case MTLAttributeFormat::UShort2Normalized:
+  case MTLAttributeFormat::Short2Normalized:
+    return {4, 2};
+  case MTLAttributeFormat::UShort4:
+  case MTLAttributeFormat::Short4:
+  case MTLAttributeFormat::Half4:
+  case MTLAttributeFormat::UShort4Normalized:
+  case MTLAttributeFormat::Short4Normalized:
+    return {8, 4};
+  case MTLAttributeFormat::Float:
+  case MTLAttributeFormat::UInt:
+  case MTLAttributeFormat::Int:
+    return {4, 1};
+  case MTLAttributeFormat::Float2:
+  case MTLAttributeFormat::UInt2:
+  case MTLAttributeFormat::Int2:
+    return {8, 2};
+  case MTLAttributeFormat::Float3:
+  case MTLAttributeFormat::UInt3:
+  case MTLAttributeFormat::Int3:
+    return {12, 3};
+  case MTLAttributeFormat::Float4:
+  case MTLAttributeFormat::UInt4:
+  case MTLAttributeFormat::Int4:
+    return {16, 4};
+  case MTLAttributeFormat::UInt1010102Normalized:
+  case MTLAttributeFormat::Int1010102Normalized:
+    return {4, 4};
+  case MTLAttributeFormat::FloatRG11B10:
+  case MTLAttributeFormat::FloatRGB9E5:
+    return {4, 3};
+  case MTLAttributeFormat::Invalid:
+    return {0, 0};
+  }
+  return {0, 0};
+}
+
+AIRBuilderResult
+pull_vec4_from_addr(MTLAttributeFormat format, pvalue base_addr, pvalue byte_offset, pvalue byte_length) {
   return make_op([=](struct AIRBuilderContext ctx) -> llvm::Expected<pvalue> {
     using namespace llvm;
     auto &context = ctx.llvm;
@@ -463,6 +530,14 @@ AIRBuilderResult pull_vec4_from_addr(
     auto is_null_binding = builder.CreateICmpEQ(
       builder.CreatePtrToInt(base_addr, ctx.types._long), builder.getInt64(0)
     );
+
+    if (byte_length) {
+      const auto extent = vertex_format_extent(format);
+      auto offset64 = builder.CreateZExtOrTrunc(byte_offset, ctx.types._long);
+      auto length64 = builder.CreateZExtOrTrunc(byte_length, ctx.types._long);
+      auto end = builder.CreateAdd(offset64, builder.getInt64(extent.bytes));
+      is_null_binding = builder.CreateOr(is_null_binding, builder.CreateICmpUGT(end, length64));
+    }
 
     auto pull_vertex =
       llvm::BasicBlock::Create(context, "", current->getParent());
@@ -483,7 +558,13 @@ AIRBuilderResult pull_vec4_from_addr(
     builder.SetInsertPoint(continuation);
 
     auto phi = builder.CreatePHI(value->getType(), 2);
-    phi->addIncoming(ConstantAggregateZero::get(value->getType()), current);
+    llvm::Constant *missing = ConstantAggregateZero::get(value->getType());
+    if (vertex_format_extent(format).components < 4) {
+      auto scalar = llvm::cast<llvm::FixedVectorType>(value->getType())->getElementType();
+      auto one = scalar->isFloatingPointTy() ? llvm::ConstantFP::get(scalar, 1.0) : llvm::ConstantInt::get(scalar, 1);
+      missing = llvm::ConstantExpr::getInsertElement(missing, one, builder.getInt32(3));
+    }
+    phi->addIncoming(missing, current);
     phi->addIncoming(value, pull_vertex);
 
     return phi;

@@ -20,33 +20,170 @@
 #include "d3d12.h"
 #include "d3d12_command_encoder.hpp"
 #include "d3d12_descriptor_heap.hpp"
+#include "d3d12_interfaces.hpp"
 #include "dxgi1_2.h"
 #include "dxgi_interfaces.h"
 #include "airconv_public.h"
+#include "msc_lod_layout.hpp"
+#include "msc_resource_layout.hpp"
+#include "msc_combined_sidecar_layout.hpp"
 #include "dxmt_buffer.hpp"
 #include "dxmt_command.hpp"
+#include "dxmt_format.hpp"
 #include "dxmt_fence.hpp"
 #include "dxmt_presenter.hpp"
+#include "d3d12_shader_converter.hpp"
+#include "d3d12_msc_capabilities.hpp"
+#include "d3d12_pipeline_persistence.hpp"
 #include "dxmt_texture.hpp"
+#include <cstdint>
+#include <atomic>
+#include <mutex>
+#include <memory>
+#include <optional>
+#include <unordered_map>
 #include "log/log.hpp"
+#include <vector>
+
+// D3D12 cross builds require the modern MinGW-w64 declarations; the bundled
+// native directx header snapshot predates these interface revisions.
+#if !defined(__ID3D12GraphicsCommandList3_INTERFACE_DEFINED__) || !defined(__ID3D12Device10_INTERFACE_DEFINED__)
+#error "DXMT D3D12 requires modern MinGW-w64 d3d12.h declarations"
+#endif
 
 #define IMPLEMENT_ME                                                                                                   \
   do {                                                                                                                 \
-    Logger::err(str::format(__FILE__, ":", __FUNCTION__, "(", __LINE__, ") is not implemented."));                     \
-    abort();                                                                                                           \
-    __builtin_unreachable();                                                                                           \
+    WARN(__FILE__, ":", __FUNCTION__, "(", __LINE__, ") is not implemented.");                                      \
   } while (0);
 
 namespace dxmt {
 
-class MTLD3D12GraphicsCommandList : public ID3D12GraphicsCommandList {
+class MTLD3D12Resource;
+class MTLD3D12CommandAllocator;
+struct D3D12SparseMappingPayload;
+class D3D12SparseBufferMappingPlan;
+class D3D12SparseTextureMappingPlan;
+
+// A placed resource owns a private reference to the heap that backs it.  Keep
+// this interface declaration before MTLD3D12Resource so resource
+// implementations can retain the D3D12 heap through their lifetime, matching
+// CreatePlacedResource's ownership contract.
+class MTLD3D12Heap : public ID3D12Heap {
 public:
-  EncoderData *entry;
-  size_t encoder_count;
+  virtual void AddRefPrivate() = 0;
+  virtual void ReleasePrivate() = 0;
+  virtual WMT::Heap GetMetalHeap() = 0;
+  virtual WMT::Buffer GetTileBackingBuffer() = 0;
+};
+
+struct AirconvResidencyCounters {
+  uint64_t root_scan_requests = 0;
+  uint64_t root_scans_executed = 0;
+  uint64_t root_scan_skips = 0;
+  uint64_t root_deserializer_creates = 0;
+  uint64_t descriptor_requests = 0;
+  uint64_t descriptor_scans_executed = 0;
+  uint64_t descriptor_scan_skips = 0;
+  uint64_t descriptor_slots_visited = 0;
+  uint64_t conservative_descriptor_slots = 0;
+  uint64_t shader_reachable_descriptor_slots = 0;
+  uint64_t conservative_descriptor_ranges = 0;
+  uint64_t shader_reachable_descriptor_ranges = 0;
+  uint64_t descriptor_batch_locks = 0;
+  uint64_t heap_generation_invalidations = 0;
+  uint64_t heap_global_generation_changes_seen = 0;
+  uint64_t table_handle_invalidations = 0;
+  uint64_t table_invalidations = 0;
+  uint64_t encoder_invalidations = 0;
+  uint64_t root_va_lookups = 0;
+  uint64_t descriptor_va_lookups = 0;
+  uint64_t pending_descriptors_inserted = 0;
+  uint64_t pending_descriptor_duplicates = 0;
+  uint64_t submission_pending_uses = 0;
+  uint64_t submission_unique_heaps = 0;
+  uint64_t submission_unique_slots = 0;
+  uint64_t submission_batch_locks = 0;
+  uint64_t submission_live_slot_resolutions = 0;
+  uint64_t submission_slot_reuse_hits = 0;
+  uint64_t submission_fanout_uses = 0;
+  uint64_t direct_indexed_root_requests = 0;
+  uint64_t direct_indexed_scans = 0;
+  uint64_t direct_indexed_descriptors = 0;
+};
+
+struct D3D12CommandListSubmission {
+  // Published by the submitting CPU thread before cpu_active becomes false.
+  WMT::Reference<WMT::CommandBuffer> command_buffer;
+  std::atomic<bool> cpu_active{true};
+
+  bool IsInFlight() {
+    if (cpu_active.load(std::memory_order_acquire))
+      return true;
+    return command_buffer && command_buffer.status() != WMTCommandBufferStatusCompleted;
+  }
+};
+
+// Only transitions ordered within one ExecuteCommandLists batch are known here.
+using D3D12RecordedResourceStates =
+    std::unordered_map<MTLD3D12Resource *, std::vector<std::optional<D3D12_RESOURCE_STATES>>>;
+
+struct D3D12RecordedStateValidation;
+class MTLD3D12RootSignature;
+
+class D3D12CommandListRecording {
+  dxmt::mutex mutex_;
+  std::weak_ptr<D3D12CommandListSubmission> submission_;
+
+public:
+  bool IsInFlight() {
+    std::lock_guard lock(mutex_);
+    auto submission = submission_.lock();
+    return submission && submission->IsInFlight();
+  }
+
+  bool TryAcquire(const std::shared_ptr<D3D12CommandListSubmission> &submission) {
+    std::lock_guard lock(mutex_);
+    if (auto active = submission_.lock(); active && active != submission && active->IsInFlight())
+      return false;
+    submission_ = submission;
+    return true;
+  }
+};
+
+class MTLD3D12GraphicsCommandList : public ID3D12GraphicsCommandList7, public IMTLD3D12CommandListExt {
+public:
+  EncoderData *entry = nullptr;
+  size_t encoder_count = 0;
+
+  virtual MTLD3D12CommandAllocator *GetAllocator() = 0;
+  virtual bool IsAllocatorRecordingValid() const = 0;
+  virtual void CollectAllocatorsForSubmission(std::vector<Com<MTLD3D12CommandAllocator, false>> &allocators) const = 0;
+  virtual void CollectSamplerHeapsForSubmission(std::vector<Com<MTLD3D12SamplerDescriptorHeap, true>> &heaps) const = 0;
+  virtual void CollectStaticSamplerRootsForSubmission(std::vector<Com<MTLD3D12RootSignature, false>> &roots) const = 0;
+  virtual HRESULT TrackSamplerLODSidecar(MTLD3D12SamplerDescriptorHeap *heap, D3D12_GPU_DESCRIPTOR_HANDLE table) = 0;
+  virtual HRESULT ValidateSamplerLODSidecarsForSubmission() const = 0;
+  virtual std::shared_ptr<D3D12CommandListRecording> GetRecordingState() const = 0;
+  virtual HRESULT GetCloseResult() const = 0;
+  virtual uint64_t GetRecordingId() const = 0;
+  virtual AirconvResidencyCounters GetAirconvResidencyCounters() const = 0;
+  virtual HRESULT CollectResourceUsesForSubmission(
+      std::vector<SubmissionResourceUse> &uses, std::vector<WMT::Reference<WMT::Resource>> &resources
+  ) = 0;
+  virtual void CommitResourceStates() = 0;
+  virtual HRESULT ValidateRecordedResourceStates(D3D12RecordedStateValidation &validation) const = 0;
 };
 
 class MTLD3D12CommandAllocator : public ID3D12CommandAllocator {
 public:
+  virtual void AddRefPrivate() = 0;
+  virtual void ReleasePrivate() = 0;
+
+  virtual D3D12_COMMAND_LIST_TYPE GetType() const = 0;
+
+  virtual void MarkSubmissionSubmitted() = 0;
+  virtual void MarkSubmissionCompleted() = 0;
+  virtual bool IsInFlight() const = 0;
+
   virtual HRESULT STDMETHODCALLTYPE CreateCommandList(
       UINT NodeMask, D3D12_COMMAND_LIST_TYPE Type, ID3D12PipelineState *pInitialPipelineState, REFIID riid,
       void **ppCommandList
@@ -55,13 +192,73 @@ public:
 
 class MTLD3D12CommandQueue : public ID3D12CommandQueue {
 public:
-  virtual HRESULT Present(Presenter *presenter, ID3D12Resource *backbuffer, HANDLE hLantecyWaitable) = 0;
+  virtual HRESULT Present(Presenter *presenter, ID3D12Resource *backbuffer, HANDLE hLantecyWaitable, double after) = 0;
+  // Matched-build controlled probe only; no public COM ABI or ordinary caller.
+  // Caller serializes resource preparation and retains the queue for this call.
+  // S_OK transfers intent, not native success. Resolution/issue follow prior
+  // FIFO work; deferred failures remove the device and retain issued prefixes.
+  virtual HRESULT SubmitSparsePlanForTesting(
+      std::unique_ptr<D3D12SparseBufferMappingPlan> &plan, WMT::Event gate, UINT terminal_flags, UINT issue_limit,
+      HANDLE issued, HANDLE resume
+  ) = 0;
 };
 
 class MTLD3D12Resource : public ID3D12Resource {
 public:
+  virtual void AddRefPrivate() = 0;
+  virtual void ReleasePrivate() = 0;
+
   Rc<Texture> texture;
   Rc<Buffer> buffer;
+  WMT::Reference<WMT::AccelerationStructure> acceleration_structure;
+  uint64_t acceleration_structure_size = 0;
+  WMT::Reference<WMT::Buffer> acceleration_structure_header;
+  uint64_t acceleration_structure_header_gpu_address = 0;
+  D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
+  std::vector<D3D12_RESOURCE_STATES> subresource_states;
+  // Diagnostics use scalar identities and never retain the resource.
+  inline static std::atomic<uint64_t> next_legacy_diagnostic_id{1};
+  const uint64_t legacy_diagnostic_id = next_legacy_diagnostic_id.fetch_add(1, std::memory_order_relaxed);
+  std::atomic<uint64_t> legacy_first_queue_id{0};
+  std::atomic<bool> legacy_seen_multiple_queues{false};
+
+  void
+  InitializeStateTracking(const D3D12_RESOURCE_DESC &desc, WMT::Device device) {
+    UINT mip_levels = std::max<UINT>(1, desc.MipLevels);
+    UINT array_size = desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D ? 1 : std::max<UINT>(1, desc.DepthOrArraySize);
+    UINT plane_count = 1;
+    if (desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER) {
+      MTL_DXGI_FORMAT_DESC format_desc;
+      if (SUCCEEDED(MTLQueryDXGIFormat(device, desc.Format, format_desc)))
+        plane_count = std::max<UINT>(1, format_desc.PlanarCount);
+    }
+    subresource_states.assign(size_t(mip_levels) * array_size * plane_count, state);
+  }
+
+  bool
+  HasSubresource(UINT subresource) const {
+    return subresource < subresource_states.size();
+  }
+
+  D3D12_RESOURCE_STATES
+  GetSubresourceState(UINT subresource) const {
+    return HasSubresource(subresource) ? subresource_states[subresource] : state;
+  }
+
+  void
+  SetSubresourceState(UINT subresource, D3D12_RESOURCE_STATES new_state) {
+    if (HasSubresource(subresource)) {
+      subresource_states[subresource] = new_state;
+      return;
+    }
+    state = new_state;
+  }
+
+  void
+  SetAllSubresourceStates(D3D12_RESOURCE_STATES new_state) {
+    std::fill(subresource_states.begin(), subresource_states.end(), new_state);
+    state = new_state;
+  }
 
   virtual HRESULT STDMETHODCALLTYPE
   CreateShaderResourceView(const D3D12_SHADER_RESOURCE_VIEW_DESC *pDesc, D3D12_CPU_DESCRIPTOR_HANDLE Descriptor) = 0;
@@ -80,41 +277,416 @@ public:
       UINT *TotalTileCount, D3D12_PACKED_MIP_INFO *PackedMipInfo, D3D12_TILE_SHAPE *StandardTileShape,
       UINT *SubresourceTilingCount, UINT FirstSubresourceTiling, D3D12_SUBRESOURCE_TILING *SubresourceTilings
   ) = 0;
+
+  virtual bool
+  IsReservedResource() const {
+    return false;
+  }
+
+  virtual bool
+  IsReservedTexture() const {
+    return false;
+  }
+
+  virtual bool
+  IsReservedBuffer() const {
+    return false;
+  }
+
+  virtual HRESULT
+  GetTileIndices(
+      const D3D12_TILED_RESOURCE_COORDINATE *pRegionStartCoordinate, const D3D12_TILE_REGION_SIZE *pRegionSize,
+      std::vector<UINT> &tile_indices
+  ) const {
+    return E_NOTIMPL;
+  }
+
+  virtual HRESULT
+  GetTileMapping(UINT tile_index, WMT::Buffer &backing_buffer, UINT64 &backing_offset) const {
+    return E_NOTIMPL;
+  }
+
+  virtual WMT::Buffer
+  GetMetalBuffer() const {
+    return {};
+  }
+
+  virtual WMT::Texture
+  GetMetalTexture() const {
+    return {};
+  }
+
+  virtual HRESULT
+  GetTileTextureCopyInfo(
+      UINT tile_index, WMTOrigin &origin, uint64_t &level, uint64_t &slice, WMTSize &size, uint32_t &bytes_per_row,
+      uint32_t &bytes_per_image
+  ) const {
+    return E_NOTIMPL;
+  }
+
+  virtual bool
+  IsTileMapped(UINT tile_index) const {
+    return false;
+  }
+
+  virtual bool
+  IsPackedTile(UINT tile_index) const {
+    return false;
+  }
+
+  virtual HRESULT
+  UpdateTileMappings(
+      UINT NumResourceRegions, const D3D12_TILED_RESOURCE_COORDINATE *pResourceRegionStartCoordinates,
+      const D3D12_TILE_REGION_SIZE *pResourceRegionSizes, ID3D12Heap *pHeap, UINT NumRanges,
+      const D3D12_TILE_RANGE_FLAGS *pRangeFlags, const UINT *pHeapRangeStartOffsets, const UINT *pRangeTileCounts,
+      D3D12_TILE_MAPPING_FLAGS Flags, WMT::SparseMappingQueue sparse_mapping_queue = {}
+  ) {
+    return E_NOTIMPL;
+  }
+
+  virtual HRESULT
+  CopyTileMappingsFrom(
+      MTLD3D12Resource *pSourceResource, const D3D12_TILED_RESOURCE_COORDINATE *pDstRegionStartCoordinate,
+      const D3D12_TILED_RESOURCE_COORDINATE *pSrcRegionStartCoordinate, const D3D12_TILE_REGION_SIZE *pRegionSize,
+      D3D12_TILE_MAPPING_FLAGS Flags, WMT::SparseMappingQueue sparse_mapping_queue = {}
+  ) {
+    return E_NOTIMPL;
+  }
+
+  // Borrow the resource's immutable creation properties without a COM output
+  // copy. Reserved resources have no heap properties and return nullptr. The
+  // view remains valid for the resource's lifetime; it does not retain a heap.
+  // Append internal queries so existing resource virtual slots stay fixed.
+  virtual const D3D12_HEAP_PROPERTIES *GetHeapPropertiesView() const = 0;
+
+  // Prepared ownership only; no mapping issue or logical state publication.
+  virtual HRESULT
+  CaptureTileMappingOwners(const std::vector<UINT> &tiles, D3D12SparseMappingPayload &payload) const {
+    return E_NOTIMPL;
+  }
+
+  // Controlled buffer handoff only. Calls between preparation and publication
+  // must be serialized by the existing mapping owner; no second tile map.
+  virtual HRESULT
+  PrepareBufferTileUpdate(
+      UINT region_count, const D3D12_TILED_RESOURCE_COORDINATE *starts, const D3D12_TILE_REGION_SIZE *sizes,
+      ID3D12Heap *heap, UINT range_count, const D3D12_TILE_RANGE_FLAGS *flags, const UINT *offsets, const UINT *counts,
+      D3D12_TILE_MAPPING_FLAGS mapping_flags, std::unique_ptr<D3D12SparseBufferMappingPlan> &plan
+  ) {
+    return E_NOTIMPL;
+  }
+
+  virtual HRESULT
+  PrepareBufferTileCopy(
+      MTLD3D12Resource *source, const D3D12_TILED_RESOURCE_COORDINATE *destination_start,
+      const D3D12_TILED_RESOURCE_COORDINATE *source_start, const D3D12_TILE_REGION_SIZE *size,
+      D3D12_TILE_MAPPING_FLAGS flags, std::unique_ptr<D3D12SparseBufferMappingPlan> &plan
+  ) {
+    return E_NOTIMPL;
+  }
+
+  // Owned texture intent; preparation neither issues nor publishes mappings.
+  virtual HRESULT
+  PrepareTextureTileUpdate(
+      UINT regions, const D3D12_TILED_RESOURCE_COORDINATE *starts, const D3D12_TILE_REGION_SIZE *sizes,
+      ID3D12Heap *heap, UINT ranges, const D3D12_TILE_RANGE_FLAGS *flags, const UINT *offsets, const UINT *counts,
+      D3D12_TILE_MAPPING_FLAGS mapping_flags, std::unique_ptr<D3D12SparseTextureMappingPlan> &plan
+  ) {
+    return E_NOTIMPL;
+  }
+
+  virtual HRESULT
+  PrepareTextureTileCopy(
+      MTLD3D12Resource *source, const D3D12_TILED_RESOURCE_COORDINATE *destination_start,
+      const D3D12_TILED_RESOURCE_COORDINATE *source_start, const D3D12_TILE_REGION_SIZE *size,
+      D3D12_TILE_MAPPING_FLAGS flags, std::unique_ptr<D3D12SparseTextureMappingPlan> &plan
+  ) {
+    return E_NOTIMPL;
+  }
 };
 
-class MTLD3D12Heap : public ID3D12Heap {
+// Controlled preparation seam, not a production queue submission credential.
+// IssueLegacy executes once at the caller's serialized mapping point and resolves
+// live copy mappings then. Native acceptance is not GPU completion: the caller
+// must retain the plan and establish actual completion before releasing inputs.
+// The native batch path instead owns completion/retirement; native preparation
+// is a single attempt at the serialized issue point, with no later remap before
+// its issue/publication. Failed/partial batches must be drained and discarded.
+class D3D12SparseTextureMappingPlan {
 public:
+  virtual ~D3D12SparseTextureMappingPlan() = default;
+  virtual HRESULT IssueLegacy(WMT::SparseMappingQueue queue) = 0;
+  virtual HRESULT PrepareNative(WMT::SparseMappingQueue queue) = 0;
+  virtual bool PrepareTerminal(UINT test_flags) = 0;
+  virtual bool IssueNext() = 0;
+  virtual bool Finish(WMTSparseMappingHostOutcome outcome) = 0;
+  virtual bool Wait(uint64_t timeout_ms, WMTSparseMappingResult &result) = 0;
+  virtual bool Retire(WMTSparseMappingResult &result) = 0;
+  virtual size_t OperationCount() const = 0;
+};
+
+// Transient submission input ownership, not another logical tile map. Declare
+// completion last so native final release drains before private COM refs die.
+// No automatic production queue caller until missing-event teardown is settled.
+struct D3D12SparseMappingPayload {
+  std::vector<Com<MTLD3D12Resource, false>> resources;
+  std::vector<Com<MTLD3D12Heap, false>> heaps;
+  WMT::Reference<WMT::SparseMappingCompletion> completion;
+
+  D3D12SparseMappingPayload() = default;
+  D3D12SparseMappingPayload(const D3D12SparseMappingPayload &) = delete;
+  D3D12SparseMappingPayload &operator=(const D3D12SparseMappingPayload &) = delete;
+
+  bool
+  Retire(WMTSparseMappingResult &result) {
+    if (!completion || !completion.wait(0, result) ||
+        (result.state != WMTSparseMappingNotIssued && result.state != WMTSparseMappingGPUComplete) ||
+        !completion.retireInputs())
+      return false;
+    // Native inputs retire first; no resource/tile/submission lock is held.
+    completion = nullptr;
+    resources.clear();
+    heaps.clear();
+    return true;
+  }
+};
+
+// An opaque transient plan, owned by the buffer implementation. Successful host
+// acceptance publishes once; rejection/partial issue never changes logical state.
+// Native completion and COM retirement are separate from logical publication.
+class D3D12SparseBufferMappingPlan {
+public:
+  virtual ~D3D12SparseBufferMappingPlan() = default;
+  virtual HRESULT PrepareNative(WMT::SparseMappingQueue queue) = 0;
+  virtual bool IssueNext() = 0;
+  virtual bool Finish(WMTSparseMappingHostOutcome outcome) = 0;
+  virtual bool Wait(uint64_t timeout_ms, WMTSparseMappingResult &result) = 0;
+  virtual bool Retire(WMTSparseMappingResult &result) = 0;
+  virtual size_t OperationCount() const = 0;
+  virtual bool PrepareTerminal(UINT test_flags) = 0;
+};
+
+inline bool
+IsTextureAccessOnly(D3D12_BARRIER_LAYOUT before, D3D12_BARRIER_LAYOUT after) {
+  return before == D3D12_BARRIER_LAYOUT_UNDEFINED && after == D3D12_BARRIER_LAYOUT_UNDEFINED;
+}
+
+enum class EnhancedSplitBarrierType : uint8_t {
+  Buffer,
+  Texture,
+};
+
+struct EnhancedSplitBarrierState {
+  EnhancedSplitBarrierType type = EnhancedSplitBarrierType::Buffer;
+  MTLD3D12Resource *resource = nullptr;
+  D3D12_BARRIER_ACCESS access_before = D3D12_BARRIER_ACCESS_NO_ACCESS;
+  D3D12_BARRIER_ACCESS access_after = D3D12_BARRIER_ACCESS_NO_ACCESS;
+  D3D12_BARRIER_LAYOUT layout_before = D3D12_BARRIER_LAYOUT_COMMON;
+  D3D12_BARRIER_LAYOUT layout_after = D3D12_BARRIER_LAYOUT_COMMON;
+  D3D12_BARRIER_SUBRESOURCE_RANGE subresources = {};
+  UINT64 offset = 0;
+  UINT64 size = 0;
+  D3D12_RESOURCE_STATES before_state = D3D12_RESOURCE_STATE_COMMON;
+  D3D12_RESOURCE_STATES after_state = D3D12_RESOURCE_STATE_COMMON;
+};
+
+// Pending execution state owns resources independently of recording Reset.
+// Resource layouts remain in the existing validation map; this tracks only
+// unfinished split synchronization, normalized to individual subresources.
+struct D3D12PendingEnhancedSplit {
+  EnhancedSplitBarrierState barrier;
+  UINT subresource;
+  bool inherited = false;
+  // Validation borrows the recording's reference. Only splits surviving the
+  // batch need a separate owner before publication to the queue timeline.
+  Com<MTLD3D12Resource, false> retained_resource;
+};
+
+struct D3D12PendingLegacySplit {
+  uint64_t resource_id;
+  UINT subresource;
+  UINT original_subresource;
+  D3D12_RESOURCE_STATES before;
+  D3D12_RESOURCE_STATES after;
+  bool inherited = false;
+};
+
+struct D3D12RecordedStateValidation {
+  D3D12RecordedResourceStates states;
+  std::vector<D3D12PendingEnhancedSplit> splits;
+  std::vector<D3D12PendingLegacySplit> legacy_splits;
+  uint64_t diagnostic_queue_id = 0;
+  bool local_only = false;
+};
+
+struct D3D12FenceWait;
+
+// Cancellation must not retain the fence COM object (and through it the device).
+struct D3D12FenceWaitSource {
+  virtual ~D3D12FenceWaitSource() = default;
+  virtual void CancelWait(const D3D12FenceWait *wait) = 0;
+};
+
+struct D3D12FenceWaitGroup {
+  HANDLE handle = nullptr;
+  bool synchronous = false;
+  bool wait_any = false;
+  UINT count = 0;
+  std::atomic<UINT> remaining{0};
+  std::atomic<bool> armed{false}, cancelled{false}, finished{false};
+  HRESULT result = S_OK;
+  std::vector<std::weak_ptr<D3D12FenceWait>> waits;
+
+  ~D3D12FenceWaitGroup();
+  HRESULT Initialize(UINT count, bool any, HANDLE event);
+  void Notify();
+  void Arm();
+  void Cancel();
+  HRESULT Wait();
+
+private:
+  void Finish();
+};
+
+// A wait latches once, independently of subsequent changes to the logical fence.
+struct D3D12FenceWait {
+  // Latched under the fence mutex at registration; this wait cannot become
+  // unsatisfied even if a later signal rewinds the fence value.
+  bool satisfied_at_registration = false;
+  WMT::Reference<WMT::SharedEvent> event;
+  HANDLE handle = nullptr;
+  std::shared_ptr<D3D12FenceWaitGroup> group;
+  std::weak_ptr<D3D12FenceWaitSource> source;
+
+  D3D12FenceWait() = default;
+  D3D12FenceWait(const D3D12FenceWait &) = delete;
+  D3D12FenceWait &operator=(const D3D12FenceWait &) = delete;
+
+  ~D3D12FenceWait() {
+    if (handle)
+      CloseHandle(handle);
+  }
+};
+
+// Notification states outlive child COM objects during a concurrent removal.
+struct D3D12DeviceRemovalListener {
+  virtual ~D3D12DeviceRemovalListener() = default;
+  virtual void NotifyDeviceRemoved() = 0;
 };
 
 class MTLD3D12Fence : public ID3D12Fence1 {
 public:
-  Rc<Fence> fence;
+  inline static std::atomic<uint64_t> next_diagnostic_fence_id{1};
+  const uint64_t diagnostic_fence_id = next_diagnostic_fence_id.fetch_add(1, std::memory_order_relaxed);
+  virtual HRESULT RegisterWait(
+      UINT64 value, HANDLE event, std::shared_ptr<D3D12FenceWait> &wait,
+      const std::shared_ptr<D3D12FenceWaitGroup> &group = {}
+  ) = 0;
+  virtual void CancelWait(const std::shared_ptr<D3D12FenceWait> &wait) = 0;
 };
 
 class MTLD3D12RootSignature : public ID3D12RootSignature {
 public:
+  struct RootParameterMetadata {
+    UINT source_qword;
+    D3D12_ROOT_PARAMETER_TYPE type;
+    // Writable DWORDs, independent of root-signature cost or alignment padding.
+    UINT dword_count;
+  };
+
+  struct RootResourceBindingMetadata {
+    UINT parameter_index;
+    D3D12_ROOT_PARAMETER_TYPE type;
+    UINT source_qword;
+    D3D12_SHADER_VISIBILITY visibility;
+  };
+
+  struct RootDescriptorRangeMetadata {
+    D3D12_DESCRIPTOR_RANGE_TYPE type;
+    UINT num_descriptors;
+    uint64_t offset;
+    UINT base_shader_register;
+    UINT register_space;
+    D3D12_DESCRIPTOR_RANGE_FLAGS flags;
+  };
+
+  struct RootDescriptorTableMetadata {
+    UINT parameter_index;
+    UINT source_qword;
+    UINT first_range;
+    UINT range_count;
+    D3D12_SHADER_VISIBILITY visibility;
+  };
+
   virtual UINT GetBlob(const void **ppBlob) = 0;
+  virtual HRESULT InitializeMSCLayout() = 0;
+  virtual HRESULT InitializeMSCLodSidecarLayout() = 0;
+  virtual HRESULT InitializeMSCResourceSidecarLayout() = 0;
+  virtual HRESULT InitializeMSCCombinedSidecarLayout() = 0;
+  virtual bool GetStaticSamplerLODSidecarEntry(UINT Index, D3D12SamplerLODSidecarEntry &Entry) = 0;
 
   virtual void AddRefPrivate() = 0;
   virtual void ReleasePrivate() = 0;
 
   uint32_t UploadQwords;
   uint32_t ParameterSlots;
-  uint32_t const *SlotQwordOffsets;
+  RootParameterMetadata const *Parameters;
+
+  bool
+  IsArgumentRangeValid(UINT index, D3D12_ROOT_PARAMETER_TYPE type, UINT offset, UINT count) const {
+    if (index >= ParameterSlots)
+      return false;
+    const auto &parameter = Parameters[index];
+    return parameter.type == type && offset <= parameter.dword_count && count <= parameter.dword_count - offset;
+  }
+
+  UINT RootResourceBindingCount = 0;
+  RootResourceBindingMetadata const *RootResourceBindings = nullptr;
+  UINT RootDescriptorTableCount = 0;
+  RootDescriptorTableMetadata const *RootDescriptorTables = nullptr;
+  UINT RootDescriptorRangeCount = 0;
+  RootDescriptorRangeMetadata const *RootDescriptorRanges = nullptr;
+  D3D12_ROOT_SIGNATURE_FLAGS Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE;
+
+  bool
+  IsLocal() const {
+    return (Flags & D3D12_ROOT_SIGNATURE_FLAG_LOCAL_ROOT_SIGNATURE) != 0;
+  }
+
+  bool
+  IsResourceHeapDirectlyIndexed() const {
+    return (Flags & D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED) != 0;
+  }
 
   size_t NumStaticSamplers;
   uint64_t const *EncodedStaticSamplers;
+  D3D12SamplerLODRange const *StaticSamplerLODRanges = nullptr;
+
+  uint64_t MSCArgumentBufferSize = 0;
+  uint32_t MSCParameterCount = 0;
+  const dxmt_msc_root_parameter_layout *MSCParameterLayouts = nullptr;
+  unsigned MSCLODSidecarBufferSize = 0;
+  unsigned MSCLODSidecarTableCount = 0;
+  const dxmt::air::MSCSamplerSidecarTable *MSCLODSidecarTables = nullptr;
+  unsigned MSCResourceSidecarBufferSize = 0;
+  unsigned MSCResourceSidecarTableCount = 0;
+  const dxmt::air::MSCResourceSidecarTable *MSCResourceSidecarTables = nullptr;
+  const dxmt::air::MSCCombinedSidecarLayout *MSCCombinedSidecarLayout = nullptr;
 };
 
 class MTLD3D12CommandSignature : public ID3D12CommandSignature {
 public:
   D3D12_INDIRECT_ARGUMENT_TYPE CommandType;
+  UINT ByteStride = 0;
   UINT UpdateRootArguments : 1;
-  UINT UpdateVertexBuffers : 1;
+  // Slots modified by the signature; zero also serves as the no-update fast path.
+  UINT UpdateVertexBuffers = 0;
+  uint64_t RootArgumentDwords[2] = {};
   UINT UpdateIndexBuffer   : 1;
 
   WMT::Reference<WMT::RenderPipelineState> render_resolver;
   WMT::Reference<WMT::ComputePipelineState> compute_resolver;
+  virtual WMT::ComputePipelineState GetStreamOutputResolver() = 0;
 
   virtual void AddRefPrivate() = 0;
   virtual void ReleasePrivate() = 0;
@@ -122,18 +694,97 @@ public:
 
 class MTLD3D12QueryHeap : public ID3D12QueryHeap {
 public:
+  WMT::Reference<WMT::Buffer> visibility_buffer;
+  WMT::Reference<WMT::CounterSampleBuffer> timestamp_buffer;
+  D3D12_QUERY_HEAP_TYPE type = D3D12_QUERY_HEAP_TYPE_OCCLUSION;
+  UINT count = 0;
 };
+
+struct AirconvFootprintBuildCounters {
+  uint64_t psos, exact, fallback, direct_indexed;
+};
+
+AirconvFootprintBuildCounters GetAirconvFootprintBuildCounters();
 
 class MTLD3D12PipelineState : public ID3D12PipelineState {
 public:
   UINT IsComputePipelineState;
+  D3D12ShaderBackend shader_backend = D3D12ShaderBackend::None;
+  bool msc_uses_texture_load = false;
+  bool msc_test_lod_patch = false;
+  // The typed-buffer sidecar is an explicit opt-in execution gate. It remains
+  // disabled by default until the production NULL contract is promoted.
+  bool msc_typed_buffer_sidecar = false;
+  D3D12PipelineCacheData pipeline_cache;
+
+  struct DescriptorFootprintRange {
+    UINT parameter_index;
+    D3D12_DESCRIPTOR_RANGE_TYPE type;
+    uint64_t offset;
+    uint64_t count;
+    WMTRenderStages stages;
+  };
+  struct ShaderFootprintInput {
+    sm50_shader_t shader;
+    D3D12_SHADER_VISIBILITY visibility;
+    WMTRenderStages stages;
+  };
+  bool descriptor_footprint_exact = false;
+  Com<MTLD3D12RootSignature> descriptor_footprint_root;
+  std::vector<DescriptorFootprintRange> descriptor_footprint;
+  void BuildDescriptorFootprint(MTLD3D12RootSignature *root, std::initializer_list<ShaderFootprintInput> shaders);
+
+  const D3D12PipelineCacheData &GetPipelineCacheData() const { return pipeline_cache; }
 };
 
 class MTLD3D12GraphicsPipelineState : public MTLD3D12PipelineState {
 public:
+  std::vector<uint8_t> msc_test_lod_root_signature;
+  struct RenderTargetLayout {
+    std::array<DXGI_FORMAT, D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT> formats{};
+    DXGI_FORMAT depth_format = DXGI_FORMAT_UNKNOWN;
+    UINT count = 0;
+    UINT sample_count = 1;
+    UINT sample_quality = 0;
+    bool operator==(const RenderTargetLayout &) const = default;
+  };
+  // Immutable API formats, retained for the bundle-wide PSO compatibility rule.
+  RenderTargetLayout render_target_layout;
+
   WMT::Reference<WMT::RenderPipelineState> pso;
   WMT::Reference<WMT::DepthStencilState> dsso;
+  WMT::Reference<WMT::DepthStencilState> dsso_stencil_disabled;
+  WMT::Reference<WMT::DepthStencilState> dsso_depth_disabled;
+  WMT::Reference<WMT::DepthStencilState> dsso_depth_stencil_disabled;
+  WMT::Reference<WMT::DepthStencilState> dsso_depth_readonly;
+  WMT::Reference<WMT::DepthStencilState> dsso_stencil_readonly;
+  WMT::Reference<WMT::DepthStencilState> dsso_readonly;
+  WMT::Reference<WMT::DepthStencilState> dsso_depth_readonly_stencil_disabled;
+  WMT::Reference<WMT::DepthStencilState> dsso_stencil_readonly_depth_disabled;
+  virtual WMT::DepthStencilState GetDepthStencilState(uint8_t planar_flags, uint8_t readonly_flags) const = 0;
+  // Ordinary MSC vertex fetch specializes the immutable Metal descriptor per VB stride.
+  bool msc_vertex_input = false;
+  virtual WMT::RenderPipelineState GetVertexStridePipeline(const D3D12_VERTEX_BUFFER_VIEW *views) = 0;
   uint32_t slot_mask = 0;
+  bool msc_tessellation = false;
+  WMT::Reference<WMT::Buffer> msc_tessellator_tables;
+  WMTMSCTessellationPipelineConfig msc_tessellation_config = {};
+  bool msc_geometry = false;
+  WMTMSCGeometryPipelineConfig msc_geometry_config = {};
+  WMTPrimitiveType msc_geometry_input_primitive = WMTPrimitiveTypePoint;
+  bool msc_mesh = false;
+  WMTSize msc_object_threadgroup_size = {1, 1, 1};
+  WMTSize msc_mesh_threadgroup_size = {1, 1, 1};
+  bool airconv_geometry = false;
+  WMT::Reference<WMT::RenderPipelineState> airconv_geometry_psos[2][3];
+  WMTPrimitiveType airconv_geometry_input_primitive = WMTPrimitiveTypePoint;
+  bool airconv_geometry_restart = false;
+  D3D12_INDEX_BUFFER_STRIP_CUT_VALUE airconv_geometry_strip_cut = D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED;
+  bool stream_output = false;
+  uint32_t stream_output_stride = 0;
+  uint32_t stream_output_group_size = 1;
+  virtual WMT::ComputePipelineState GetStreamOutputIndirectPipeline(bool ordered) = 0;
+  D3D12_INDEX_BUFFER_STRIP_CUT_VALUE stream_output_strip_cut = D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED;
   enum WMTTriangleFillMode fill_mode;
   enum WMTCullMode cull_mode;
   enum WMTDepthClipMode depth_clip_mode;
@@ -151,16 +802,23 @@ class MTLD3D12ComputePipelineState : public MTLD3D12PipelineState {
 public:
   WMT::Reference<WMT::ComputePipelineState> pso;
   WMTSize threadgroup_size;
+  std::vector<uint8_t> msc_test_lod_root_signature;
 
   virtual void AddRefPrivate() = 0;
   virtual void ReleasePrivate() = 0;
 };
 
-class MTLD3D12Device : public ID3D12Device1 {
+class MTLD3D12Device : public ID3D12Device10 {
 public:
+  virtual HRESULT RegisterRemovalListener(const std::shared_ptr<D3D12DeviceRemovalListener> &listener) = 0;
+  virtual void MarkDeviceRemoved(HRESULT reason) = 0;
+  virtual dxmt::mutex &GetResourceStateMutex() = 0;
+
   virtual WMT::Device GetMTLDevice() = 0;
 
   virtual D3D_FEATURE_LEVEL GetFeatureLevel() = 0;
+
+  virtual const DXMTMSCCapabilities &GetMSCCapabilities() const = 0;
 
   virtual WMT::ResidencySet GetGlobalResidencySet() = 0;
 
@@ -168,24 +826,39 @@ public:
 
   virtual HRESULT UnregisterResidency(WMT::Allocation allocation) = 0;
 
-  virtual HRESULT RegisterResidencyAndVA(BufferAllocation *allocation) = 0;
+  virtual HRESULT RegisterResidencyAndVA(BufferAllocation *allocation, MTLD3D12Resource *resource = nullptr) = 0;
 
-  virtual HRESULT UnregisterResidencyAndVA(BufferAllocation *allocation) = 0;
+  virtual HRESULT UnregisterResidencyAndVA(BufferAllocation *allocation, MTLD3D12Resource *resource = nullptr) = 0;
 
   virtual BufferAllocation *LookupBufferByVA(D3D12_GPU_VIRTUAL_ADDRESS VA, uint64_t *pOffset) = 0;
 
+  virtual MTLD3D12Resource *LookupResourceByVA(D3D12_GPU_VIRTUAL_ADDRESS VA, uint64_t *pOffset) = 0;
+
   virtual InternalCommandLibrary& GetLib() = 0;
 
-  EventListener event_listener;
+  virtual FormatCapability GetMTLPixelFormatCapability(WMTPixelFormat Format) = 0;
+
 };
 
-HRESULT CreateD3D12Device(IMTLDXGIAdapter *adapter, REFIID riid, void **ppDevice);
+bool ConvertBarrierLayout(
+    D3D12_RESOURCE_DIMENSION dimension, D3D12_BARRIER_LAYOUT source, D3D12_RESOURCE_STATES *destination
+);
+
+bool IsSameDevice(MTLD3D12Device *device, ID3D12DeviceChild *child);
+
+HRESULT CreateD3D12Device(IMTLDXGIAdapter *adapter, D3D_FEATURE_LEVEL feature_level, REFIID riid, void **ppDevice);
 
 HRESULT
 CreateCommandQueue(MTLD3D12Device *pDevice, const D3D12_COMMAND_QUEUE_DESC *pDesc, REFIID riid, void **ppCommandQueue);
 
 HRESULT
 CreateCommandAllocator(MTLD3D12Device *pDevice, D3D12_COMMAND_LIST_TYPE Type, REFIID riid, void **ppCommandAllocator);
+
+HRESULT
+CreateCommandList1(
+    MTLD3D12Device *pDevice, UINT NodeMask, D3D12_COMMAND_LIST_TYPE Type, D3D12_COMMAND_LIST_FLAGS Flags, REFIID riid,
+    void **ppCommandList
+);
 
 HRESULT
 CreateDescriptorHeap(
@@ -204,7 +877,7 @@ HRESULT CreateCommittedTexture(
 HRESULT
 CreatePlacedTexture(
     MTLD3D12Device *pDevice, MTLD3D12Heap *pHeap, const D3D12_RESOURCE_DESC *pDesc, D3D12_RESOURCE_STATES InitialState,
-    const D3D12_CLEAR_VALUE *OptimizedClearValue, REFIID riid, void **ppResource
+    UINT64 HeapOffset, const D3D12_CLEAR_VALUE *OptimizedClearValue, REFIID riid, void **ppResource
 );
 
 HRESULT CreateCommittedBuffer(
@@ -216,6 +889,18 @@ HRESULT CreateCommittedBuffer(
 HRESULT
 CreatePlacedBuffer(
     MTLD3D12Device *pDevice, MTLD3D12Heap *pHeap, const D3D12_RESOURCE_DESC *pDesc, D3D12_RESOURCE_STATES InitialState,
+    UINT64 HeapOffset, const D3D12_CLEAR_VALUE *OptimizedClearValue, REFIID riid, void **ppResource
+);
+
+HRESULT
+CreateReservedBuffer(
+    MTLD3D12Device *pDevice, const D3D12_RESOURCE_DESC *pDesc, D3D12_RESOURCE_STATES InitialState,
+    const D3D12_CLEAR_VALUE *OptimizedClearValue, REFIID riid, void **ppResource
+);
+
+HRESULT
+CreateReservedTexture(
+    MTLD3D12Device *pDevice, const D3D12_RESOURCE_DESC *pDesc, D3D12_RESOURCE_STATES InitialState,
     const D3D12_CLEAR_VALUE *OptimizedClearValue, REFIID riid, void **ppResource
 );
 
@@ -240,6 +925,11 @@ CreateGraphicsPipelineState(
 );
 
 HRESULT
+CreateMeshPipelineState(
+    MTLD3D12Device *pDevice, const D3D12PipelineStreamData &data, REFIID riid, void **ppPipelineState
+);
+
+HRESULT
 CreateComputePipelineState(
     MTLD3D12Device *pDevice, const D3D12_COMPUTE_PIPELINE_STATE_DESC *pDesc, REFIID riid, void **ppPipelineState
 );
@@ -258,68 +948,64 @@ void PopulateWMTSamplerInfo(WMT::Device Device, WMTSamplerInfo &InfoOut, D3D12_S
 
 void PopulateWMTSamplerInfo(WMT::Device Device, WMTSamplerInfo &InfoOut, D3D12_SAMPLER_DESC const &Desc);
 
+HRESULT PopulateWMTTextureInfo(MTLD3D12Device *Device, WMTTextureInfo &InfoOut, const D3D12_RESOURCE_DESC &Desc);
+
 inline std::tuple<MTLD3D12RenderTargetDescriptorHeap *, UINT>
 GetRenderTargetHeap(MTLD3D12Device *pDevice, D3D12_CPU_DESCRIPTOR_HANDLE Handle) {
-#ifdef DXMT_USE_EMBEDDED_HEAP_POINTER
   EMBEDDED_DESCRIPTOR_HANDLE impl(Handle);
-  return {impl.extract<MTLD3D12RenderTargetDescriptorHeap>(), (UINT)impl.Descriptor};
-#else
-  IMPLEMENT_ME
-  return {};
-#endif
+  auto *heap = impl.extract<MTLD3D12RenderTargetDescriptorHeap>();
+  if (!heap || !pDevice || !IsSameDevice(pDevice, heap))
+    return {nullptr, 0};
+
+  D3D12_DESCRIPTOR_HEAP_DESC desc = {};
+  heap->GetDesc(&desc);
+  if ((desc.Type != D3D12_DESCRIPTOR_HEAP_TYPE_RTV && desc.Type != D3D12_DESCRIPTOR_HEAP_TYPE_DSV) ||
+      impl.Descriptor >= desc.NumDescriptors)
+    return {nullptr, 0};
+  return {heap, (UINT)impl.Descriptor};
 }
 
 inline D3D12_CPU_DESCRIPTOR_HANDLE
 GetRenderTargetDescriptor(MTLD3D12RenderTargetDescriptorHeap *pHeap, UINT Index) {
-#ifdef DXMT_USE_EMBEDDED_HEAP_POINTER
   return EMBEDDED_DESCRIPTOR_HANDLE(pHeap, Index);
-#else
-  IMPLEMENT_ME
-  return {};
-#endif
 }
 
 inline std::tuple<MTLD3D12DescriptorHeap *, UINT>
 GetShaderVisibleDescriptorHeap(MTLD3D12Device *pDevice, D3D12_CPU_DESCRIPTOR_HANDLE Handle) {
-#ifdef DXMT_USE_EMBEDDED_HEAP_POINTER
   EMBEDDED_DESCRIPTOR_HANDLE impl(Handle);
-  return {impl.extract<MTLD3D12DescriptorHeap>(), (UINT)impl.Descriptor};
-#else
-  IMPLEMENT_ME
-  return {};
-#endif
+  auto *heap = impl.extract<MTLD3D12DescriptorHeap>();
+  if (!heap || !pDevice || !IsSameDevice(pDevice, heap))
+    return {nullptr, 0};
+
+  D3D12_DESCRIPTOR_HEAP_DESC desc = {};
+  heap->GetDesc(&desc);
+  if (desc.Type != D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV || impl.Descriptor >= desc.NumDescriptors)
+    return {nullptr, 0};
+  return {heap, (UINT)impl.Descriptor};
 }
 
 inline D3D12_CPU_DESCRIPTOR_HANDLE
 GetShaderVisibleDescriptor(MTLD3D12DescriptorHeap *pHeap, UINT Index) {
-#ifdef DXMT_USE_EMBEDDED_HEAP_POINTER
   return EMBEDDED_DESCRIPTOR_HANDLE(pHeap, Index);
-#else
-  IMPLEMENT_ME
-  return {};
-#endif
-  //
 }
 
 inline std::tuple<MTLD3D12SamplerDescriptorHeap *, UINT>
 GetSamplerDescriptorHeap(MTLD3D12Device *pDevice, D3D12_CPU_DESCRIPTOR_HANDLE Handle) {
-#ifdef DXMT_USE_EMBEDDED_HEAP_POINTER
   EMBEDDED_DESCRIPTOR_HANDLE impl(Handle);
-  return {impl.extract<MTLD3D12SamplerDescriptorHeap>(), (UINT)impl.Descriptor};
-#else
-  IMPLEMENT_ME
-  return {};
-#endif
+  auto *heap = impl.extract<MTLD3D12SamplerDescriptorHeap>();
+  if (!heap || !pDevice || !IsSameDevice(pDevice, heap))
+    return {nullptr, 0};
+
+  D3D12_DESCRIPTOR_HEAP_DESC desc = {};
+  heap->GetDesc(&desc);
+  if (desc.Type != D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER || impl.Descriptor >= desc.NumDescriptors)
+    return {nullptr, 0};
+  return {heap, (UINT)impl.Descriptor};
 }
 
 inline D3D12_CPU_DESCRIPTOR_HANDLE
 GetSamplerDescriptor(MTLD3D12SamplerDescriptorHeap *pHeap, UINT Index) {
-#ifdef DXMT_USE_EMBEDDED_HEAP_POINTER
   return EMBEDDED_DESCRIPTOR_HANDLE(pHeap, Index);
-#else
-  IMPLEMENT_ME
-  return {};
-#endif
 }
 
 template <typename VIEW_DESC>
@@ -327,10 +1013,80 @@ HRESULT ExtractEntireResourceViewDescription(const D3D12_RESOURCE_DESC &Resource
 
 constexpr auto kDefaultShader4Component = 0b1'011'010'001'000;
 
-HRESULT ValidateResourceStates(D3D12_RESOURCE_STATES State, const D3D12_HEAP_PROPERTIES *pHeapProps);
+HRESULT ValidateResourceStates(
+    D3D12_RESOURCE_STATES State, const D3D12_HEAP_PROPERTIES *pHeapProps, const D3D12_RESOURCE_DESC *pResourceDesc
+);
 
-HRESULT ValidateResourceDescs(const D3D12_RESOURCE_DESC *pDesc, D3D12_HEAP_TYPE HeapType);
+HRESULT ValidateResourceDescs(const D3D12_RESOURCE_DESC *pDesc, const D3D12_HEAP_PROPERTIES *pHeapProps);
+
+HRESULT ValidateReservedTextureResourceDesc(
+    const D3D12_RESOURCE_DESC *pDesc, const D3D12_HEAP_PROPERTIES *pHeapProps
+);
+
+HRESULT ValidateResourceHeapFlags(const D3D12_RESOURCE_DESC *pDesc, D3D12_HEAP_FLAGS Flags);
+
+HRESULT ValidateResourceHeapCompatibility(const D3D12_RESOURCE_DESC *pDesc, D3D12_HEAP_FLAGS Flags);
 
 HRESULT ValidateHeapProperties(const D3D12_HEAP_PROPERTIES *pHeapProps, D3D12_HEAP_FLAGS Flags, bool AdapterIsNUMA);
+
+D3D12_BOX GetResourceExtent(const D3D12_RESOURCE_DESC &Desc, UINT MipSlice);
+
+UINT DecomposeSubresource(
+    const D3D12_RESOURCE_DESC &Desc, UINT Subresource = 0, UINT *pMipSlice = NULL, UINT *pArraySlice = NULL,
+    UINT *pPlaneSlice = NULL
+);
+
+bool IsCpuVisibleHeap(const D3D12_HEAP_PROPERTIES *pHeapProps);
+
+bool IsValidBufferResourceDesc(const D3D12_RESOURCE_DESC &Desc);
+
+inline bool
+IsRGB96Format(DXGI_FORMAT format) {
+  return format >= DXGI_FORMAT_R32G32B32_TYPELESS && format <= DXGI_FORMAT_R32G32B32_SINT;
+}
+
+inline bool
+IsFullyTypelessFormat(DXGI_FORMAT format, const MTL_DXGI_FORMAT_DESC &description) {
+  // These 64-bit component SRVs have a typed selected component despite the native TYPELESS flag.
+  return (description.Flag & MTL_DXGI_FORMAT_TYPELESS) && format != DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS &&
+         format != DXGI_FORMAT_X32_TYPELESS_G8X24_UINT;
+}
+
+// A readable native texel buffer alone is not a creatable D3D12 typed UAV.
+// Query reporting and texture-view admission use this same eligibility rule.
+inline bool
+SupportsTypedUnorderedAccessView(const MTL_DXGI_FORMAT_DESC &format, FormatCapability capabilities) {
+  const auto mask = static_cast<unsigned>(capabilities);
+  return format.BytesPerTexel != 12 && (mask & static_cast<unsigned>(FormatCapability::Write)) &&
+         (mask &
+          static_cast<unsigned>(FormatCapability::TextureBufferWrite | FormatCapability::TextureBufferReadWrite));
+}
+
+HRESULT QueryRGB96TextureFormat(WMT::Device device, DXGI_FORMAT format, MTL_DXGI_FORMAT_DESC &description);
+
+inline HRESULT
+QueryD3D12TextureFormat(WMT::Device device, DXGI_FORMAT format, MTL_DXGI_FORMAT_DESC &description) {
+  // Preserve the shared query's direct path for ordinary formats.
+  return IsRGB96Format(format) ? QueryRGB96TextureFormat(device, format, description)
+                              : MTLQueryDXGIFormat(device, format, description);
+}
+
+D3D12_FORMAT_SUPPORT1 GetTextureFormatDimensions(const MTL_DXGI_FORMAT_DESC &Format);
+
+bool SupportsTextureDimension(const MTL_DXGI_FORMAT_DESC &Format, D3D12_RESOURCE_DIMENSION Dimension);
+
+HRESULT ValidateTextureResourceDesc(const D3D12_RESOURCE_DESC &Desc);
+
+HRESULT ValidateTextureResourceLayout(const D3D12_RESOURCE_DESC &Desc);
+
+HRESULT ValidateTextureResourceFlags(const D3D12_RESOURCE_DESC &Desc);
+
+HRESULT ValidateTextureResourceCapabilities(const D3D12_RESOURCE_DESC &Desc, FormatCapability Capabilities);
+
+bool CanUseSmallTextureAlignment(
+    const D3D12_RESOURCE_DESC &Desc, const MTL_DXGI_FORMAT_DESC &Format, UINT64 Alignment
+);
+
+bool IsD3D12BoxInBounds(D3D12_BOX &box, D3D12_BOX &bounds);
 
 } // namespace dxmt

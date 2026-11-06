@@ -68,6 +68,11 @@ struct BufferViewKey {
 
 struct BufferViewDescriptor {
   WMTPixelFormat format;
+  // Restrict native view usage without changing allocation tracking flags.
+  bool read_only = false;
+  // Zero length preserves the whole-allocation view used by ordinary buffers.
+  uint64_t byte_offset = 0;
+  uint64_t byte_length = 0;
 };
 
 class Buffer;
@@ -92,6 +97,11 @@ public:
   WMT::Buffer
   buffer() const {
     return obj_;
+  }
+
+  uint64_t
+  length() const noexcept {
+    return length_;
   }
 
   Flags<BufferAllocationFlag>
@@ -146,14 +156,19 @@ public:
   small_vector<GenericAccessTracker, 1> fenceTrackers;
 
 private:
-  BufferAllocation(WMT::Device device, const WMTBufferInfo &info, Flags<BufferAllocationFlag> flags);
+  BufferAllocation(
+      WMT::Device device, const WMTBufferInfo &info, Flags<BufferAllocationFlag> flags, WMT::Heap heap = {},
+      uint64_t offset = ~0ull, bool placement_sparse = false
+  );
   void free();
 
   BufferAllocation(const BufferAllocation &) = delete;
   BufferAllocation(BufferAllocation &&) = delete;
 
   WMT::Reference<WMT::Buffer> obj_;
+  WMT::Reference<WMT::Heap> heap_;
   WMTBufferInfo info_;
+  uint64_t length_;
   uint32_t version_ = 0;
   Flags<BufferAllocationFlag> flags_;
   small_vector<std::unique_ptr<BufferView>, 1> cached_view_;
@@ -162,6 +177,7 @@ private:
   uint32_t current_suballocation_ = 0;
   uint32_t suballocation_size_;
   uint32_t suballocation_count_ = 1;
+  const WMTSparsePageSize placement_sparse_page_size_;
 
   void * placed_buffer = nullptr;
 };
@@ -180,7 +196,13 @@ public:
 
   Rc<BufferAllocation> allocate(Flags<BufferAllocationFlag> flags);
 
+  Rc<BufferAllocation> allocate(WMT::Heap heap, uint64_t offset, Flags<BufferAllocationFlag> flags);
+
+  Rc<BufferAllocation> allocatePlacementSparse(Flags<BufferAllocationFlag> flags);
+
   Rc<BufferAllocation> rename(Rc<BufferAllocation> &&newAllocation);
+
+  Rc<Buffer> streamOutputCounter();
 
   Buffer(uint64_t length, WMT::Device device) : length_(length), device_(device) {}
 
@@ -208,6 +230,7 @@ private:
   uint64_t length_;
 
   Rc<BufferAllocation> current_;
+  Rc<Buffer> stream_output_counter_;
   uint32_t version_ = 0;
   std::atomic<uint32_t> refcount_ = {0u};
 

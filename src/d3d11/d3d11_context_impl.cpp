@@ -201,7 +201,7 @@ get_gs_vertex_count(D3D11_PRIMITIVE_TOPOLOGY primitive) {
   case D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST_ADJ:
     return {30, 30};
   case D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP_ADJ:
-    return {32, 28};
+    return {32, SM50_ADJ_RESTART_EXPERIMENTAL ? 24 : 28};
   case D3D_PRIMITIVE_TOPOLOGY_1_CONTROL_POINT_PATCHLIST:
   return {32, 32};
   case D3D_PRIMITIVE_TOPOLOGY_2_CONTROL_POINT_PATCHLIST:
@@ -321,6 +321,7 @@ public:
   MTL_DXGI_FORMAT_DESC SrcFormat;
   MTL_DXGI_FORMAT_DESC DstFormat;
 
+  bool DimensionIncompatible;
   bool Invalid = true;
 
   TextureCopyCommand(
@@ -332,9 +333,8 @@ public:
       SrcSubresource(SrcSubresource),
       DstSubresource(DstSubresource),
       SrcFormat(Src_.FormatDescription),
-      DstFormat(Dst_.FormatDescription) {
-    if (Dst_.Dimension != Src_.Dimension)
-      return;
+      DstFormat(Dst_.FormatDescription),
+      DimensionIncompatible(Dst_.Dimension != Src_.Dimension) {
 
     if (SrcFormat.PixelFormat == WMTPixelFormatInvalid)
       return;
@@ -347,14 +347,7 @@ public:
     }
     case D3D11_RESOURCE_DIMENSION_TEXTURE1D: {
       D3D11_TEXTURE1D_DESC &dst_desc = Dst_.Texture1DDesc;
-      D3D11_TEXTURE1D_DESC &src_desc = Src_.Texture1DDesc;
-
-      Src.Format = src_desc.Format;
-      Src.MipLevel = SrcSubresource % src_desc.MipLevels;
-      Src.ArraySlice = SrcSubresource / src_desc.MipLevels;
-      Src.Width = std::max(1u, src_desc.Width >> Src.MipLevel);
-      Src.Height = 1;
-      Src.Depth = 1;
+      if (DstSubresource >= dst_desc.MipLevels * dst_desc.ArraySize) return;
 
       Dst.Format = dst_desc.Format;
       Dst.MipLevel = DstSubresource % dst_desc.MipLevels;
@@ -366,14 +359,7 @@ public:
     }
     case D3D11_RESOURCE_DIMENSION_TEXTURE2D: {
       D3D11_TEXTURE2D_DESC1 &dst_desc = Dst_.Texture2DDesc;
-      D3D11_TEXTURE2D_DESC1 &src_desc = Src_.Texture2DDesc;
-
-      Src.Format = src_desc.Format;
-      Src.MipLevel = SrcSubresource % src_desc.MipLevels;
-      Src.ArraySlice = SrcSubresource / src_desc.MipLevels;
-      Src.Width = std::max(1u, src_desc.Width >> Src.MipLevel);
-      Src.Height = std::max(1u, src_desc.Height >> Src.MipLevel);
-      Src.Depth = 1;
+      if (DstSubresource >= dst_desc.MipLevels * dst_desc.ArraySize) return;
 
       Dst.Format = dst_desc.Format;
       Dst.MipLevel = DstSubresource % dst_desc.MipLevels;
@@ -385,14 +371,7 @@ public:
     }
     case D3D11_RESOURCE_DIMENSION_TEXTURE3D: {
       D3D11_TEXTURE3D_DESC1 &dst_desc = Dst_.Texture3DDesc;
-      D3D11_TEXTURE3D_DESC1 &src_desc = Src_.Texture3DDesc;
-
-      Src.Format = src_desc.Format;
-      Src.MipLevel = SrcSubresource;
-      Src.ArraySlice = 0;
-      Src.Width = std::max(1u, src_desc.Width >> Src.MipLevel);
-      Src.Height = std::max(1u, src_desc.Height >> Src.MipLevel);
-      Src.Depth = std::max(1u, src_desc.Depth >> Src.MipLevel);
+      if (DstSubresource >= dst_desc.MipLevels) return;
 
       Dst.Format = dst_desc.Format;
       Dst.MipLevel = DstSubresource;
@@ -400,7 +379,50 @@ public:
       Dst.Width = std::max(1u, dst_desc.Width >> Dst.MipLevel);
       Dst.Height = std::max(1u, dst_desc.Height >> Dst.MipLevel);
       Dst.Depth = std::max(1u, dst_desc.Depth >> Dst.MipLevel);
+      break;
+    }
+    }
 
+    switch (Src_.Dimension) {
+    default: {
+      return;
+    }
+    case D3D11_RESOURCE_DIMENSION_TEXTURE1D: {
+      D3D11_TEXTURE1D_DESC &src_desc = Src_.Texture1DDesc;
+      if (SrcSubresource >= src_desc.MipLevels * src_desc.ArraySize) return;
+
+      Src.Format = src_desc.Format;
+      Src.MipLevel = SrcSubresource % src_desc.MipLevels;
+      Src.ArraySlice = SrcSubresource / src_desc.MipLevels;
+      Src.Width = std::max(1u, src_desc.Width >> Src.MipLevel);
+      Src.Height = 1;
+      Src.Depth = 1;
+
+      break;
+    }
+    case D3D11_RESOURCE_DIMENSION_TEXTURE2D: {
+      D3D11_TEXTURE2D_DESC1 &src_desc = Src_.Texture2DDesc;
+      if (SrcSubresource >= src_desc.MipLevels * src_desc.ArraySize) return;
+
+      Src.Format = src_desc.Format;
+      Src.MipLevel = SrcSubresource % src_desc.MipLevels;
+      Src.ArraySlice = SrcSubresource / src_desc.MipLevels;
+      Src.Width = std::max(1u, src_desc.Width >> Src.MipLevel);
+      Src.Height = std::max(1u, src_desc.Height >> Src.MipLevel);
+      Src.Depth = 1;
+
+      break;
+    }
+    case D3D11_RESOURCE_DIMENSION_TEXTURE3D: {
+      D3D11_TEXTURE3D_DESC1 &src_desc = Src_.Texture3DDesc;
+      if (SrcSubresource >= src_desc.MipLevels) return;
+
+      Src.Format = src_desc.Format;
+      Src.MipLevel = SrcSubresource;
+      Src.ArraySlice = 0;
+      Src.Width = std::max(1u, src_desc.Width >> Src.MipLevel);
+      Src.Height = std::max(1u, src_desc.Height >> Src.MipLevel);
+      Src.Depth = std::max(1u, src_desc.Depth >> Src.MipLevel);
       break;
     }
     }
@@ -1110,6 +1132,8 @@ public:
       break;
     }
     default:
+      if (Src.Dimension == D3D11_RESOURCE_DIMENSION_BUFFER)
+        return;
       CopyTexture(TextureCopyCommand(Dst, DstSubresource, DstX, DstY, DstZ, Src, SrcSubresource, pSrcBox));
       break;
     }
@@ -1266,6 +1290,150 @@ public:
 
 #pragma region DrawCall
 
+  bool
+  TryStreamOutputDraw(
+      bool indexed, UINT count, UINT instances, UINT first, INT base_vertex, UINT base_instance,
+      ID3D11Buffer *argument_buffer = nullptr, UINT argument_offset = 0
+  ) {
+    auto shader = state_.ShaderStages[PipelineStage::Geometry].Shader.ptr();
+    if (!shader || shader->GetManagedShader())
+      return false;
+    auto layout = com_cast<IMTLD3D11StreamOutputLayout>(shader);
+    if (!layout)
+      return false;
+    if (indexed && !state_.InputAssembler.IndexBuffer)
+      return true;
+    StreamOutputDraw arguments = {};
+    if (!GetStreamOutputPrimitiveLayout(state_.InputAssembler.Topology, arguments))
+      return true;
+    MTL_SHADER_STREAM_OUTPUT_ELEMENT_DESC *elements = nullptr;
+    uint32_t strides[4] = {};
+    layout->GetStreamOutputElements(&elements, strides);
+    arguments.stride = strides[0];
+    arguments.input_count = count;
+    arguments.instance_count = instances;
+    arguments.base_vertex = indexed ? static_cast<UINT>(base_vertex) : first;
+    arguments.base_instance = base_instance;
+    Rc<Buffer> indirect;
+    if (argument_buffer) {
+      auto resource = GetResourceCommon(argument_buffer);
+      if (!resource)
+        return true;
+      indirect = resource->buffer();
+      const UINT size = indexed ? 20 : 16;
+      if ((argument_offset & 3) || argument_offset > indirect->length() ||
+          size > indirect->length() - argument_offset) {
+        ERR("Invalid stream-output indirect arguments");
+        return true;
+      }
+    }
+    uint64_t index_offset = 0;
+    Rc<Buffer> scratch;
+    if (indexed) {
+      arguments.index_size = state_.InputAssembler.IndexBufferFormat == DXGI_FORMAT_R32_UINT ? 4 : 2;
+      index_offset = state_.InputAssembler.IndexBufferOffset;
+      const auto index_length = state_.InputAssembler.IndexBuffer->buffer()->length();
+      if (index_offset > index_length)
+        return true;
+      if (indirect)
+        arguments.input_count = UINT((index_length - index_offset) / arguments.index_size);
+      else {
+        index_offset += uint64_t(first) * arguments.index_size;
+        if (index_offset > index_length || uint64_t(count) * arguments.index_size > index_length - index_offset)
+          return true;
+      }
+      if (arguments.flags & kSOOverlapping) {
+        arguments.flags |= kSOHasCut;
+        arguments.cut_index = arguments.index_size == 2 ? 0xffffu : 0xffffffffu;
+        arguments.prefix_count = arguments.input_count;
+        if (arguments.input_count) {
+          StreamOutputScanLayout plan(arguments.input_count);
+          scratch = Rc(new Buffer(plan.size, device->GetMTLDevice()));
+          auto allocation = scratch->allocate({BufferAllocationFlag::GpuPrivate});
+          if (!allocation->buffer()) {
+            ERR("Stream-output scan allocation failed");
+            return true;
+          }
+          scratch->rename(std::move(allocation));
+          SwitchToComputeEncoder();
+          EmitOP([=](ArgumentEncodingContext &enc) {
+            enc.prepareStreamOutputIndexPrefix(arguments, index_offset, scratch, indirect, argument_offset);
+          });
+        }
+      }
+    }
+    const auto status = indexed ? PreDraw<true>(true) : PreDraw<false>(true);
+    if (status != DrawCallStatus::Ordinary)
+      return true;
+    const auto offset = PreAllocateArgumentBuffer(sizeof(StreamOutputDraw), 16);
+    EmitOP([=](ArgumentEncodingContext &enc) {
+      enc.bumpVisibilityResultOffset();
+      enc.resolveRenderPassBarrier();
+      enc.encodeStreamOutputDraw(arguments, offset, index_offset, scratch, indirect, argument_offset);
+    });
+    return true;
+  }
+
+  bool
+  UseGeometryRestart() {
+    auto gs = GetManagedShader<PipelineStage::Geometry>();
+    return SM50_ADJ_RESTART_EXPERIMENTAL &&
+        state_.InputAssembler.Topology == D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP_ADJ && gs &&
+        gs->reflection().GeometryShader.GSPassThrough == ~0u &&
+        !GetManagedShader<PipelineStage::Hull>();
+  }
+
+  Rc<Buffer>
+  PrepareGeometryRestartPrefix(UINT count, UINT first, Rc<Buffer> indirect = {}, UINT indirect_offset = 0) {
+    if (!state_.InputAssembler.IndexBuffer)
+      return {};
+    StreamOutputDraw arguments = {};
+    arguments.index_size = state_.InputAssembler.IndexBufferFormat == DXGI_FORMAT_R32_UINT ? 4 : 2;
+    const uint64_t offset = uint64_t(state_.InputAssembler.IndexBufferOffset) + uint64_t(first) * arguments.index_size;
+    const uint64_t length = state_.InputAssembler.IndexBuffer->buffer()->length();
+    D3D11_BUFFER_DESC desc = {};
+    state_.InputAssembler.IndexBuffer->GetDesc(&desc);
+    const bool reusable = !indirect && GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE &&
+        desc.Usage == D3D11_USAGE_IMMUTABLE && !desc.MiscFlags;
+    if (reusable && geometry_restart_cache_.resource == state_.InputAssembler.IndexBuffer &&
+        geometry_restart_cache_.offset == offset && geometry_restart_cache_.count == count &&
+        geometry_restart_cache_.index_size == arguments.index_size)
+      return geometry_restart_cache_.prefix;
+    if (indirect) {
+      if ((indirect_offset & 3) || indirect_offset > indirect->length() ||
+          sizeof(DXMT_DRAW_INDEXED_ARGUMENTS) > indirect->length() - indirect_offset ||
+          (offset <= length && (length - offset) / arguments.index_size > UINT_MAX))
+        return {};
+      count = offset <= length ? UINT((length - offset) / arguments.index_size) : 0;
+      count = std::max(count, 1u);
+    }
+    if (!count)
+      return {};
+    arguments.input_count = count;
+    arguments.input_step = 2;
+    arguments.input_window = 6;
+    arguments.flags = kSOHasCut | kSOGeometryRestart | (indirect ? kSOAllowIndexOOB : 0);
+    arguments.cut_index = arguments.index_size == 2 ? 0xffffu : 0xffffffffu;
+    StreamOutputScanLayout plan(count);
+    Rc<Buffer> scratch(new Buffer(plan.size, device->GetMTLDevice()));
+    auto allocation = scratch->allocate({BufferAllocationFlag::GpuPrivate});
+    if (!allocation->buffer())
+      return {};
+    scratch->rename(std::move(allocation));
+    SwitchToComputeEncoder();
+    EmitOP([=](ArgumentEncodingContext &enc) {
+      enc.prepareStreamOutputIndexPrefix(arguments, offset, scratch, indirect, indirect_offset);
+    });
+    if (reusable) {
+      geometry_restart_cache_.resource = state_.InputAssembler.IndexBuffer;
+      geometry_restart_cache_.prefix = scratch;
+      geometry_restart_cache_.offset = offset;
+      geometry_restart_cache_.count = count;
+      geometry_restart_cache_.index_size = arguments.index_size;
+    }
+    return scratch;
+  }
+
   void
   STDMETHODCALLTYPE
   Draw(UINT VertexCount, UINT StartVertexLocation) override {
@@ -1273,6 +1441,8 @@ public:
       return;
     std::lock_guard<mutex_t> lock(mutex);
 
+    if (TryStreamOutputDraw(false, VertexCount, 1, StartVertexLocation, 0, 0))
+      return;
     WMTPrimitiveType Primitive;
     uint32_t ControlPointCount;
     if(!to_metal_primitive_type(state_.InputAssembler.Topology, Primitive, ControlPointCount))
@@ -1306,15 +1476,24 @@ public:
       return;
     std::lock_guard<mutex_t> lock(mutex);
 
+    if (TryStreamOutputDraw(true, IndexCount, 1, StartIndexLocation, BaseVertexLocation, 0))
+      return;
     WMTPrimitiveType Primitive;
     uint32_t ControlPointCount;
     if(!to_metal_primitive_type(state_.InputAssembler.Topology, Primitive, ControlPointCount))
       return;
+    const bool restart = UseGeometryRestart();
+    Rc<Buffer> restart_prefix;
+    if (restart) {
+      restart_prefix = PrepareGeometryRestartPrefix(IndexCount, StartIndexLocation);
+      if (!restart_prefix)
+        return;
+    }
     DrawCallStatus status = PreDraw<true>();
     if (status == DrawCallStatus::Invalid)
       return;
     if (status == DrawCallStatus::Geometry) {
-      return GeometryDrawIndexed(IndexCount, StartIndexLocation, BaseVertexLocation, 1, 0);
+      return GeometryDrawIndexed(IndexCount, StartIndexLocation, BaseVertexLocation, 1, 0, restart_prefix);
     }
     if (status == DrawCallStatus::Tessellation) {
       return TessellationDrawIndexed(ControlPointCount, IndexCount, StartIndexLocation, BaseVertexLocation, 1, 0);
@@ -1349,6 +1528,10 @@ public:
       return;
     std::lock_guard<mutex_t> lock(mutex);
 
+    if (TryStreamOutputDraw(
+            false, VertexCountPerInstance, InstanceCount, StartVertexLocation, 0, StartInstanceLocation
+        ))
+      return;
     WMTPrimitiveType Primitive;
     uint32_t ControlPointCount;
     if (!to_metal_primitive_type(state_.InputAssembler.Topology, Primitive, ControlPointCount))
@@ -1388,16 +1571,27 @@ public:
       return;
     std::lock_guard<mutex_t> lock(mutex);
 
+    if (TryStreamOutputDraw(
+            true, IndexCountPerInstance, InstanceCount, StartIndexLocation, BaseVertexLocation, StartInstanceLocation
+        ))
+      return;
     WMTPrimitiveType Primitive;
     uint32_t ControlPointCount;
     if(!to_metal_primitive_type(state_.InputAssembler.Topology, Primitive, ControlPointCount))
       return;
+    const bool restart = UseGeometryRestart();
+    Rc<Buffer> restart_prefix;
+    if (restart) {
+      restart_prefix = PrepareGeometryRestartPrefix(IndexCountPerInstance, StartIndexLocation);
+      if (!restart_prefix)
+        return;
+    }
     DrawCallStatus status = PreDraw<true>();
     if (status == DrawCallStatus::Invalid)
       return;
     if (status == DrawCallStatus::Geometry) {
       return GeometryDrawIndexed(
-          IndexCountPerInstance, StartIndexLocation, BaseVertexLocation, InstanceCount, StartInstanceLocation
+          IndexCountPerInstance, StartIndexLocation, BaseVertexLocation, InstanceCount, StartInstanceLocation, restart_prefix
       );
     }
     if (status == DrawCallStatus::Tessellation) {
@@ -1434,6 +1628,12 @@ public:
       UINT NumControlPoint, UINT VertexCountPerInstance, UINT InstanceCount, UINT StartVertexLocation,
       UINT StartInstanceLocation
   ) {
+    if (!NumControlPoint)
+      return;
+    const auto PatchCountPerInstance = VertexCountPerInstance / NumControlPoint;
+    if (!PatchCountPerInstance)
+      return;
+
     auto draw_arguments_offset = PreAllocateArgumentBuffer(sizeof(DXMT_DRAW_ARGUMENTS), 32);
     auto max_object_threadgroups = max_object_threadgroups_;
     EmitOP([=](ArgumentEncodingContext &enc) {
@@ -1443,12 +1643,11 @@ public:
       draw_argument->InstanceCount = InstanceCount;
       draw_argument->StartInstance = StartInstanceLocation;
 
-      auto PatchCountPerInstance = VertexCountPerInstance / NumControlPoint;
       auto PatchPerGroup = 32 / enc.tess_threads_per_patch;
       auto ThreadsPerPatch = enc.tess_threads_per_patch;
       auto PatchPerObjectInstance = (PatchCountPerInstance - 1) / PatchPerGroup + 1;
 
-      if (PatchPerObjectInstance * InstanceCount > max_object_threadgroups) {
+      if (uint64_t(PatchPerObjectInstance) * InstanceCount > max_object_threadgroups) {
         WARN(
             "Omitted mesh draw (TS) because of too many object threadgroups (", PatchPerObjectInstance, "x",
             InstanceCount, ")"
@@ -1473,6 +1672,12 @@ public:
       UINT NumControlPoint, UINT IndexCountPerInstance, UINT StartIndexLocation, INT BaseVertexLocation,
       UINT InstanceCount, UINT BaseInstance
   ) {
+    if (!NumControlPoint)
+      return;
+    const auto PatchCountPerInstance = IndexCountPerInstance / NumControlPoint;
+    if (!PatchCountPerInstance)
+      return;
+
     auto IndexBufferOffset = state_.InputAssembler.IndexBufferOffset;
     auto draw_arguments_offset = PreAllocateArgumentBuffer(sizeof(DXMT_DRAW_INDEXED_ARGUMENTS), 32);
     auto max_object_threadgroups = max_object_threadgroups_;
@@ -1484,12 +1689,11 @@ public:
       draw_argument->InstanceCount = InstanceCount;
       draw_argument->StartInstance = BaseInstance;
 
-      auto PatchCountPerInstance = IndexCountPerInstance / NumControlPoint;
       auto PatchPerGroup = 32 / enc.tess_threads_per_patch;
       auto ThreadsPerPatch = enc.tess_threads_per_patch;
       auto PatchPerObjectInstance = (PatchCountPerInstance - 1) / PatchPerGroup + 1;
 
-      if (PatchPerObjectInstance * InstanceCount > max_object_threadgroups) {
+      if (uint64_t(PatchPerObjectInstance) * InstanceCount > max_object_threadgroups) {
         WARN(
             "Omitted mesh draw (TS) because of too many object threadgroups (", PatchPerObjectInstance, "x",
             InstanceCount, ")"
@@ -1548,9 +1752,13 @@ public:
   void
   GeometryDrawIndexed(
       UINT IndexCountPerInstance, UINT StartIndexLocation, INT BaseVertexLocation,
-      UINT InstanceCount, UINT BaseInstance
+      UINT InstanceCount, UINT BaseInstance, Rc<Buffer> restart_prefix
   ) {
     auto IndexBufferOffset = state_.InputAssembler.IndexBufferOffset;
+    const auto descriptor_offset = restart_prefix ? PreAllocateArgumentBuffer(16, 16) : 0;
+    const uint64_t index_length = restart_prefix ? state_.InputAssembler.IndexBuffer->buffer()->length() : 0;
+    const uint32_t index_count = index_length > IndexBufferOffset ? UINT((index_length - IndexBufferOffset) /
+        (state_.InputAssembler.IndexBufferFormat == DXGI_FORMAT_R32_UINT ? 4 : 2)) : 0;
     auto draw_arguments_offset = PreAllocateArgumentBuffer(sizeof(DXMT_DRAW_INDEXED_ARGUMENTS), 32);
     auto max_object_threadgroups = max_object_threadgroups_;
     EmitOP([=, topo = state_.InputAssembler.Topology](ArgumentEncodingContext &enc) {
@@ -1572,6 +1780,8 @@ public:
 
       enc.bumpVisibilityResultOffset();
       enc.resolveRenderPassBarrier();
+      if (restart_prefix)
+        enc.bindGeometryIndexPrefix(restart_prefix, descriptor_offset, IndexCountPerInstance, index_count);
       auto &cmd = enc.encodeRenderCommand<wmtcmd_render_dxmt_geometry_draw_indexed>();
       cmd.type = WMTRenderCommandDXMTGeometryDrawIndexed;
       cmd.draw_arguments_offset = enc.getFinalArgumentBufferOffset(draw_arguments_offset);
@@ -1588,15 +1798,26 @@ public:
   DrawIndexedInstancedIndirect(ID3D11Buffer *pBufferForArgs, UINT AlignedByteOffsetForArgs) override {
     std::lock_guard<mutex_t> lock(mutex);
 
+    if (TryStreamOutputDraw(true, 0, 0, 0, 0, 0, pBufferForArgs, AlignedByteOffsetForArgs))
+      return;
     WMTPrimitiveType Primitive;
     uint32_t ControlPointCount;
     if(!to_metal_primitive_type(state_.InputAssembler.Topology, Primitive, ControlPointCount))
       return;
+    Rc<Buffer> restart_prefix;
+    if (UseGeometryRestart()) {
+      auto arg = GetResourceCommon(pBufferForArgs);
+      if (!arg)
+        return;
+      restart_prefix = PrepareGeometryRestartPrefix(0, 0, arg->buffer(), AlignedByteOffsetForArgs);
+      if (!restart_prefix)
+        return;
+    }
     DrawCallStatus status = PreDraw<true>();
     if (status == DrawCallStatus::Invalid)
       return;
     if (status == DrawCallStatus::Geometry) {
-      return GeometryDrawIndexedIndirect(pBufferForArgs, AlignedByteOffsetForArgs);
+      return GeometryDrawIndexedIndirect(pBufferForArgs, AlignedByteOffsetForArgs, restart_prefix);
     }
     if (status == DrawCallStatus::Tessellation) {
       return TessellationDrawIndexedIndirect(ControlPointCount ,pBufferForArgs, AlignedByteOffsetForArgs);
@@ -1630,6 +1851,8 @@ public:
   DrawInstancedIndirect(ID3D11Buffer *pBufferForArgs, UINT AlignedByteOffsetForArgs) override {
     std::lock_guard<mutex_t> lock(mutex);
 
+    if (TryStreamOutputDraw(false, 0, 0, 0, 0, 0, pBufferForArgs, AlignedByteOffsetForArgs))
+      return;
     WMTPrimitiveType Primitive;
     uint32_t ControlPointCount;
     if(!to_metal_primitive_type(state_.InputAssembler.Topology, Primitive, ControlPointCount))
@@ -1693,10 +1916,14 @@ public:
 
   void
   GeometryDrawIndexedIndirect(
-    ID3D11Buffer *pBufferForArgs, UINT AlignedByteOffsetForArgs
+    ID3D11Buffer *pBufferForArgs, UINT AlignedByteOffsetForArgs, Rc<Buffer> restart_prefix
   ) {
     auto IndexBufferOffset = state_.InputAssembler.IndexBufferOffset;
     auto max_object_threadgroups = max_object_threadgroups_;
+    const auto descriptor_offset = restart_prefix ? PreAllocateArgumentBuffer(16, 16) : 0;
+    const uint64_t index_length = restart_prefix ? state_.InputAssembler.IndexBuffer->buffer()->length() : 0;
+    const UINT index_count = restart_prefix && IndexBufferOffset <= index_length
+        ? UINT((index_length - IndexBufferOffset) / (state_.InputAssembler.IndexBufferFormat == DXGI_FORMAT_R32_UINT ? 4 : 2)) : 0;
 
     if (auto bindable = GetResourceCommon(pBufferForArgs)) {
       EmitOP([=, topo = state_.InputAssembler.Topology, ArgBuffer = bindable->buffer()](ArgumentEncodingContext &enc) {
@@ -1709,11 +1936,19 @@ public:
         auto [index_buffer, index_sub_offset] = enc.currentIndexBuffer();
   
         enc.bumpVisibilityResultOffset();
-        enc.encodeGSDispatchArgumentsMarshal(
-          buffer->buffer(), buffer->gpuAddress() + buffer_offset, AlignedByteOffsetForArgs, vertex_increment_per_wrap,
-          dispatch_arg.gpu_buffer, dispatch_arg.gpu_address, dispatch_arg.offset, max_object_threadgroups
-        );
+        if (restart_prefix)
+          enc.encodeGSIndexedRestartArgumentsMarshal(
+              buffer->buffer(), buffer->gpuAddress() + buffer_offset + AlignedByteOffsetForArgs,
+              vertex_increment_per_wrap, dispatch_arg.gpu_buffer, dispatch_arg.gpu_address + dispatch_arg.offset,
+              max_object_threadgroups, index_count);
+        else
+          enc.encodeGSDispatchArgumentsMarshal(
+              buffer->buffer(), buffer->gpuAddress() + buffer_offset, AlignedByteOffsetForArgs, vertex_increment_per_wrap,
+              dispatch_arg.gpu_buffer, dispatch_arg.gpu_address, dispatch_arg.offset, max_object_threadgroups
+          );
         enc.resolveRenderPassBarrier();
+        if (restart_prefix)
+          enc.bindGeometryIndexPrefix(restart_prefix, descriptor_offset, std::max(index_count, 1u), index_count);
         auto &cmd = enc.encodeRenderCommand<wmtcmd_render_dxmt_geometry_draw_indexed_indirect>();
         cmd.type = WMTRenderCommandDXMTGeometryDrawIndexedIndirect;
         cmd.dispatch_args_buffer = dispatch_arg.gpu_buffer;
@@ -1732,6 +1967,8 @@ public:
   TessellationDrawIndirect(
     UINT NumControlPoint, ID3D11Buffer *pBufferForArgs, UINT AlignedByteOffsetForArgs
   ) {
+    if (!NumControlPoint)
+      return;
     auto max_object_threadgroups = max_object_threadgroups_;
     if (auto bindable = GetResourceCommon(pBufferForArgs)) {
       EmitOP([=, ArgBuffer = bindable->buffer()](ArgumentEncodingContext &enc) {
@@ -1767,6 +2004,8 @@ public:
   TessellationDrawIndexedIndirect(
     UINT NumControlPoint, ID3D11Buffer *pBufferForArgs, UINT AlignedByteOffsetForArgs
   ) {
+    if (!NumControlPoint)
+      return;
     auto IndexBufferOffset = state_.InputAssembler.IndexBufferOffset;
     auto max_object_threadgroups = max_object_threadgroups_;
 
@@ -1948,12 +2187,19 @@ public:
     std::lock_guard<mutex_t> lock(mutex);
 
     auto pBuffer = GetResourceCommon(pIndexBuffer);
+    if (geometry_restart_cache_.resource.ptr() != pBuffer ||
+        state_.InputAssembler.IndexBufferFormat != Format || state_.InputAssembler.IndexBufferOffset != Offset) {
+      geometry_restart_cache_.resource = nullptr;
+      geometry_restart_cache_.prefix = {};
+    }
     if (pBuffer && (pBuffer->bindFlags() & D3D11_BIND_INDEX_BUFFER) && ValidateIAHazard(pBuffer)) {
       state_.InputAssembler.IndexBuffer = pBuffer;
       EmitST([buffer = state_.InputAssembler.IndexBuffer->buffer()](ArgumentEncodingContext &enc) mutable {
         enc.bindIndexBuffer(forward_rc(buffer));
       });
     } else {
+      geometry_restart_cache_.resource = nullptr;
+      geometry_restart_cache_.prefix = {};
       state_.InputAssembler.IndexBuffer = nullptr;
       EmitST([](ArgumentEncodingContext &enc) { enc.bindIndexBuffer({}); });
     }
@@ -2245,7 +2491,7 @@ public:
         auto &entry = state_.StreamOutput.Targets.bind(slot, {pBuffer}, replaced);
         if (!replaced) {
           auto offset = pOffsets ? pOffsets[slot] : 0;
-          if (offset != entry.Offset) {
+          if (offset != UINT32_MAX || offset != entry.Offset) {
             state_.StreamOutput.Targets.set_dirty(slot);
             entry.Offset = offset;
             EmitST([=, buffer = pBuffer->buffer()](ArgumentEncodingContext &enc) mutable {
@@ -2265,8 +2511,11 @@ public:
          * - DSV can't even be a buffer
          * - RTV is questionable: we don't support buffer-backed RTV at the moment
          */
-        EmitST([=, buffer = pBuffer->buffer()](ArgumentEncodingContext &enc) mutable {
-          enc.bindStreamOutputBuffer(slot, entry.Offset, forward_rc(buffer), {});
+        auto buffer = pBuffer->buffer();
+        auto counter = buffer->streamOutputCounter();
+        EmitST([slot, offset = entry.Offset, buffer = std::move(buffer),
+                counter = std::move(counter)](ArgumentEncodingContext &enc) mutable {
+          enc.bindStreamOutputBuffer(slot, offset, forward_rc(buffer), forward_rc(counter));
         });
       } else {
         state_.StreamOutput.Targets.unbind(slot);
@@ -2773,6 +3022,8 @@ public:
 
     if (pViewOrBuffer->bindFlags() & D3D11_BIND_INDEX_BUFFER) {
       if (CheckOverlap(state_.InputAssembler.IndexBuffer.ptr(), pViewOrBuffer)) {
+        geometry_restart_cache_.resource = nullptr;
+        geometry_restart_cache_.prefix = {};
         state_.InputAssembler.IndexBuffer = nullptr;
         state_.InputAssembler.IndexBufferFormat = DXGI_FORMAT_UNKNOWN;
         state_.InputAssembler.IndexBufferOffset = 0;
@@ -3742,7 +3993,7 @@ public:
           entry.Offset = pOffsets[slot - StartSlot];
         } else {
           ERR("SetVertexBuffers: offset is null");
-          entry.Stride = 0;
+          entry.Offset = 0;
         }
         entry.Buffer = pVertexBuffer;
           EmitST([=, buffer = entry.Buffer->buffer(), offset = entry.Offset,
@@ -4018,7 +4269,7 @@ public:
           auto dst_format = dst_->pixelFormat();
           auto src = enc.access(src_, cmd.Src.MipLevel, cmd.Src.ArraySlice, ResourceAccess::Read);
           auto dst = enc.access(dst_, cmd.Dst.MipLevel, cmd.Dst.ArraySlice, ResourceAccess::Write);
-          if (Forget_sRGB(dst_format) != Forget_sRGB(src_format)) {
+          if (Forget_sRGB(dst_format) != Forget_sRGB(src_format) || cmd.DimensionIncompatible) {
 
             // bitcast, using a temporary buffer
             size_t bytes_per_row, bytes_per_image, bytes_total;
@@ -4362,8 +4613,9 @@ public:
     auto &props = pRenderTargetView->description();
 
     EmitOP([texture = pRenderTargetView->texture(), view = pRenderTargetView->viewId(),
-          clear_color = std::move(clear_color), array_length = props.RenderTargetArrayLength](ArgumentEncodingContext &enc) mutable {
-      enc.clearColor(forward_rc(texture), view, array_length, clear_color);
+            clear_color = std::move(clear_color), array_length = props.RenderTargetArrayLength,
+            depth_plane = props.DepthPlane](ArgumentEncodingContext &enc) mutable {
+      enc.clearColor(forward_rc(texture), view, array_length, depth_plane, clear_color);
     });
   }
 
@@ -4375,12 +4627,13 @@ public:
     auto &props = pDepthStencilView->description();
 
     EmitOP([texture = pDepthStencilView->texture(), view = pDepthStencilView->viewId(),
-          renamable = pDepthStencilView->renamable(), array_length = props.RenderTargetArrayLength,
-          ClearFlags = ClearFlags & 0b11, Depth, Stencil](ArgumentEncodingContext &enc) mutable {
+            renamable = pDepthStencilView->renamable(), array_length = props.RenderTargetArrayLength,
+            depth_plane = props.DepthPlane, ClearFlags = ClearFlags & 0b11, Depth,
+            Stencil](ArgumentEncodingContext &enc) mutable {
       if (renamable.ptr() && ClearFlags == DepthStencilPlanarFlags(texture->pixelFormat())) {
         texture->rename(renamable->getNext(enc.currentSeqId()));
       }
-      enc.clearDepthStencil(forward_rc(texture), view, array_length, ClearFlags, Depth, Stencil);
+      enc.clearDepthStencil(forward_rc(texture), view, array_length, depth_plane, ClearFlags, Depth, Stencil);
     });
   }
 
@@ -4470,17 +4723,20 @@ public:
         dsv_info.PixelFormat = state_.OutputMerger.DSV->pixelFormat();
         dsv_info.ReadOnlyFlags =  state_.OutputMerger.DSV->readonlyFlags();
       } else if (effective_render_target == 0) {
-        if (!state_.OutputMerger.UAVs.any_bound()) {
+        const bool stream_output_only =
+            bool(com_cast<IMTLD3D11StreamOutputLayout>(state_.ShaderStages[PipelineStage::Geometry].Shader.ptr()));
+        if (!state_.OutputMerger.UAVs.any_bound() && !stream_output_only) {
           DEBUG("No rendering attachment or uav is bounded");
           return false;
         }
-        D3D11_ASSERT(state_.Rasterizer.NumViewports);
+        D3D11_ASSERT(state_.Rasterizer.NumViewports || stream_output_only);
         IMTLD3D11RasterizerState *state =
             state_.Rasterizer.RasterizerState ? state_.Rasterizer.RasterizerState : default_rasterizer_state;
         auto &viewport = state_.Rasterizer.viewports[0];
-        render_target_width = viewport.Width;
-        render_target_height = viewport.Height;
-        sample_count = state->UAVOnlySampleCount();
+        render_target_width = stream_output_only ? std::max(1u, UINT(viewport.Width)) : UINT(viewport.Width);
+        render_target_height = stream_output_only ? std::max(1u, UINT(viewport.Height)) : UINT(viewport.Height);
+        render_target_array = std::max(1u, render_target_array);
+        sample_count = stream_output_only ? 1 : state->UAVOnlySampleCount();
         if (!(render_target_width && render_target_height)) {
           ERR("uav only rendering is enabled but viewport is empty");
           return false;
@@ -4633,7 +4889,8 @@ public:
     Desc.BlendState = state_.OutputMerger.BlendState ? state_.OutputMerger.BlendState : default_blend_state;
     Desc.DepthStencilFormat =
         state_.OutputMerger.DSV ? state_.OutputMerger.DSV->pixelFormat() : WMTPixelFormatInvalid;
-    Desc.TopologyClass = to_metal_primitive_topology(state_.InputAssembler.Topology);
+    Desc.TopologyClass =
+        Desc.SOLayout ? WMTPrimitiveTopologyClassPoint : to_metal_primitive_topology(state_.InputAssembler.Topology);
     bool ds_enabled =
         (state_.OutputMerger.DepthStencilState ? state_.OutputMerger.DepthStencilState : default_depth_stencil_state)
             ->IsEnabled();
@@ -4838,7 +5095,7 @@ public:
 
   template <bool IndexedDraw>
   DrawCallStatus
-  PreDraw() {
+  PreDraw(bool stream_output = false) {
     DrawCallStatus status;
     if constexpr (IndexedDraw) {
       if (!state_.InputAssembler.IndexBuffer)
@@ -4885,9 +5142,15 @@ public:
     IMTLD3D11RasterizerState *current_rs =
         state_.Rasterizer.RasterizerState ? state_.Rasterizer.RasterizerState : default_rasterizer_state;
     bool allow_scissor = current_rs->IsScissorEnabled();
+    const UINT viewport_count =
+        stream_output ? std::max(1u, state_.Rasterizer.NumViewports) : state_.Rasterizer.NumViewports;
     if (dirty_state.any(DirtyState::Viewport)) {
-      auto viewports = AllocateCommandData<WMTViewport>(state_.Rasterizer.NumViewports);
-      for (unsigned i = 0; i < state_.Rasterizer.NumViewports; i++) {
+      auto viewports = AllocateCommandData<WMTViewport>(viewport_count);
+      for (unsigned i = 0; i < viewport_count; i++) {
+        if (i >= state_.Rasterizer.NumViewports) {
+          viewports[i] = {0, 0, 1, 1, 0, 1};
+          continue;
+        }
         auto &d3dViewport = state_.Rasterizer.viewports[i];
         viewports[i] = {d3dViewport.TopLeftX, d3dViewport.TopLeftY, d3dViewport.Width,
                         d3dViewport.Height,   d3dViewport.MinDepth, d3dViewport.MaxDepth};
@@ -4906,8 +5169,8 @@ public:
       auto render_target_height = state_.OutputMerger.RenderTargetHeight == 0
                                       ? (UINT)state_.Rasterizer.viewports[0].Height
                                       : state_.OutputMerger.RenderTargetHeight;
-      auto scissors = AllocateCommandData<WMTScissorRect>(state_.Rasterizer.NumViewports);
-      for (unsigned i = 0; i < state_.Rasterizer.NumViewports; i++) {
+      auto scissors = AllocateCommandData<WMTScissorRect>(viewport_count);
+      for (unsigned i = 0; i < viewport_count; i++) {
         if (allow_scissor) {
           if (i < state_.Rasterizer.NumScissorRects) {
             auto &d3d_rect = state_.Rasterizer.scissor_rects[i];
@@ -5003,15 +5266,8 @@ public:
     if (!state_.StreamOutput.Targets.any_dirty())
       return;
 
-    auto offset = PreAllocateArgumentBuffer(16 /* size of two pointer */ * kStreamOutputSlots, 32);
-
-    if (cmdbuf_state == CommandBufferState::RenderPipelineReady)
-      EmitST([=](ArgumentEncodingContext &enc) { enc.encodeStreamOutputBuffers<PipelineKind::Ordinary>(offset); });
-    else if (cmdbuf_state == CommandBufferState::TessellationRenderPipelineReady)
-      EmitST([=](ArgumentEncodingContext &enc) { enc.encodeStreamOutputBuffers<PipelineKind::Tessellation>(offset); });
-    else if (cmdbuf_state == CommandBufferState::GeometryRenderPipelineReady)
-      EmitST([=](ArgumentEncodingContext &enc) { enc.encodeStreamOutputBuffers<PipelineKind::Geometry>(offset); });
-
+    if (cmdbuf_state != CommandBufferState::RenderPipelineReady)
+      ERR("Stream output from geometry/tessellation is unsupported");
     state_.StreamOutput.Targets.clear_dirty();
   }
 
@@ -5048,6 +5304,15 @@ public:
       EmitST([=, buffer = element.Buffer->buffer(), offset = element.Offset,
             stride = element.Stride](ArgumentEncodingContext &enc) mutable {
         enc.bindVertexBuffer(slot, offset, stride, forward_rc(buffer));
+      });
+    }
+
+    for (const auto &[slot, entry] : state_.StreamOutput.Targets) {
+      auto buffer = entry.Buffer->buffer();
+      auto counter = buffer->streamOutputCounter();
+      EmitST([slot, buffer = std::move(buffer), counter = std::move(counter)](ArgumentEncodingContext &enc) mutable {
+        // Restoring bindings preserves the resource's current GPU cursor.
+        enc.bindStreamOutputBuffer(slot, UINT32_MAX, forward_rc(buffer), forward_rc(counter));
       });
     }
 
@@ -5103,6 +5368,8 @@ public:
   }
 
   void ResetD3D11ContextState() {
+    geometry_restart_cache_.resource = nullptr;
+    geometry_restart_cache_.prefix = {};
     state_ = {};
   }
 
@@ -5132,6 +5399,12 @@ public:
 
 protected:
   D3D11ContextState state_;
+  struct {
+    Com<D3D11ResourceCommon, false> resource;
+    Rc<Buffer> prefix;
+    uint64_t offset = 0;
+    UINT count = 0, index_size = 0;
+  } geometry_restart_cache_;
   D3D11UserDefinedAnnotation annotation_;
   MTLD3D11ContextExt<ContextInternalState> ext_;
   uint64_t max_object_threadgroups_;
@@ -5243,6 +5516,7 @@ public:
       if(output->pixelFormat() != entry.output_pixel_format) continue;
       if(depth->pixelFormat() != entry.depth_pixel_format) continue;
       if(motion_vector_format != entry.motion_vector_pixel_format) continue;
+      if(pDesc->MotionVectorInDisplayRes != (entry.mv_downscaled != nullptr)) continue;
 
       scaler = entry.scaler;
       mv_downscaled = entry.mv_downscaled;
@@ -5282,7 +5556,7 @@ public:
         tex_info.depth = 1;
         tex_info.array_length = 1;
         tex_info.mipmap_level_count = 1;
-        tex_info.pixel_format = WMTPixelFormatRG32Float;
+        tex_info.pixel_format = motion_vector_format;
         tex_info.sample_count = 1;
         tex_info.type = WMTTextureType2D;
         tex_info.usage = WMTTextureUsageShaderRead | WMTTextureUsageShaderWrite;
@@ -5342,7 +5616,7 @@ public:
         WMTFXTemporalScalerProps new_props = props;
         new_props.motion_vector_scale_x = 1.0;
         new_props.motion_vector_scale_y = 1.0;
-        enc.upscaleTemporal(input, output, depth, mv_downscaled, 0, exposure, scaler, new_props);
+        enc.upscaleTemporal(input, output, depth, mv_downscaled, mv_downscaled->fullView, exposure, scaler, new_props);
       } else {
         enc.upscaleTemporal(input, output, depth, motion_vector, mv_view, exposure, scaler, props);
       }

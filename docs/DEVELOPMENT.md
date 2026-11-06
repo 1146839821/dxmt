@@ -47,6 +47,27 @@ cmake --install ./toolchains/llvm-build
 
 Then `./toolchains/llvm` contains what we need later.
 
+For the experimental MSC debug-metadata compatibility patches, build a
+separate LLVM toolchain and a separate DXMT directory. The output directory
+passed to the script must not already exist; the source checkout and existing
+toolchains are not modified. For example, from the repository root:
+
+```sh
+bash tests/airconv/build_llvm15_candidate_toolchain.sh \
+  toolchains/llvm-project /absolute/path/to/new-llvm-candidate
+meson setup /absolute/path/to/new-dxmt-build --cross-file build-win64.txt \
+  -Denable_nvapi=true -Denable_nvngx=true -Denable_d3d12=true -Denable_tests=true \
+  -Dnative_llvm_path=/absolute/path/to/new-llvm-candidate/install \
+  -Dwine_install_path=toolchains/wine --buildtype release
+meson compile -C /absolute/path/to/new-dxmt-build
+meson compile -C /absolute/path/to/new-dxmt-build llvm-metadata-selftest
+/absolute/path/to/new-dxmt-build/src/airconv/darwin/llvm-metadata-selftest
+```
+
+This does not switch an existing `build` directory or install into Wine.
+The self-test checks only a subset of metadata compatibility; consult
+`docs/D3D12_MSC_HLSL_PERFORMANCE_WORK.md` for the remaining limitations.
+
 For `arm64` target, just replace any occurance of `x86_64` to `arm64` above.
 
 ## Setup Wine
@@ -78,6 +99,39 @@ meson compile -C build32
 ```
 
 > You can't build 32-bit dlls only, they need 64-bit unixlib to be functional
+
+#### Testing a private WineMetal build
+
+Deploy `winemetal.dll` and `winemetal.so` from the same build, together with
+the DXMT DLLs that use their headers. WineMetal exports and Unix call structures
+must agree across that boundary; finding an export with the expected name does
+not establish ABI compatibility.
+
+A full build runs the Wine builtin postprocessing step. After compiling only
+selected targets, run it explicitly before copying the PE DLL:
+
+```sh
+meson compile -C build postprocess_lib
+```
+
+For an x64 build, the pair is `build/src/winemetal/winemetal.dll` and
+`build/src/winemetal/unix/winemetal.so`. Install both into the corresponding
+`lib/wine/x86_64-windows` and `lib/wine/x86_64-unix` directories of a separate
+test Wine installation, and launch that installation with a dedicated prefix.
+Keep the user's Wine installation and shared prefix intact.
+
+On the tested Wine 11.0 installation, its builtin DLL directory takes precedence
+over `WINEDLLPATH`. Setting `winemetal=b` can therefore select an installed bridge
+instead of the private build, even when an app-local DLL exists. Switching only
+to `winemetal=n` does not establish the Unix companion association either.
+Verify both sides: `WINEDEBUG=+loaddll,+module` for loading diagnostics and
+`DYLD_PRINT_LIBRARIES=1` for the actual Unix library path. The PE path printed by
+Wine alone is insufficient: compare the loaded image metadata or export bytes
+with the intended build when another builtin with the same name is installed.
+
+The 2026-10-22 reserved-resource validation in
+[the resource audit checklist](D3D12_RESOURCE_AUDIT_CHECKLIST.md#runtime-identity-correction--2026-10-22)
+records a concrete ABI mismatch and the paired-runtime results.
 
 There are other compile options in [meson.options](/meson.options).
 
@@ -116,6 +170,7 @@ The following environment variables can be used for **debugging** purposes.
 - `DXMT_LOG_PATH=/some/directory` Changes path where log files are stored. Set to `none` to disable log file creation entirely, without disabling logging.
 - `DXMT_SHADER_CACHE=0`: Disables the internal shader cache.
 - `DXMT_SHADER_CACHE_PATH=/some/absolute/darwin/directory`: Path to internal shader cache files. Default to `$(getconf DARWIN_USER_CACHE_DIR)/dxmt/<executable name with extension>`.
+- `DXMT_MSC_CACHE_TRACE=1`: Opt-in D3D12 conversion-cache storage snapshots at info log level. Each event scans the cache under its lock; use only for diagnostics, not timing benchmarks. Reports vector data/capacity and mapped-object sizes, excluding allocator overhead, GPU memory and PSO copies. See [the cache measurement notes](msc-single-flight-design.md).
 
 
 ### Logs

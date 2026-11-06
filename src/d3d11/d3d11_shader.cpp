@@ -14,6 +14,9 @@ getGlobalShaderFlag() {
   static std::once_flag get_shader_flag_once;
   std::call_once(get_shader_flag_once, []() {
     shader_flag = {};
+    if (SM50_ADJ_RESTART_EXPERIMENTAL)
+      shader_flag |= static_cast<SM50_SHADER_FLAG>(SM50_SHADER_FLAG_GEOMETRY_ADJ_RESTART |
+                                                SM50_SHADER_FLAG_GEOMETRY_INDEX_OOB_ZERO);
     if (Config::getInstance().getOption<bool>("d3d11.sampleNaNToZero", false))
       shader_flag |= SM50_SHADER_FLAG_SAMPLE_NAN_TO_ZERO;
     if (Config::getInstance().getOption<bool>("d3d11.defuseFma", false))
@@ -183,6 +186,7 @@ CreateVariantShader(MTLD3D11Device *pDevice, ManagedShader shader,
     data.dual_source_blending = variant.dual_source_blending;
     data.disable_depth_output = variant.disable_depth_output;
     data.unorm_output_reg_mask = variant.unorm_output_reg_mask;
+    memset(data.pixel_formats, 0, sizeof(data.pixel_formats));
 
     sm50_bitcode_t compile_result = nullptr;
     sm50_error_t sm50_err = nullptr;
@@ -285,6 +289,7 @@ CreateVariantShader(MTLD3D11Device *pDevice, ManagedShader shader,
   auto proc = [=](const char *func_name, SM50_SHADER_COMMON_DATA *common) -> sm50_bitcode_t  {
     SM50_SHADER_GS_PASS_THROUGH_DATA gs_passthrough;
     SM50_SHADER_PSO_TESSELLATOR_DATA pso_tess;
+    gs_passthrough.type = SM50_SHADER_GS_PASS_THROUGH;
     gs_passthrough.DataEncoded = variant.gs_passthrough;
     gs_passthrough.RasterizationDisabled = variant.rasterization_disabled;
     gs_passthrough.next = &pso_tess;
@@ -324,7 +329,7 @@ CreateVariantShader(MTLD3D11Device *pDevice, ManagedShader shader,
     SM50_SHADER_IA_INPUT_LAYOUT_DATA data_vertex_pulling;
     data_so.type = SM50_SHADER_EMULATE_VERTEX_STREAM_OUTPUT;
     data_so.next = common;
-    data_so.num_output_slots = 0;
+    data_so.num_output_slots = 1;
     data_so.num_elements =
         ((IMTLD3D11StreamOutputLayout *)variant.stream_output_layout_handle)
             ->GetStreamOutputElements(

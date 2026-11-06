@@ -26,6 +26,8 @@
 #include "util_math.hpp"
 #include "util_md5.hpp"
 #include <cstring>
+#include <limits>
+#include <new>
 #include <vector>
 #include "../d3d10/d3d10_blob.hpp"
 #include "../airconv/dxbc_root_signature.hpp"
@@ -38,7 +40,7 @@ template <typename ROOT_SIGNATURE_DESC>
 HRESULT
 SerializeVersionedRootSignatureImpl(
     const ROOT_SIGNATURE_DESC *pDesc, D3D_ROOT_SIGNATURE_VERSION Version, ID3DBlob **ppBlob, ID3DBlob **ppErrorBlob
-) {
+) try {
   using ROOT_PARAMETER = GetType<ROOT_SIGNATURE_DESC>::ROOT_PARAMETER;
   using ROOT_DESCRIPTOR = GetType<ROOT_SIGNATURE_DESC>::ROOT_DESCRIPTOR;
   using DESCRIPTOR_RANGE = GetType<ROOT_SIGNATURE_DESC>::DESCRIPTOR_RANGE;
@@ -51,7 +53,8 @@ SerializeVersionedRootSignatureImpl(
       this->offset = offset;
       size_aligned = align(size, 4);
       ptr = malloc(size_aligned);
-      memset(ptr, 0, size_aligned);
+      if (ptr)
+        memset(ptr, 0, size_aligned);
     }
     ~segment() {
       free(ptr);
@@ -194,7 +197,9 @@ SerializeVersionedRootSignatureImpl(
 
   *ppBlob = blob;
   return hr;
-};
+} catch (const std::bad_alloc &) {
+  return E_OUTOFMEMORY;
+}
 
 extern "C" HRESULT WINAPI
 D3D12SerializeVersionedRootSignature(
@@ -242,6 +247,25 @@ D3D12SerializeRootSignature(
 #pragma endregion
 #pragma region Deserialization
 
+// All public root-container inputs must use the caller's extent, not the
+// container header's claimed size. Reuse the existing DXBC framing parser.
+static HRESULT
+GetRootSignatureData(const void *bytecode, SIZE_T size, const void **data, UINT *data_size) {
+  *data = nullptr;
+  *data_size = 0;
+  if (!bytecode || size > std::numeric_limits<UINT>::max())
+    return E_INVALIDARG;
+  microsoft::CDXBCParser parser;
+  if (FAILED(parser.ReadDXBC(bytecode, static_cast<UINT>(size))))
+    return E_INVALIDARG;
+  const UINT index = parser.FindNextMatchingBlob(microsoft::DXBC_RootSignature, 0);
+  if (index == DXBC_BLOB_NOT_FOUND || parser.GetBlobSize(index) < sizeof(RawRootSignatureDesc))
+    return E_INVALIDARG;
+  *data = parser.GetBlob(index);
+  *data_size = parser.GetBlobSize(index);
+  return S_OK;
+}
+
 template <typename Base> class MTLD3D12RootSignatureDeserializer : public ComObject<Base> {
 public:
   virtual HRESULT STDMETHODCALLTYPE
@@ -249,7 +273,8 @@ public:
     if (ppvObject == nullptr)
       return E_POINTER;
 
-    if (riid == __uuidof(Base)) {
+    *ppvObject = nullptr;
+    if (riid == __uuidof(IUnknown) || riid == __uuidof(Base)) {
       *ppvObject = ref_and_cast<Base>(this);
       return S_OK;
     }
@@ -309,7 +334,7 @@ D3D12CreateVersionedRootSignatureDeserializer(
 
   const void *pRawRootSig;
   UINT RawRootSigSize;
-  HRESULT hr = microsoft::DXBCGetRootSignature(pBytecode, &pRawRootSig, &RawRootSigSize);
+  HRESULT hr = GetRootSignatureData(pBytecode, DataSize, &pRawRootSig, &RawRootSigSize);
   if (FAILED(hr))
     return hr;
 
@@ -326,7 +351,7 @@ D3D12CreateRootSignatureDeserializer(const void *pBytecode, SIZE_T DataSize, REF
 
   const void *pRawRootSig;
   UINT RawRootSigSize;
-  HRESULT hr = microsoft::DXBCGetRootSignature(pBytecode, &pRawRootSig, &RawRootSigSize);
+  HRESULT hr = GetRootSignatureData(pBytecode, DataSize, &pRawRootSig, &RawRootSigSize);
   if (FAILED(hr))
     return hr;
 
@@ -339,39 +364,33 @@ D3D12CreateRootSignatureDeserializer(const void *pBytecode, SIZE_T DataSize, REF
 
 #pragma endregion
 
-inline std::pair<std::vector<uint32_t>, uint32_t>
-CalculateRootSignatureQwordOffsets(const D3D12_ROOT_SIGNATURE_DESC1 &Desc) {
+inline std::pair<std::vector<MTLD3D12RootSignature::RootParameterMetadata>, uint32_t>
+CalculateRootParameterLayout(const D3D12_ROOT_SIGNATURE_DESC1 &desc) {
   uint32_t current_offset = 0;
-  std::vector<uint32_t> out;
-
-  for (unsigned i = 0; i < Desc.NumParameters; i++) {
-    auto &Parameter = Desc.pParameters[i];
-
-    switch (Parameter.ParameterType) {
-    case D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE:
-      out.push_back(current_offset++);
-      break;
-    case D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS:
-      out.push_back(current_offset);
-      current_offset += (Parameter.Constants.Num32BitValues / 2) + (Parameter.Constants.Num32BitValues & 1);
-      break;
-    case D3D12_ROOT_PARAMETER_TYPE_CBV:
-    case D3D12_ROOT_PARAMETER_TYPE_SRV:
-    case D3D12_ROOT_PARAMETER_TYPE_UAV:
-      out.push_back(current_offset++);
-      break;
-    }
+  std::vector<MTLD3D12RootSignature::RootParameterMetadata> out;
+  for (UINT i = 0; i < desc.NumParameters; ++i) {
+    const auto &parameter = desc.pParameters[i];
+    const UINT dwords =
+        parameter.ParameterType == D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS ? parameter.Constants.Num32BitValues : 2;
+    out.push_back({current_offset, parameter.ParameterType, dwords});
+    current_offset += dwords / 2 + (dwords & 1);
   }
-
-  return {out, current_offset};
+  return {std::move(out), current_offset};
 }
 
 class MTLD3D12RootSignatureImpl : public MTLD3D12DeviceChild<MTLD3D12RootSignature> {
 
   std::vector<uint8_t> blob_;
-  std::vector<uint32_t> qword_offsets_;
+  std::vector<RootParameterMetadata> parameter_layout_;
+  std::vector<RootResourceBindingMetadata> root_resource_bindings_;
+  std::vector<RootDescriptorTableMetadata> root_descriptor_tables_;
+  std::vector<RootDescriptorRangeMetadata> root_descriptor_ranges_;
 
   std::vector<Rc<Sampler>> static_samplers_; // which is not really "static"
+  std::vector<D3D12SamplerLODRange> static_sampler_lod_ranges_;
+  std::vector<WMT::Reference<WMT::SamplerState>> relaxed_static_samplers_;
+  std::vector<uint64_t> relaxed_static_sampler_ids_;
+  std::mutex static_sampler_mutex_;
   /**
   It's supposed to be implemented by `constexpr sampler` in Metal shader, but
   for unknown reason it lacks of `mirrored_clamp_to_edge` address mode.
@@ -379,8 +398,38 @@ class MTLD3D12RootSignatureImpl : public MTLD3D12DeviceChild<MTLD3D12RootSignatu
   Let's do it in the simple way
   */
   std::vector<uint64_t> static_samplers_encoded_;
+  std::vector<dxmt_msc_root_parameter_layout> msc_layout_;
+  std::vector<air::MSCSamplerSidecarTable> msc_lod_sidecar_tables_;
+  std::vector<air::MSCResourceSidecarTable> msc_resource_sidecar_tables_;
+  air::MSCCombinedSidecarLayout msc_combined_sidecar_layout_;
+  std::mutex msc_layout_mutex_;
+  std::mutex msc_lod_layout_mutex_;
+  std::mutex msc_resource_layout_mutex_;
+  std::mutex msc_combined_layout_mutex_;
+  bool msc_layout_initialized_ = false;
+  bool msc_lod_layout_initialized_ = false;
+  bool msc_resource_layout_initialized_ = false;
+  bool msc_combined_layout_initialized_ = false;
 
 public:
+  bool
+  GetStaticSamplerLODSidecarEntry(UINT Index, D3D12SamplerLODSidecarEntry &Entry) override {
+    std::lock_guard lock(static_sampler_mutex_);
+    if (Index >= static_samplers_.size())
+      return false;
+    if (!relaxed_static_samplers_[Index]) {
+      uint64_t id = 0;
+      auto state = static_samplers_[Index]->createLODUnclampedState(device_->GetMTLDevice(), id);
+      if (!state || !id)
+        return false;
+      relaxed_static_samplers_[Index] = std::move(state);
+      relaxed_static_sampler_ids_[Index] = id;
+    }
+    Entry = {relaxed_static_sampler_ids_[Index], static_sampler_lod_ranges_[Index].minimum,
+             static_sampler_lod_ranges_[Index].maximum};
+    return true;
+  }
+
   MTLD3D12RootSignatureImpl(MTLD3D12Device *pDevice, const void *pBytecode, SIZE_T BytecodeLength) :
       MTLD3D12DeviceChild<MTLD3D12RootSignature>(pDevice) {
     blob_.resize(BytecodeLength);
@@ -388,28 +437,60 @@ public:
   }
 
   HRESULT
-  Initialize() {
-    const void *pRawRootSig;
-    UINT RawRootSigSize;
-    HRESULT hr = microsoft::DXBCGetRootSignature(blob_.data(), &pRawRootSig, &RawRootSigSize);
-    if (FAILED(hr))
-      return hr;
-
+  Initialize(const void *raw, UINT raw_size) {
     RootSignatureDeserializer deserializer;
-    hr = deserializer.Deserialize(pRawRootSig, RawRootSigSize);
+    HRESULT hr = deserializer.Deserialize(raw, raw_size);
     if (FAILED(hr))
       return hr;
 
     auto &desc = deserializer.desc_1_1_.Desc_1_1;
+    Flags = desc.Flags;
+    const bool is_local = IsLocal();
+    if (is_local && Flags != D3D12_ROOT_SIGNATURE_FLAG_LOCAL_ROOT_SIGNATURE)
+      return E_INVALIDARG;
+    UINT root_cost = 0;
+    UINT local_size = 0;
+    constexpr UINT local_limit = D3D12_RAYTRACING_MAX_SHADER_RECORD_STRIDE - D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES;
 
     if (desc.NumParameters) {
-      if (desc.NumParameters > D3D12_MAX_ROOT_COST)
+      if (!is_local && desc.NumParameters > D3D12_MAX_ROOT_COST)
         return E_INVALIDARG;
 
       for (unsigned i = 0; i < desc.NumParameters; i++) {
         if (!desc.pParameters)
           return E_INVALIDARG;
         auto &parameter = desc.pParameters[i];
+        UINT parameter_cost;
+        switch (parameter.ParameterType) {
+        case D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE:
+          parameter_cost = 1;
+          break;
+        case D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS:
+          parameter_cost = parameter.Constants.Num32BitValues;
+          break;
+        case D3D12_ROOT_PARAMETER_TYPE_CBV:
+        case D3D12_ROOT_PARAMETER_TYPE_SRV:
+        case D3D12_ROOT_PARAMETER_TYPE_UAV:
+          parameter_cost = 2;
+          break;
+        default:
+          return E_INVALIDARG;
+        }
+        // Both API budgets are independent of our padded CPU qword layout.
+        if (is_local) {
+          const bool constants = parameter.ParameterType == D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+          // Constants pack as DWORDs; descriptors and table handles align to 8 bytes.
+          // local_size is already bounded by local_limit, which is 8-byte aligned.
+          local_size = align(local_size, constants ? 4u : 8u);
+          const UINT dwords = constants ? parameter_cost : 2;
+          if (dwords > (local_limit - local_size) / sizeof(uint32_t))
+            return E_INVALIDARG;
+          local_size += dwords * sizeof(uint32_t);
+        } else {
+          if (parameter_cost > D3D12_MAX_ROOT_COST - root_cost)
+            return E_INVALIDARG;
+          root_cost += parameter_cost;
+        }
         if (parameter.ParameterType == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) {
           bool is_normal_range = false, is_sampler_range = false;
           for (unsigned j = 0; j < parameter.DescriptorTable.NumDescriptorRanges; j++) {
@@ -442,22 +523,264 @@ public:
         PopulateWMTSamplerInfo(device_->GetMTLDevice(), info, desc.pStaticSamplers[i]);
 
         auto sampler = Sampler::createSampler(device_->GetMTLDevice(), info, desc.pStaticSamplers[i].MipLODBias);
+        if (!sampler)
+          return E_FAIL;
         static_samplers_encoded_.push_back(sampler->sampler_state_handle);
         static_samplers_encoded_.push_back(sampler->sampler_state_cube_handle);
         static_samplers_encoded_.push_back((uint64_t)std::bit_cast<uint32_t>(sampler->lod_bias));
         static_samplers_encoded_.push_back(0 /* padding */);
 
         static_samplers_.emplace_back(std::move(sampler));
+        static_sampler_lod_ranges_.push_back({desc.pStaticSamplers[i].MinLOD, desc.pStaticSamplers[i].MaxLOD});
       }
       EncodedStaticSamplers = static_samplers_encoded_.data();
+      StaticSamplerLODRanges = static_sampler_lod_ranges_.data();
+      relaxed_static_samplers_.resize(NumStaticSamplers);
+      relaxed_static_sampler_ids_.resize(NumStaticSamplers);
     }
 
-    auto [offsets, total_qwords] = CalculateRootSignatureQwordOffsets(desc);
-    qword_offsets_ = offsets;
+    auto [layout, total_qwords] = CalculateRootParameterLayout(desc);
+    parameter_layout_ = std::move(layout);
     UploadQwords = total_qwords;
-    ParameterSlots = qword_offsets_.size();
-    SlotQwordOffsets = qword_offsets_.data();
+    ParameterSlots = parameter_layout_.size();
+    Parameters = parameter_layout_.data();
 
+    for (UINT parameter_index = 0; parameter_index < desc.NumParameters; parameter_index++) {
+      const auto &parameter = desc.pParameters[parameter_index];
+      const auto source_qword = parameter_layout_[parameter_index].source_qword;
+      switch (parameter.ParameterType) {
+      case D3D12_ROOT_PARAMETER_TYPE_CBV:
+      case D3D12_ROOT_PARAMETER_TYPE_SRV:
+      case D3D12_ROOT_PARAMETER_TYPE_UAV:
+        root_resource_bindings_.push_back(
+            {parameter_index, parameter.ParameterType, source_qword, parameter.ShaderVisibility}
+        );
+        break;
+      case D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE: {
+        const auto first_range = static_cast<UINT>(root_descriptor_ranges_.size());
+        uint64_t append_offset = 0;
+        for (UINT range_index = 0; range_index < parameter.DescriptorTable.NumDescriptorRanges; range_index++) {
+          const auto &range = parameter.DescriptorTable.pDescriptorRanges[range_index];
+          const uint64_t offset = range.OffsetInDescriptorsFromTableStart == D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND
+                                      ? append_offset
+                                      : range.OffsetInDescriptorsFromTableStart;
+          root_descriptor_ranges_.push_back({range.RangeType, range.NumDescriptors, offset, range.BaseShaderRegister, range.RegisterSpace, range.Flags});
+          if (range.NumDescriptors == UINT_MAX || offset > UINT64_MAX - range.NumDescriptors)
+            append_offset = UINT64_MAX;
+          else
+            append_offset = offset + range.NumDescriptors;
+        }
+        root_descriptor_tables_.push_back(
+            {parameter_index, source_qword, first_range, parameter.DescriptorTable.NumDescriptorRanges,
+             parameter.ShaderVisibility}
+        );
+        break;
+      }
+      default:
+        break;
+      }
+    }
+    RootResourceBindingCount = static_cast<UINT>(root_resource_bindings_.size());
+    RootResourceBindings = root_resource_bindings_.data();
+    RootDescriptorTableCount = static_cast<UINT>(root_descriptor_tables_.size());
+    RootDescriptorTables = root_descriptor_tables_.data();
+    RootDescriptorRangeCount = static_cast<UINT>(root_descriptor_ranges_.size());
+    RootDescriptorRanges = root_descriptor_ranges_.data();
+
+    return S_OK;
+  }
+
+  HRESULT
+  InitializeMSCLodSidecarLayout() override {
+    std::lock_guard lock(msc_lod_layout_mutex_);
+    if (msc_lod_layout_initialized_)
+      return S_OK;
+    // Heap-directly-indexed samplers have no reflected table mapping here.
+    if (IsLocal() || (static_cast<uint32_t>(Flags) & 0x800u))
+      return E_NOTIMPL;
+    auto hr = InitializeMSCLayout();
+    if (FAILED(hr))
+      return hr;
+    try {
+      std::vector<air::MSCSamplerSidecarTable> candidates;
+      for (const auto &layout : msc_layout_) {
+        bool sampler_table = false;
+        if (layout.parameter_index == UINT32_MAX) {
+          sampler_table = NumStaticSamplers &&
+                          (layout.resource_type == DXMT_MSC_RESOURCE_TABLE ||
+                           layout.resource_type == DXMT_MSC_RESOURCE_SAMPLER);
+        } else if (layout.resource_type == DXMT_MSC_RESOURCE_TABLE) {
+          for (const auto &table : root_descriptor_tables_) {
+            if (table.parameter_index != layout.parameter_index)
+              continue;
+            for (UINT i = 0; i < table.range_count; ++i)
+              sampler_table |= root_descriptor_ranges_[table.first_range + i].type == D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
+            break;
+          }
+        }
+        if (!sampler_table)
+          continue;
+        if (layout.size_bytes != sizeof(uint64_t) || layout.top_level_offset > UINT32_MAX)
+          return E_NOTIMPL;
+        candidates.push_back({static_cast<unsigned>(layout.top_level_offset), 0, layout.parameter_index});
+      }
+      unsigned expected_tables = NumStaticSamplers ? 1 : 0;
+      for (const auto &table : root_descriptor_tables_) {
+        bool sampler_table = false;
+        for (UINT i = 0; i < table.range_count; ++i)
+          sampler_table |= root_descriptor_ranges_[table.first_range + i].type == D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
+        if (!sampler_table)
+          continue;
+        ++expected_tables;
+        unsigned matches = 0;
+        for (const auto &candidate : candidates)
+          matches += candidate.parameter_index == table.parameter_index;
+        if (matches != 1)
+          return E_NOTIMPL;
+      }
+      if (candidates.size() != expected_tables)
+        return E_NOTIMPL;
+      unsigned size = 0;
+      std::vector<air::MSCSamplerSidecarTable> tables;
+      if (!air::buildMSCSamplerSidecarLayout(MSCArgumentBufferSize, candidates, tables, size))
+        return E_NOTIMPL;
+      msc_lod_sidecar_tables_ = std::move(tables);
+      MSCLODSidecarBufferSize = size;
+      MSCLODSidecarTableCount = static_cast<unsigned>(msc_lod_sidecar_tables_.size());
+      MSCLODSidecarTables = msc_lod_sidecar_tables_.data();
+      msc_lod_layout_initialized_ = true;
+      return S_OK;
+    } catch (const std::bad_alloc &) {
+      return E_OUTOFMEMORY;
+    }
+  }
+
+  HRESULT
+  InitializeMSCResourceSidecarLayout() override {
+    std::lock_guard lock(msc_resource_layout_mutex_);
+    if (msc_resource_layout_initialized_)
+      return S_OK;
+    // A local root or directly indexed heap needs a different mapping.
+    if (IsLocal() || IsResourceHeapDirectlyIndexed())
+      return E_NOTIMPL;
+    auto hr = InitializeMSCLayout();
+    if (FAILED(hr))
+      return hr;
+    try {
+      std::vector<air::MSCResourceSidecarTable> candidates;
+      for (const auto &table : root_descriptor_tables_) {
+        bool has_resource = false;
+        for (UINT i = 0; i < table.range_count; ++i) {
+          const auto type = root_descriptor_ranges_[table.first_range + i].type;
+          has_resource |= type == D3D12_DESCRIPTOR_RANGE_TYPE_SRV || type == D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+        }
+        if (!has_resource)
+          continue;
+        unsigned matches = 0;
+        for (const auto &layout : msc_layout_) {
+          if (layout.parameter_index != table.parameter_index || layout.resource_type != DXMT_MSC_RESOURCE_TABLE)
+            continue;
+          if (layout.size_bytes != sizeof(uint64_t) || layout.top_level_offset > UINT32_MAX)
+            return E_NOTIMPL;
+          candidates.push_back({static_cast<unsigned>(layout.top_level_offset), 0, table.parameter_index});
+          ++matches;
+        }
+        if (matches != 1)
+          return E_NOTIMPL;
+      }
+      unsigned size = 0;
+      std::vector<air::MSCResourceSidecarTable> tables;
+      if (!air::buildMSCResourceSidecarLayout(MSCArgumentBufferSize, candidates, tables, size))
+        return E_NOTIMPL;
+      msc_resource_sidecar_tables_ = std::move(tables);
+      MSCResourceSidecarBufferSize = size;
+      MSCResourceSidecarTableCount = static_cast<unsigned>(msc_resource_sidecar_tables_.size());
+      MSCResourceSidecarTables = msc_resource_sidecar_tables_.data();
+      msc_resource_layout_initialized_ = true;
+      return S_OK;
+    } catch (const std::bad_alloc &) {
+      return E_OUTOFMEMORY;
+    }
+  }
+
+  HRESULT
+  InitializeMSCCombinedSidecarLayout() override {
+    std::lock_guard lock(msc_combined_layout_mutex_);
+    if (msc_combined_layout_initialized_)
+      return S_OK;
+    auto hr = InitializeMSCLodSidecarLayout();
+    if (FAILED(hr))
+      return hr;
+    hr = InitializeMSCResourceSidecarLayout();
+    if (FAILED(hr))
+      return hr;
+    try {
+      air::MSCCombinedSidecarLayout layout;
+      if (!air::buildMSCCombinedSidecarLayout(
+              MSCArgumentBufferSize, msc_lod_sidecar_tables_, msc_resource_sidecar_tables_, layout
+          ))
+        return E_NOTIMPL;
+      msc_combined_sidecar_layout_ = std::move(layout);
+      MSCCombinedSidecarLayout = &msc_combined_sidecar_layout_;
+      msc_combined_layout_initialized_ = true;
+      return S_OK;
+    } catch (const std::bad_alloc &) {
+      return E_OUTOFMEMORY;
+    }
+  }
+
+  HRESULT
+  InitializeMSCLayout() override {
+    std::lock_guard lock(msc_layout_mutex_);
+    if (msc_layout_initialized_)
+      return S_OK;
+    if (!device_->GetMSCCapabilities().CoreShaderPathUsable())
+      return E_FAIL;
+
+    const void *blob = nullptr;
+    size_t blob_size = GetBlob(&blob);
+    char error_message[1024] = {};
+
+    dxmt_msc_get_root_layout_params params = {};
+    params.root_signature = blob;
+    params.root_signature_size = blob_size;
+    params.error_message = error_message;
+    params.error_message_capacity = sizeof(error_message);
+
+    int result = DXMTMSCGetRootSignatureLayout(&params);
+    if (result != DXMT_MSC_SUCCESS) {
+      ERR("Failed to query MSC root signature layout, result=", result, " message=", error_message);
+      return E_FAIL;
+    }
+
+    msc_layout_.resize(params.layout_count);
+    if (!msc_layout_.empty()) {
+      params.layouts = msc_layout_.data();
+      params.layout_capacity = msc_layout_.size();
+      params.layout_count = 0;
+      params.argument_buffer_size = 0;
+      error_message[0] = '\0';
+      result = DXMTMSCGetRootSignatureLayout(&params);
+      if (result != DXMT_MSC_SUCCESS) {
+        ERR("Failed to retrieve MSC root signature layout, result=", result, " message=", error_message);
+        msc_layout_.clear();
+        return E_FAIL;
+      }
+    }
+
+    MSCArgumentBufferSize = params.argument_buffer_size;
+    MSCParameterCount = msc_layout_.size();
+    MSCParameterLayouts = msc_layout_.data();
+    msc_layout_initialized_ = true;
+
+    DEBUG("MSC root layout size=", MSCArgumentBufferSize, " resources=", MSCParameterCount);
+    for (auto &layout : msc_layout_) {
+      DEBUG(
+          "MSC root parameter ", layout.parameter_index, " type=", layout.resource_type,
+          " register=", layout.shader_register, " space=", layout.register_space,
+          " offset=", layout.top_level_offset, " size=", layout.size_bytes
+      );
+    }
     return S_OK;
   }
 
@@ -496,8 +819,13 @@ CreateRootSignature(
 ) {
   InitReturnPtr(ppRootSignature);
 
+  const void *raw;
+  UINT raw_size;
+  HRESULT hr = GetRootSignatureData(pBytecode, BytecodeLength, &raw, &raw_size);
+  if (FAILED(hr))
+    return hr;
   auto root_sig = Com(new MTLD3D12RootSignatureImpl(pDevice, pBytecode, BytecodeLength));
-  HRESULT hr = root_sig->Initialize();
+  hr = root_sig->Initialize(raw, raw_size);
   if (FAILED(hr))
     return hr;
   return root_sig->QueryInterface(riid, ppRootSignature);

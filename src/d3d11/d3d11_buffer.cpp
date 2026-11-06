@@ -203,7 +203,13 @@ public:
       return S_FALSE;
     }
 
-    auto viewId = buffer_->createView({.format = view_format});
+    const auto capabilities = m_parent->GetMTLPixelFormatCapability(view_format);
+    auto viewId = buffer_->createView({
+        .format = view_format,
+        .read_only = !any_bit_set(
+            capabilities & (FormatCapability::TextureBufferWrite | FormatCapability::TextureBufferReadWrite)
+        ),
+    });
 
     auto srv = ref(new TBufferSRV(
         &finalDesc, this, m_parent,

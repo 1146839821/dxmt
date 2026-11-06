@@ -25,6 +25,7 @@ void MetallibWriter::Write(const llvm::Module &module, raw_ostream &OS) {
   SmallVector<char, 0> function_def;
 
   uint32_t fn_count = 0;
+  std::vector<uint64_t> function_offsets;
 
   raw_svector_ostream bitcode_stream(bitcode);
   WriteBitcodeToFile(module, bitcode_stream, false, nullptr, true);
@@ -43,6 +44,7 @@ void MetallibWriter::Write(const llvm::Module &module, raw_ostream &OS) {
     if (vertexFns) {
       for (auto fn : vertexFns->operands()) {
         fn_count++;
+        function_offsets.push_back(function_def_stream.tell());
         auto func = dyn_cast<Function>(
           dyn_cast<ConstantAsMetadata>(fn->getOperand(0).get())->getValue()
         );
@@ -162,6 +164,7 @@ void MetallibWriter::Write(const llvm::Module &module, raw_ostream &OS) {
     if (fragmentFns) {
       for (auto fn : fragmentFns->operands()) {
         fn_count++;
+        function_offsets.push_back(function_def_stream.tell());
         auto func = dyn_cast<Function>(
           dyn_cast<ConstantAsMetadata>(fn->getOperand(0).get())->getValue()
         );
@@ -196,6 +199,7 @@ void MetallibWriter::Write(const llvm::Module &module, raw_ostream &OS) {
     if (kernelFns) {
       for (auto fn : kernelFns->operands()) {
         fn_count++;
+        function_offsets.push_back(function_def_stream.tell());
         auto func = dyn_cast<Function>(
           dyn_cast<ConstantAsMetadata>(fn->getOperand(0).get())->getValue()
         );
@@ -290,6 +294,7 @@ void MetallibWriter::Write(const llvm::Module &module, raw_ostream &OS) {
     if (objectFns) {
       for (auto fn : objectFns->operands()) {
         fn_count++;
+        function_offsets.push_back(function_def_stream.tell());
         auto func = dyn_cast<Function>(
           dyn_cast<ConstantAsMetadata>(fn->getOperand(0).get())->getValue()
         );
@@ -331,6 +336,7 @@ void MetallibWriter::Write(const llvm::Module &module, raw_ostream &OS) {
     if (meshFns) {
       for (auto fn : meshFns->operands()) {
         fn_count++;
+        function_offsets.push_back(function_def_stream.tell());
         auto func = dyn_cast<Function>(
           dyn_cast<ConstantAsMetadata>(fn->getOperand(0).get())->getValue()
         );
@@ -371,13 +377,12 @@ void MetallibWriter::Write(const llvm::Module &module, raw_ostream &OS) {
 
   MTLBHeader header;
   header.Magic = MTLB_Magic;
-  header.FileSize =
-    sizeof(MTLBHeader) + sizeof(uint32_t) /* fn count */ +
-    sizeof(uint32_t) /* constant: function list size */ + function_def.size() +
-    sizeof(MTLBFourCC::EndTag) /* extended header*/
-    + public_metadata.size() + private_metadata.size() + bitcode.size();
+  header.FileSize = sizeof(MTLBHeader) + sizeof(uint32_t) /* fn count */ +
+                    sizeof(uint32_t) * fn_count /* per-entry sizes */ + function_def.size() +
+                    sizeof(MTLBFourCC::EndTag) /* extended header*/
+                    + public_metadata.size() + private_metadata.size() + bitcode.size();
   header.FunctionListOffset = sizeof(MTLBHeader);
-  header.FunctionListSize = function_def.size() + 4;
+  header.FunctionListSize = function_def.size() + sizeof(uint32_t) * fn_count;
   header.PublicMetadataOffset =
     header.FunctionListOffset + header.FunctionListSize +
     sizeof(uint32_t) // extra room for function count
@@ -401,8 +406,14 @@ void MetallibWriter::Write(const llvm::Module &module, raw_ostream &OS) {
   // write to stream
   OS << value(header);
   OS << value(fn_count);
-  OS << value((uint32_t)header.FunctionListSize);
-  OS << function_def;
+  // Every function has its own size prefix. A single prefix for the entire
+  // list only works for one entry and truncates multi-entry libraries.
+  for (size_t i = 0; i < function_offsets.size(); ++i) {
+    const auto begin = function_offsets[i];
+    const auto end = i + 1 < function_offsets.size() ? function_offsets[i + 1] : function_def.size();
+    OS << value(static_cast<uint32_t>(end - begin + sizeof(uint32_t)));
+    OS.write(function_def.data() + begin, end - begin);
+  }
   OS.write("ENDT", 4); // extend header
   OS << public_metadata;
   OS << private_metadata;

@@ -18,6 +18,7 @@ enum airconv_unixcalls {
   unix_sm50_compile_tessellation_hull,
   unix_sm50_compile_tessellation_domain,
   unix_sm50_get_arguments_info = 88,
+  unix_sm50_get_resource_ranges = 195,
 };
 
 struct sm50_initialize_params {
@@ -229,6 +230,22 @@ struct sm50_get_arguments_info_params32 {
 };
 
 COMPATIBLE_STRUCT32(sm50_get_arguments_info_params, 16)
+
+struct sm50_get_resource_ranges_params {
+  sm50_shader_t shader;
+  struct SM50_RESOURCE_RANGE *ranges;
+  uint32_t capacity;
+  uint32_t ret;
+};
+
+struct sm50_get_resource_ranges_params32 {
+  sm50_shader_t shader;
+  uint32_t ranges;
+  uint32_t capacity;
+  uint32_t ret;
+};
+
+COMPATIBLE_STRUCT32(sm50_get_resource_ranges_params, 24)
 
 #define UNIX_CALL(code, params) WINE_UNIX_CALL(unix_##code, params)
 

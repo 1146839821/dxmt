@@ -153,11 +153,11 @@ public:
 private:
   TextureAllocation(
       Texture *descriptor, WMT::Reference<WMT::Buffer> &&buffer, void *mapped_buffer, const WMTTextureInfo &info,
-      unsigned bytes_per_row, Flags<TextureAllocationFlag> flags
+      unsigned bytes_per_row, Flags<TextureAllocationFlag> flags, WMT::Heap heap = {}
   );
   TextureAllocation(
       Texture *descriptor, WMT::Reference<WMT::Texture> &&texture, const WMTTextureInfo &textureDescriptor,
-      Flags<TextureAllocationFlag> flags
+      Flags<TextureAllocationFlag> flags, WMT::Heap heap = {}
   );
 
   void free();
@@ -167,6 +167,7 @@ private:
 
   WMT::Reference<WMT::Texture> obj_;
   WMT::Reference<WMT::Buffer> buffer_;
+  WMT::Reference<WMT::Heap> heap_;
   uint32_t version_ = 0;
   Flags<TextureAllocationFlag> flags_;
   small_vector<TextureViewRef, 4> cached_view_;
@@ -275,6 +276,8 @@ public:
   TextureViewKey fullView;
 
   Rc<TextureAllocation> allocate(Flags<TextureAllocationFlag> flags);
+  Rc<TextureAllocation> allocate(WMT::Heap heap, uint64_t offset, Flags<TextureAllocationFlag> flags);
+  Rc<TextureAllocation> allocatePlacementSparse(Flags<TextureAllocationFlag> flags);
   Rc<TextureAllocation> import(mach_port_t mach_port);
 
   TextureView &view(TextureViewKey key);

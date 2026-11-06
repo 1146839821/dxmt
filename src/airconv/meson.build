@@ -13,9 +13,14 @@ airconv_src = files([
  'dxbc_instructions.cpp',
  'dxbc_signature.cpp',
  'metallib_writer.cpp',
+ 'metallib_patch.cpp',
+ 'msc_typed_buffer_metallib.cpp',
  'nt/air_builder.cpp',
  'nt/dxbc_converter_base.cpp',
  'transforms/lower_16bit_texread.cpp',
+ 'transforms/lower_unsupported_double.cpp',
+ 'transforms/msc_sample_level_lod.cpp',
+ 'transforms/msc_typed_buffer_sidecar.cpp',
  'transforms/simdgroup_implicit_membarrier.cpp',
 ])
 
