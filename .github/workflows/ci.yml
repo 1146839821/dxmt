@@ -677,7 +677,7 @@ jobs:
 
   build-clang-release-arm64-macos:
     runs-on: macos-26
-    needs: setup-llvm-darwin-arm64
+    needs: [setup-llvm-darwin-arm64, setup-metal-toolchain]
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -690,18 +690,49 @@ jobs:
           key: llvm-darwin-${{ env.LLVM_VERSION }}-arm64-macos-${{ hashFiles('patches/llvm/experimental-llvm15-empty-ptrauth.patch', 'patches/llvm/experimental-llvm15-placeholder-cleanup.patch') }}
           path: ./toolchains/llvm-darwin-arm64
 
+      - name: Restore Metal Toolchain
+        uses: actions/cache/restore@v5
+        with:
+          key: metal-toolchain-${{ env.METAL_TOOLCHAIN_VERSION }}-arm64-macos
+          path: ./toolchains/metal-toolchain
+          fail-on-cache-miss: true
+
       - name: Select Xcode Version
         run: sudo xcode-select -s /Applications/Xcode_26.0.app
 
-      - name: Install Metal Toolchain
-        run: sudo xcodebuild -downloadComponent MetalToolchain
+      - name: Configure cached Metal tools
+        run: |
+          set -euo pipefail
+          export DXMT_CI_METAL_BIN="$GITHUB_WORKSPACE/toolchains/metal-toolchain/Metal.xctoolchain/usr/metal/current/bin"
+          test -x "$DXMT_CI_METAL_BIN/metallib"
+          "$DXMT_CI_METAL_BIN/metal" --version
+          echo "DXMT_CI_METAL_BIN=$DXMT_CI_METAL_BIN" >> "$GITHUB_ENV"
+          # Bypass asset-discovery shims while retaining xcrun's selected macOS SDK.
+          cat > "$RUNNER_TEMP/dxmt-xcrun" <<'SH'
+          #!/bin/sh
+          set -eu
+          if [ "$#" -ge 3 ] && [ "$1" = "-sdk" ] && [ "$2" = "macosx" ]; then
+            case "$3" in
+              metal|metallib)
+                tool="$3"
+                shift 3
+                SDKROOT=$(/usr/bin/xcrun -sdk macosx --show-sdk-path)
+                export SDKROOT
+                exec "$DXMT_CI_METAL_BIN/$tool" "$@"
+                ;;
+            esac
+          fi
+          exec /usr/bin/xcrun "$@"
+          SH
+          chmod +x "$RUNNER_TEMP/dxmt-xcrun"
+          printf "[binaries]\nxcrun = '%s'\n" "$RUNNER_TEMP/dxmt-xcrun" > "$RUNNER_TEMP/dxmt-metal.ini"
 
       - name: Install Meson
         run: pip3 install meson==1.10.0 --break-system-packages
 
       - name: Build
         run: |
-          meson setup -Dnative_llvm_path=toolchains/llvm-darwin-arm64 build --buildtype release --prefix $(pwd)/install --strip
+          meson setup --native-file "$RUNNER_TEMP/dxmt-metal.ini" -Dnative_llvm_path=toolchains/llvm-darwin-arm64 build --buildtype release --prefix $(pwd)/install --strip
           meson compile -C build
           meson install -C build
 
