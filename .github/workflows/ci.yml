@@ -532,6 +532,7 @@ jobs:
 
       - name: Test LLVM metadata compatibility
         run: |
+          export PATH="$PATH:$GITHUB_WORKSPACE/toolchains/${{ env.LLVM_MINGW_DIR }}/bin"
           meson setup --reconfigure build -Denable_tests=true
           meson compile -C build llvm-metadata-selftest
           ./build/src/airconv/darwin/llvm-metadata-selftest
@@ -691,6 +692,9 @@ jobs:
 
       - name: Select Xcode Version
         run: sudo xcode-select -s /Applications/Xcode_26.0.app
+
+      - name: Install Metal Toolchain
+        run: sudo xcodebuild -downloadComponent MetalToolchain
 
       - name: Install Meson
         run: pip3 install meson==1.10.0 --break-system-packages
