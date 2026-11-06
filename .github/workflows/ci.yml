@@ -532,7 +532,7 @@ jobs:
 
       - name: Test LLVM metadata compatibility
         run: |
-          meson configure build -Denable_tests=true
+          meson setup --reconfigure build -Denable_tests=true
           meson compile -C build llvm-metadata-selftest
           ./build/src/airconv/darwin/llvm-metadata-selftest
 
